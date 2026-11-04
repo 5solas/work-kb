@@ -81,7 +81,8 @@ def main(argv: list[str]) -> int:
     command = COMMANDS.get(name)
     if command is None:
         raise core.ConfigError(f"알 수 없는 명령: {argv[0]}\n{usage()}")
-    if not command.agent_ok and argv[1:2] != [sub for sub in argv[1:2] if sub in command.agent_ok_sub]:
+    sub_allowed = len(argv) > 1 and argv[1] in command.agent_ok_sub
+    if not command.agent_ok and not sub_allowed:
         core.refuse_if_agent(name)
     module = importlib.import_module(command.module)
     return int(getattr(module, command.func)(argv[1:]) or 0)

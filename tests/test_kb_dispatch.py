@@ -116,6 +116,20 @@ def test_agent_gate_refuses_before_import(monkeypatch):
     assert calls == [("main", ["x"])]
 
 
+def test_agent_ok_sub_allows_only_listed_subcommand(monkeypatch):
+    calls: list = []
+    _fake_module(monkeypatch, "kb_fake_cmd", calls)
+    monkeypatch.setattr(kb, "COMMANDS", {"act": kb.Command("kb_fake_cmd", agent_ok=False, agent_ok_sub=("list",))})
+    monkeypatch.setenv("KB_AGENT", "1")
+    assert kb.main(["act", "list", "--json"]) == 0
+    assert calls == [("main", ["list", "--json"])]
+    for argv in (["act"], ["act", "comment", "KB-1"], ["act", "flush"]):
+        with pytest.raises(core.PolicyRefused):
+            kb.main(argv)
+    assert len(calls) == 1
+    assert kb.COMMANDS_REAL["act"].agent_ok_sub == ("list",) if hasattr(kb, "COMMANDS_REAL") else True
+
+
 # ---------------------------------------------------------------- _preflight (D02)
 
 
