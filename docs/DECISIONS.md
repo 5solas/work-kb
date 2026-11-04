@@ -65,7 +65,14 @@
 
 ## 3. 실측·탐지 기록
 
-(각 Phase 관문 결과를 여기에 추가)
+### Phase 0 관문 (2026-11-05)
+
+- 환경: `.venv` CPython 3.14.10, `.venv313` CPython 3.13.18 (`UV_PYTHON_NO_REGISTRY=1 uv venv --seed --managed-python`). 둘 다 SQLite 3.53.1, FTS5 사용 가능.
+- pytest: 양쪽 venv 모두 337개 통과(`live`·`perf`·`demo`·`packaging` 제외).
+- `tests/mock_all.py` 기동 후 `kb.py init --dev` → `doctor`: ✓ 15, ✗ 0, `-` 9. Jira(홍길동)·Confluence(honggildong)·mock LLM ✓, DeepInfra `main`(Nemotron 3.5 Super VL)·`fallback`(gemma-4-26B-A4B-it) 모델 목록 ✓. 실제 자격 증명 저장소(`WinVaultKeyring`)에 `work-kb/jira`, `work-kb/confluence` 더미값 저장. `config.local.yaml`에 토큰 문자열 없음.
+- 확인된 사실: 열린 파일에 대한 `os.replace`는 PermissionError(재시도로 해결, `test_core.py`). `msvcrt.locking` 경합은 프로세스 2개로 검증. Windows PowerShell 5.1을 pwsh 7에서 띄우면 `PSModulePath`를 지워야 모듈 자동 로드 오류가 없음(doctor가 반영).
+- W0.5 추가 결정: `init --dev`는 `DEEPINFRA_API_KEY`가 없거나 네트워크가 막히면 doctor ✗로 종료 1(테스트는 `KB_LLM_FALLBACK_ORDER=[mock]`과 더미 키로 0을 확인). `KB_INIT_LLM_KEY`가 있으면 main과 같은 참조를 쓰는 프로필도 `keyring:work-kb/llm`으로 바뀜. 기존 설정의 `environment`가 비었거나 잘못돼도 company로 보고 `--dev`를 거부(D44). `llm.enabled: false`여도 company 공개 호스트 ✗(종료 5)는 유지. doctor·probe는 리다이렉트를 따르지 않음. D48 보완: 키 참조가 풀리지 않으면 키 없이 `/models`를 조회하고 "(키 없이 확인)"을 표시.
+- 미확인: 실제 Jira·Confluence DC, 회사 인증서(`ca_bundle`), 스케줄 작업 환경의 keyring.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 
