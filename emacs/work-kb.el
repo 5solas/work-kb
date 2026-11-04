@@ -829,17 +829,115 @@ TEXT가 있으면 바로 추가하고, 없으면 캡처 버퍼를 연다 (C-c C-
       (setq found (cons 'key (cdr found))))
     found))
 
+;;;;; Jira 키 열기 (Phase 2: 캐시가 없거나 stub이면 `kb.py sync --key')
+
+(defconst work-kb--exit-reasons
+  '((1 . "오류") (2 . "인증") (3 . "네트워크") (4 . "설정") (5 . "공개 호스트 거부")
+    (6 . "잠김") (7 . "정책 거부"))
+  "kb.py 종료 코드의 뜻 (core.KbError 하위 클래스).")
+
+(defvar work-kb--syncing-keys nil
+  "지금 `kb.py sync --key'가 돌고 있는 Jira 키 (같은 키를 두 번 돌리지 않는다).")
+
+(defun work-kb--exit-reason (code)
+  (format "종료 %s: %s" code (or (alist-get code work-kb--exit-reasons) "알 수 없음")))
+
+(defun work-kb--jira-file (key)
+  (expand-file-name (format "jira/%s.md" key) (work-kb--vault)))
+
+(defun work-kb--sync-buffer-name (key)
+  (format "*work-kb-sync %s*" key))
+
+(defun work-kb--jira-stub-p (file)
+  "FILE(jira/KEY.md)의 front matter에 `stub: true'가 있으면 t.
+앞 8KB만 UTF-8로 읽는다. BOM·CRLF를 허용하고, front matter 밖의 `stub:'은 보지 않는다."
+  (with-temp-buffer
+    (let ((coding-system-for-read 'utf-8))
+      (insert-file-contents file nil 0 8192))
+    (goto-char (point-min))
+    (when (eq (char-after) ?﻿) (forward-char 1))
+    (when (looking-at "---[ \t]*\r?$")
+      (forward-line 1)
+      (let ((case-fold-search t) found done)
+        (while (and (not done) (not (eobp)))
+          (cond
+           ((looking-at "\\(?:---\\|\\.\\.\\.\\)[ \t]*\r?$") (setq done t))
+           ((looking-at "stub[ \t]*:[ \t]*['\"]?\\(?:true\\|yes\\|on\\)['\"]?[ \t]*\\(?:#.*\\)?\r?$")
+            (setq found t done t)))
+          (forward-line 1))
+        found))))
+
+(defun work-kb--visit-jira (file)
+  "jira FILE을 지금 창에 연다. 이미 연 버퍼가 디스크보다 낡았고 수정이 없으면 묻지 않고
+다시 읽는다 (jira/는 기계 소유). 그 버퍼를 돌려준다."
+  (let ((live (find-buffer-visiting file)))
+    (when (and live
+               (not (buffer-modified-p live))
+               (not (verify-visited-file-modtime live)))
+      (with-current-buffer live
+        (let ((coding-system-for-read 'utf-8)) (revert-buffer t t t))))
+    (if live
+        (pop-to-buffer-same-window live)
+      (let ((coding-system-for-read 'utf-8)) (find-file file)))
+    (window-buffer (selected-window))))
+
+(defun work-kb--key-fallback (key file why)
+  "동기화 실패 뒤: FILE이 있으면 그대로 열고, 없으면 `kb.py link --stub KEY'로 만든 뒤 연다.
+WHY는 실패 이유 (메시지에 넣는다)."
+  (let ((sync-buf (work-kb--sync-buffer-name key)))
+    (if (file-exists-p file)
+        (progn
+          (work-kb--visit-jira file)
+          (message "work-kb: %s 동기화 실패 (%s). 저장된 페이지를 엽니다. %s 버퍼를 보세요"
+                   key why sync-buf))
+      (work-kb--run (work-kb--kb-args "link" "--stub" key)
+                    :on-exit
+                    (lambda (_proc code)
+                      (if (file-exists-p file)
+                          (progn
+                            (work-kb--visit-jira file)
+                            (message "work-kb: %s 동기화 실패 (%s). stub을 만들어 엽니다. %s 버퍼를 보세요"
+                                     key why sync-buf))
+                        (message "work-kb: %s 동기화 실패 (%s), stub 생성도 실패 (%s). %s, %s 버퍼를 보세요"
+                                 key why (work-kb--exit-reason code) sync-buf work-kb-output-buffer)))))))
+
+(defun work-kb--after-key-sync (key file code)
+  "`kb.py sync --key KEY'가 CODE로 끝난 뒤: 받아 왔으면 열고, 아니면 `work-kb--key-fallback'."
+  (setq work-kb--syncing-keys (delete key work-kb--syncing-keys))
+  (let ((sync-buf (get-buffer (work-kb--sync-buffer-name key))))
+    (cond
+     ((and (eq code 0) (file-exists-p file) (not (work-kb--jira-stub-p file)))
+      (when (buffer-live-p sync-buf) (kill-buffer sync-buf))
+      (work-kb--visit-jira file)
+      (message "work-kb: %s 동기화했습니다" key))
+     (t
+      (let ((last (work-kb--last-line sync-buf)))
+        (work-kb--key-fallback
+         key file
+         (concat (if (eq code 0) "Jira에서 받아 오지 못함" (work-kb--exit-reason code))
+                 (if last (concat " — " last) ""))))))))
+
 (defun work-kb--open-key (key)
-  "jira/KEY.md를 연다. 없으면 `kb.py link --stub KEY'로 스텁을 만든 뒤 연다 (D28)."
-  (let ((file (expand-file-name (format "jira/%s.md" key) (work-kb--vault))))
-    (unless (file-exists-p file)
-      (message "work-kb: %s 캐시가 없어 스텁을 만듭니다…" key)
-      (let ((code (work-kb--run-sync (work-kb--kb-args "link" "--stub" key))))
-        (unless (eq code 0)
-          (message "work-kb: 스텁 생성 실패 (종료 %s). %s 버퍼를 보세요" code work-kb-output-buffer))))
-    (unless (file-exists-p file)
-      (user-error "%s 페이지를 만들지 못했습니다" key))
-    (find-file file)))
+  "jira/KEY.md를 연다. 없거나 stub(`stub: true')이면 `kb.py sync --key KEY'를 비동기로
+돌리고 센티널에서 연다. 동기화가 실패하면 stub(없으면 `kb.py link --stub KEY'로 만든다)을
+열고 이유를 알린다 (D28). 바로 열었으면 그 버퍼, 동기화를 시작했으면 프로세스를 돌려준다."
+  (let ((file (work-kb--jira-file key)))
+    (cond
+     ((and (file-exists-p file) (not (work-kb--jira-stub-p file)))
+      (work-kb--visit-jira file))
+     ((member key work-kb--syncing-keys)
+      (message "work-kb: %s 동기화가 이미 진행 중입니다 (끝나면 열립니다)" key)
+      nil)
+     (t
+      (push key work-kb--syncing-keys)
+      (condition-case err
+          (prog1 (work-kb--run (work-kb--kb-args "sync" "--key" key)
+                               :buffer (work-kb--sync-buffer-name key)
+                               :on-exit (lambda (_proc code) (work-kb--after-key-sync key file code)))
+            (message "work-kb: %s 동기화 중… (끝나면 엽니다)" key))
+        (error
+         (setq work-kb--syncing-keys (delete key work-kb--syncing-keys))
+         (signal (car err) (cdr err))))))))
 
 (defun work-kb--resolve-link (target)
   "위키링크 대상의 파일 경로. 못 찾으면 nil."
@@ -859,7 +957,8 @@ TEXT가 있으면 바로 추가하고, 없으면 캡처 버퍼를 연다 (C-c C-
                                  full (concat "\\`" (regexp-quote base) "\\'"))))))))
 
 (defun work-kb-open-at-point ()
-  "커서 위치의 KEY-123 / [[…]] / @이름 페이지를 연다."
+  "커서 위치의 KEY-123 / [[…]] / @이름 페이지를 연다.
+Jira 키는 캐시가 없거나 stub이면 먼저 `kb.py sync --key'로 받아 온다 (비동기)."
   (interactive)
   (let ((thing (work-kb--thing-at-point)))
     (pcase thing

@@ -149,12 +149,36 @@ def test_empty_query_is_an_error(vault):
         search.main(["--root", str(vault)])
 
 
-def test_fts_hook_is_a_stub_until_phase2(notes_vault, monkeypatch):
+def test_fts_search_uses_cache_and_falls_back_when_broken(notes_vault):
+    from lib import fts
+
     (notes_vault / "jira" / "KB-12.md").write_text("# KB-12 캐시\n", encoding="utf-8")
-    (notes_vault / "jira" / ".cache.sqlite").write_bytes(b"")
     cfg = config.load(notes_vault)
+    # 캐시 없음 → 파일 스캔
+    assert ("jira/KB-12.md", 1, "# KB-12 캐시") in _hits(notes_vault, "캐시", "jira")
+    # 캐시 있음 → FTS(한국어 접두: 캐시 → 캐시를), 결과는 파일 단위(줄 1)
+    fts.upsert(
+        cfg,
+        [
+            {"key": "KB-12", "project": "KB", "summary": "캐시를 확정", "status": "In Progress", "status_category": "indeterminate", "assignee": "홍길동", "updated": "2026-11-04", "due": "", "body": "설명"},
+            {"key": "OPS-3", "project": "OPS", "summary": "배포", "status": "Blocked", "status_category": "indeterminate", "assignee": "홍길동", "updated": "2026-11-03", "due": "", "body": "체크리스트"},
+        ],
+    )
+    hits = search.fts_search(cfg, ["캐시"])
+    assert hits is not None and [(h.path, h.line) for h in hits] == [("jira/KB-12.md", 1)]
+    assert "KB-12" in hits[0].text and "캐시를 확정" in hits[0].text
+    assert [h.path for h in search.fts_search(cfg, ["kb-12"])] == ["jira/KB-12.md"]
+    assert search.fts_search(cfg, ["없는낱말"]) == []
+    assert _hits(notes_vault, "캐시", "jira") == [("jira/KB-12.md", 1, hits[0].text)]  # 캐시가 있으면 파일을 훑지 않음
+    # 손상된 캐시 → None → 파일 스캔
+    (notes_vault / "jira" / ".cache.sqlite").write_bytes(b"garbage")
     assert search.fts_search(cfg, ["캐시"]) is None
     assert ("jira/KB-12.md", 1, "# KB-12 캐시") in _hits(notes_vault, "캐시", "jira")
+
+
+def test_fts_hook_is_called_only_when_cache_exists(notes_vault, monkeypatch):
+    (notes_vault / "jira" / "KB-12.md").write_text("# KB-12 캐시\n", encoding="utf-8")
+    (notes_vault / "jira" / ".cache.sqlite").write_bytes(b"")
 
     calls = []
 

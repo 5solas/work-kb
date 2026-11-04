@@ -126,11 +126,23 @@ def test_direct_call_refused_in_agent_session(monkeypatch, vault):
     assert not _local(vault).exists()
 
 
-@pytest.mark.parametrize("args", [(), ("--section", "jira"), ("--from-env", "--non-interactive")])
-def test_without_dev_is_phase_message(run_kb, vault, args):
-    result = run_kb("init", *args)
+def test_without_dev_wizard_cancels_on_eof(run_kb, vault):
+    # Phase 2부터 init은 대화형 마법사. 하위 프로세스는 stdin이 닫혀 있어 첫 질문에서 취소(종료 1)된다.
+    result = run_kb("init")
+    assert result.returncode == 1
+    assert not _local(vault).exists()
+
+
+def test_section_without_config_is_config_error(run_kb, vault):
+    result = run_kb("init", "--section", "jira")
     assert result.returncode == 4
-    assert "대화형 마법사는 Phase 2에서 추가됩니다" in result.stdout
+    assert "config.local.yaml" in result.stderr and "init" in result.stderr
+    assert not _local(vault).exists()
+
+
+def test_from_env_without_values_fails_without_writing(run_kb, vault):
+    result = run_kb("init", "--from-env", "--non-interactive")
+    assert result.returncode in (2, 3, 4)
     assert not _local(vault).exists()
 
 

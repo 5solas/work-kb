@@ -108,11 +108,22 @@ def scan_file(rel: str, data: bytes, terms: list[str]) -> Iterator[Hit]:
 
 
 def fts_search(cfg: Config, terms: list[str]) -> list[Hit] | None:
-    """`jira/.cache.sqlite`의 FTS5 검색. None이면 jira 캐시를 직접 훑는다.
+    """`jira/.cache.sqlite`의 FTS5 검색(D63: 낱말마다 `"term"*`, OperationalError·0건이면 LIKE).
 
-    TODO(Phase 2): D63 — 낱말마다 `"term"*`로 인용, OperationalError나 0건이면 LIKE.
+    캐시를 열지 못하면 None을 돌려주고, 호출자가 jira/*.md를 직접 훑는다.
+    결과 줄 번호는 1(파일 단위 결과)이고 본문은 `키 · 상태 · 제목`이다.
     """
-    return None
+    from lib import fts
+
+    try:
+        rows = fts.search(cfg, terms)
+    except Exception:  # 캐시 손상·스키마 불일치 등 → 파일 스캔으로
+        return None
+    hits: list[Hit] = []
+    for row in rows:
+        summary = " · ".join(str(row.get(name) or "") for name in ("key", "status", "summary") if row.get(name))
+        hits.append(Hit(str(row.get("path") or f"jira/{row.get('key')}.md"), 1, summary))
+    return hits
 
 
 # ---------------------------------------------------------------- 검색

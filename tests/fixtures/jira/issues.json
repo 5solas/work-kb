@@ -1,0 +1,1356 @@
+[
+ {
+  "id": "10012",
+  "key": "KB-12",
+  "fields": {
+   "summary": "캐시 front matter 확정",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "3",
+    "name": "In Progress",
+    "statusCategory": {
+     "id": 4,
+     "key": "indeterminate",
+     "colorName": "yellow",
+     "name": "In Progress"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "cache",
+    "schema"
+   ],
+   "components": [],
+   "created": "2026-10-28T09:00:00.000+0900",
+   "updated": "2026-11-04T16:05:11.000+0900",
+   "duedate": "2026-11-06",
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "h2. 배경\njira 캐시 파일의 *front matter* 필드를 확정한다. 필드는 _최소_로 유지한다.\n\nh2. 필드\n* key, summary, status\n* status_category\n** new / indeterminate / done 세 값만\n* updated는 {{+09:00}} 오프셋 그대로\n\n{noformat}\nkey: KB-12\nstatus: In Progress\n{noformat}\n\n참고: [설계 메모|http://wiki.example.invalid/kb/cache-schema]",
+   "customfield_10020": [
+    "com.atlassian.greenhopper.service.sprint.Sprint@5c1d2e[id=5,rapidViewId=2,state=ACTIVE,name=KB 스프린트 7,startDate=2026-10-27T09:00:00.000+09:00,endDate=2026-11-07T18:00:00.000+09:00,completeDate=<null>,activatedDate=2026-10-27T09:10:00.000+09:00,sequence=5,goal=캐시 마무리, 문서 정리,autoStartStop=false,synced=false]"
+   ],
+   "watches": {
+    "watchCount": 2,
+    "isWatching": true
+   },
+   "comment": {
+    "comments": [
+     {
+      "id": "20001",
+      "author": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "body": "필드는 최소로 가자",
+      "updateAuthor": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-01T10:02:00.000+0900",
+      "updated": "2026-11-01T10:02:00.000+0900"
+     },
+     {
+      "id": "20002",
+      "author": {
+       "name": "honggildong",
+       "key": "honggildong",
+       "displayName": "홍길동",
+       "emailAddress": "hong@example.invalid",
+       "active": true
+      },
+      "body": "좋습니다. sprint는 이름만 넣겠습니다.\n상태 범주는 키로 저장합니다.",
+      "updateAuthor": {
+       "name": "honggildong",
+       "key": "honggildong",
+       "displayName": "홍길동",
+       "emailAddress": "hong@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-01T11:15:30.000+0900",
+      "updated": "2026-11-01T11:15:30.000+0900"
+     },
+     {
+      "id": "20003",
+      "author": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "body": "*due*가 없으면 빈 값으로 두세요",
+      "updateAuthor": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-02T09:40:00.000+0900",
+      "updated": "2026-11-02T09:40:00.000+0900"
+     },
+     {
+      "id": "20004",
+      "author": {
+       "name": "honggildong",
+       "key": "honggildong",
+       "displayName": "홍길동",
+       "emailAddress": "hong@example.invalid",
+       "active": true
+      },
+      "body": "{code}\nupdated: 2026-11-03T17:20:00+09:00\n{code}\n예시 추가했습니다",
+      "updateAuthor": {
+       "name": "honggildong",
+       "key": "honggildong",
+       "displayName": "홍길동",
+       "emailAddress": "hong@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-03T17:20:00.000+0900",
+      "updated": "2026-11-03T17:20:00.000+0900"
+     },
+     {
+      "id": "20005",
+      "author": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "body": "확인했습니다. 이번 스프린트에 마무리합시다.",
+      "updateAuthor": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-04T16:05:11.000+0900",
+      "updated": "2026-11-04T16:05:11.000+0900"
+     }
+    ],
+    "maxResults": 5,
+    "total": 5,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "10003",
+  "key": "KB-3",
+  "fields": {
+   "summary": "캐시 폴더 구조 정리",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "10001",
+    "name": "Done",
+    "statusCategory": {
+     "id": 3,
+     "key": "done",
+     "colorName": "green",
+     "name": "Done"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "cache"
+   ],
+   "components": [
+    {
+     "id": "11000",
+     "name": "sync"
+    }
+   ],
+   "created": "2026-10-06T10:00:00.000+0900",
+   "updated": "2026-10-20T11:30:00.000+0900",
+   "duedate": "2026-10-24",
+   "resolution": {
+    "id": "10000",
+    "name": "완료"
+   },
+   "resolutiondate": "2026-10-20T11:30:00.000+0900",
+   "description": "jira/ 아래에 이슈마다 파일 하나.\n* jira/KEY.md\n* jira/_views/이름.md",
+   "customfield_10020": [
+    "com.atlassian.greenhopper.service.sprint.Sprint@3f2a1b[id=4,rapidViewId=2,state=CLOSED,name=KB 스프린트 6,startDate=2026-10-13T09:00:00.000+09:00,endDate=2026-10-24T18:00:00.000+09:00,completeDate=2026-10-24T18:30:00.000+09:00,activatedDate=2026-10-13T09:05:00.000+09:00,sequence=4,goal=,autoStartStop=false,synced=false]"
+   ],
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [
+     {
+      "id": "20006",
+      "author": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "body": "완료 확인",
+      "updateAuthor": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "created": "2026-10-20T11:30:00.000+0900",
+      "updated": "2026-10-20T11:30:00.000+0900"
+     }
+    ],
+    "maxResults": 1,
+    "total": 1,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "10005",
+  "key": "KB-5",
+  "fields": {
+   "summary": "마크업 변환기 초안",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "3",
+    "name": "In Progress",
+    "statusCategory": {
+     "id": 4,
+     "key": "indeterminate",
+     "colorName": "yellow",
+     "name": "In Progress"
+    }
+   },
+   "priority": {
+    "id": "2",
+    "name": "High"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "markup"
+   ],
+   "components": [
+    {
+     "id": "11000",
+     "name": "sync"
+    }
+   ],
+   "created": "2026-10-15T14:20:00.000+0900",
+   "updated": "2026-11-03T18:20:45.000+0900",
+   "duedate": null,
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "Jira wiki markup을 마크다운으로 바꾼다.\n\n{code:python}\ndef to_markdown(text):\n    return text  # *별표* 그대로\n{code}\n\n# 제목 변환\n# 목록 변환\n## 중첩 목록",
+   "customfield_10020": [
+    "com.atlassian.greenhopper.service.sprint.Sprint@3f2a1b[id=4,rapidViewId=2,state=CLOSED,name=KB 스프린트 6,startDate=2026-10-13T09:00:00.000+09:00,endDate=2026-10-24T18:00:00.000+09:00,completeDate=2026-10-24T18:30:00.000+09:00,activatedDate=2026-10-13T09:05:00.000+09:00,sequence=4,goal=,autoStartStop=false,synced=false]",
+    "com.atlassian.greenhopper.service.sprint.Sprint@5c1d2e[id=5,rapidViewId=2,state=ACTIVE,name=KB 스프린트 7,startDate=2026-10-27T09:00:00.000+09:00,endDate=2026-11-07T18:00:00.000+09:00,completeDate=<null>,activatedDate=2026-10-27T09:10:00.000+09:00,sequence=5,goal=캐시 마무리, 문서 정리,autoStartStop=false,synced=false]"
+   ],
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "10007",
+  "key": "KB-7",
+  "fields": {
+   "summary": "증분 동기화 시각 계산",
+   "issuetype": {
+    "id": "10004",
+    "name": "Bug",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "10102",
+    "name": "Blocked",
+    "statusCategory": {
+     "id": 4,
+     "key": "indeterminate",
+     "colorName": "yellow",
+     "name": "In Progress"
+    }
+   },
+   "priority": {
+    "id": "2",
+    "name": "High"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "sync"
+   ],
+   "components": [],
+   "created": "2026-10-21T09:30:00.000+0900",
+   "updated": "2026-11-02T10:15:00.000+0900",
+   "duedate": "2026-11-03",
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "증분 동기화가 시간대 차이로 이슈를 놓친다.\n\n||경우||기대||실제||\n|프로필 UTC|놓침 없음|9시간 누락|\n|프로필 서울|놓침 없음|정상|\n\nbq. 상대 시간(-Nm)으로 바꾸면 해결될 것 같다.",
+   "customfield_10020": [
+    "com.atlassian.greenhopper.service.sprint.Sprint@5c1d2e[id=5,rapidViewId=2,state=ACTIVE,name=KB 스프린트 7,startDate=2026-10-27T09:00:00.000+09:00,endDate=2026-11-07T18:00:00.000+09:00,completeDate=<null>,activatedDate=2026-10-27T09:10:00.000+09:00,sequence=5,goal=캐시 마무리, 문서 정리,autoStartStop=false,synced=false]"
+   ],
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [
+     {
+      "id": "20007",
+      "author": {
+       "name": "honggildong",
+       "key": "honggildong",
+       "displayName": "홍길동",
+       "emailAddress": "hong@example.invalid",
+       "active": true
+      },
+      "body": "서버 프로필 시간대 확인이 필요합니다.",
+      "updateAuthor": {
+       "name": "honggildong",
+       "key": "honggildong",
+       "displayName": "홍길동",
+       "emailAddress": "hong@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-01T15:00:00.000+0900",
+      "updated": "2026-11-01T15:00:00.000+0900"
+     },
+     {
+      "id": "20008",
+      "author": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "body": "관리자 답변 기다리는 중이라 막힘으로 바꿉니다.",
+      "updateAuthor": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-02T10:15:00.000+0900",
+      "updated": "2026-11-02T10:15:00.000+0900"
+     }
+    ],
+    "maxResults": 2,
+    "total": 2,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "10009",
+  "key": "KB-9",
+  "fields": {
+   "summary": "Obsidian Bases 뷰 확인",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "10101",
+    "name": "In Review",
+    "statusCategory": {
+     "id": 4,
+     "key": "indeterminate",
+     "colorName": "yellow",
+     "name": "In Progress"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "obsidian"
+   ],
+   "components": [
+    {
+     "id": "11000",
+     "name": "view"
+    }
+   ],
+   "created": "2026-10-22T13:00:00.000+0900",
+   "updated": "2026-11-04T09:40:00.000+0900",
+   "duedate": "2026-11-06",
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "일감.base 와 엔티티.base 를 앱에서 열어 확인한다.\n* 필터\n* 정렬\n* 묶음",
+   "customfield_10020": null,
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [
+     {
+      "id": "20009",
+      "author": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "body": "검토 요청드립니다.",
+      "updateAuthor": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-04T09:40:00.000+0900",
+      "updated": "2026-11-04T09:40:00.000+0900"
+     }
+    ],
+    "maxResults": 1,
+    "total": 1,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "10010",
+  "key": "KB-10",
+  "fields": {
+   "summary": "검색 색인 한국어 접두 검색",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "10000",
+    "name": "To Do",
+    "statusCategory": {
+     "id": 2,
+     "key": "new",
+     "colorName": "blue-gray",
+     "name": "To Do"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "search",
+    "fts"
+   ],
+   "components": [],
+   "created": "2026-10-25T10:00:00.000+0900",
+   "updated": "2026-10-30T14:00:00.000+0900",
+   "duedate": "2026-11-04",
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "'캐시'로 검색하면 '캐시를'도 찾아야 한다. FTS5 unicode61 + 접두 검색.",
+   "customfield_10020": null,
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "10011",
+  "key": "KB-11",
+  "fields": {
+   "summary": "뷰 표 형식 맞추기",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "10000",
+    "name": "To Do",
+    "statusCategory": {
+     "id": 2,
+     "key": "new",
+     "colorName": "blue-gray",
+     "name": "To Do"
+    }
+   },
+   "priority": {
+    "id": "4",
+    "name": "Low"
+   },
+   "assignee": null,
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "view"
+   ],
+   "components": [],
+   "created": "2026-10-29T17:45:30.000+0900",
+   "updated": "2026-10-29T17:45:30.000+0900",
+   "duedate": null,
+   "resolution": null,
+   "resolutiondate": null,
+   "description": null,
+   "customfield_10020": [
+    "com.atlassian.greenhopper.service.sprint.Sprint@7e8f90[id=6,rapidViewId=2,state=FUTURE,name=KB 스프린트 8,startDate=<null>,endDate=<null>,completeDate=<null>,activatedDate=<null>,sequence=6,goal=<null>,autoStartStop=false,synced=false]"
+   ],
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "10014",
+  "key": "KB-14",
+  "fields": {
+   "summary": "프로젝트 페이지 일감 표",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "10101",
+    "name": "In Review",
+    "statusCategory": {
+     "id": 4,
+     "key": "indeterminate",
+     "colorName": "yellow",
+     "name": "In Progress"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "labels": [],
+   "components": [
+    {
+     "id": "11000",
+     "name": "view"
+    }
+   ],
+   "created": "2026-10-24T11:00:00.000+0900",
+   "updated": "2026-11-01T13:00:00.000+0900",
+   "duedate": null,
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "wiki/projects/KB.md 의 issues 구역에 열린 일감 표를 넣는다.",
+   "customfield_10020": [
+    "com.atlassian.greenhopper.service.sprint.Sprint@5c1d2e[id=5,rapidViewId=2,state=ACTIVE,name=KB 스프린트 7,startDate=2026-10-27T09:00:00.000+09:00,endDate=2026-11-07T18:00:00.000+09:00,completeDate=<null>,activatedDate=2026-10-27T09:10:00.000+09:00,sequence=5,goal=캐시 마무리, 문서 정리,autoStartStop=false,synced=false]"
+   ],
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "10015",
+  "key": "KB-15",
+  "fields": {
+   "summary": "오래된 설정 정리",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10000",
+    "key": "KB",
+    "name": "지식 저장고"
+   },
+   "status": {
+    "id": "10001",
+    "name": "Done",
+    "statusCategory": {
+     "id": 3,
+     "key": "done",
+     "colorName": "green",
+     "name": "Done"
+    }
+   },
+   "priority": {
+    "id": "4",
+    "name": "Low"
+   },
+   "assignee": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "config"
+   ],
+   "components": [],
+   "created": "2026-09-01T09:00:00.000+0900",
+   "updated": "2026-09-15T10:00:00.000+0900",
+   "duedate": null,
+   "resolution": {
+    "id": "10000",
+    "name": "완료"
+   },
+   "resolutiondate": "2026-09-15T10:00:00.000+0900",
+   "description": "쓰지 않는 설정 키를 지운다.",
+   "customfield_10020": null,
+   "watches": {
+    "watchCount": 2,
+    "isWatching": true
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "20001",
+  "key": "OPS-1",
+  "fields": {
+   "summary": "야간 배치 점검 절차",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10001",
+    "key": "OPS",
+    "name": "운영"
+   },
+   "status": {
+    "id": "10001",
+    "name": "Done",
+    "statusCategory": {
+     "id": 3,
+     "key": "done",
+     "colorName": "green",
+     "name": "Done"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "batch"
+   ],
+   "components": [],
+   "created": "2026-08-10T09:00:00.000+0900",
+   "updated": "2026-08-20T09:00:00.000+0900",
+   "duedate": "2026-08-21",
+   "resolution": {
+    "id": "10000",
+    "name": "완료"
+   },
+   "resolutiondate": "2026-08-20T09:00:00.000+0900",
+   "description": "h3. 절차\n# 로그 확인\n# 재시작\n# 결과 기록",
+   "customfield_10020": null,
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "20002",
+  "key": "OPS-2",
+  "fields": {
+   "summary": "백업 스토리지 용량 경고",
+   "issuetype": {
+    "id": "10004",
+    "name": "Bug",
+    "subtask": false
+   },
+   "project": {
+    "id": "10001",
+    "key": "OPS",
+    "name": "운영"
+   },
+   "status": {
+    "id": "3",
+    "name": "In Progress",
+    "statusCategory": {
+     "id": 4,
+     "key": "indeterminate",
+     "colorName": "yellow",
+     "name": "In Progress"
+    }
+   },
+   "priority": {
+    "id": "1",
+    "name": "Highest"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "backup",
+    "storage"
+   ],
+   "components": [
+    {
+     "id": "11000",
+     "name": "인프라"
+    }
+   ],
+   "created": "2026-10-30T08:00:00.000+0900",
+   "updated": "2026-11-04T11:22:33.000+0900",
+   "duedate": "2026-11-05",
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "*경고*: 백업 볼륨 사용률 85% 초과.\n\n{noformat}\n/backup  85%  1.7T/2.0T\n{noformat}\n\n* 오래된 스냅숏 정리\n* 보존 정책 검토 [정책 문서|http://wiki.example.invalid/ops/backup-policy]",
+   "customfield_10020": [
+    "com.atlassian.greenhopper.service.sprint.Sprint@1a2b3c[id=8,rapidViewId=3,state=ACTIVE,name=OPS 스프린트 3, 야간,startDate=2026-10-29T09:00:00.000+09:00,endDate=2026-11-11T18:00:00.000+09:00,completeDate=<null>,activatedDate=2026-10-29T09:00:00.000+09:00,sequence=8,goal=백업 안정화,autoStartStop=false,synced=false]"
+   ],
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [
+     {
+      "id": "20010",
+      "author": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "body": "오늘 안에 정리 부탁합니다.",
+      "updateAuthor": {
+       "name": "kimcs",
+       "key": "kimcs",
+       "displayName": "김철수",
+       "emailAddress": "kim@example.invalid",
+       "active": true
+      },
+      "created": "2026-11-04T11:22:33.000+0900",
+      "updated": "2026-11-04T11:22:33.000+0900"
+     }
+    ],
+    "maxResults": 1,
+    "total": 1,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "20004",
+  "key": "OPS-4",
+  "fields": {
+   "summary": "인증서 갱신 일정",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10001",
+    "key": "OPS",
+    "name": "운영"
+   },
+   "status": {
+    "id": "10000",
+    "name": "To Do",
+    "statusCategory": {
+     "id": 2,
+     "key": "new",
+     "colorName": "blue-gray",
+     "name": "To Do"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "cert"
+   ],
+   "components": [
+    {
+     "id": "11000",
+     "name": "인프라"
+    }
+   ],
+   "created": "2026-10-20T15:00:00.000+0900",
+   "updated": "2026-10-31T08:30:00.000+0900",
+   "duedate": "2026-11-10",
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "사내 인증서 만료 전 갱신. 대상 목록은 첨부 표 참고.\n||호스트||만료일||\n|app.example.invalid|2026-11-20|",
+   "customfield_10020": null,
+   "watches": {
+    "watchCount": 2,
+    "isWatching": true
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "20007",
+  "key": "OPS-7",
+  "fields": {
+   "summary": "배포 승인 대기",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10001",
+    "key": "OPS",
+    "name": "운영"
+   },
+   "status": {
+    "id": "10102",
+    "name": "Blocked",
+    "statusCategory": {
+     "id": 4,
+     "key": "indeterminate",
+     "colorName": "yellow",
+     "name": "In Progress"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "deploy"
+   ],
+   "components": [],
+   "created": "2026-10-28T10:00:00.000+0900",
+   "updated": "2026-11-03T09:05:00.000+0900",
+   "duedate": null,
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "승인자 부재로 배포가 막혔다.",
+   "customfield_10020": [
+    "com.atlassian.greenhopper.service.sprint.Sprint@1a2b3c[id=8,rapidViewId=3,state=ACTIVE,name=OPS 스프린트 3, 야간,startDate=2026-10-29T09:00:00.000+09:00,endDate=2026-11-11T18:00:00.000+09:00,completeDate=<null>,activatedDate=2026-10-29T09:00:00.000+09:00,sequence=8,goal=백업 안정화,autoStartStop=false,synced=false]"
+   ],
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "20008",
+  "key": "OPS-8",
+  "fields": {
+   "summary": "모니터링 대시보드 정리",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10001",
+    "key": "OPS",
+    "name": "운영"
+   },
+   "status": {
+    "id": "10101",
+    "name": "In Review",
+    "statusCategory": {
+     "id": 4,
+     "key": "indeterminate",
+     "colorName": "yellow",
+     "name": "In Progress"
+    }
+   },
+   "priority": {
+    "id": "4",
+    "name": "Low"
+   },
+   "assignee": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "labels": [
+    "monitoring"
+   ],
+   "components": [
+    {
+     "id": "11000",
+     "name": "인프라"
+    }
+   ],
+   "created": "2026-10-15T16:00:00.000+0900",
+   "updated": "2026-10-27T16:00:00.000+0900",
+   "duedate": null,
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "h2. 정리 대상\n* 쓰지 않는 패널\n* 중복 알림",
+   "customfield_10020": null,
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ },
+ {
+  "id": "20010",
+  "key": "OPS-10",
+  "fields": {
+   "summary": "로그 보존 기간 조정",
+   "issuetype": {
+    "id": "10002",
+    "name": "Task",
+    "subtask": false
+   },
+   "project": {
+    "id": "10001",
+    "key": "OPS",
+    "name": "운영"
+   },
+   "status": {
+    "id": "10000",
+    "name": "To Do",
+    "statusCategory": {
+     "id": 2,
+     "key": "new",
+     "colorName": "blue-gray",
+     "name": "To Do"
+    }
+   },
+   "priority": {
+    "id": "3",
+    "name": "Medium"
+   },
+   "assignee": {
+    "name": "honggildong",
+    "key": "honggildong",
+    "displayName": "홍길동",
+    "emailAddress": "hong@example.invalid",
+    "active": true
+   },
+   "reporter": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "creator": {
+    "name": "kimcs",
+    "key": "kimcs",
+    "displayName": "김철수",
+    "emailAddress": "kim@example.invalid",
+    "active": true
+   },
+   "labels": [],
+   "components": [],
+   "created": "2026-10-28T10:10:10.000+0900",
+   "updated": "2026-10-28T10:10:10.000+0900",
+   "duedate": "2026-11-04",
+   "resolution": null,
+   "resolutiondate": null,
+   "description": "로그 보존 기간을 _90일_에서 _30일_로 줄인다.",
+   "customfield_10020": null,
+   "watches": {
+    "watchCount": 1,
+    "isWatching": false
+   },
+   "comment": {
+    "comments": [],
+    "maxResults": 0,
+    "total": 0,
+    "startAt": 0
+   }
+  }
+ }
+]

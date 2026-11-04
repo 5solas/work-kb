@@ -1,0 +1,146 @@
+[
+ {
+  "id": "summary",
+  "name": "Summary",
+  "custom": false,
+  "orderable": true,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "summary"
+  ],
+  "schema": {
+   "type": "string",
+   "system": "summary"
+  }
+ },
+ {
+  "id": "status",
+  "name": "Status",
+  "custom": false,
+  "orderable": false,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "status"
+  ],
+  "schema": {
+   "type": "status",
+   "system": "status"
+  }
+ },
+ {
+  "id": "assignee",
+  "name": "Assignee",
+  "custom": false,
+  "orderable": true,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "assignee"
+  ],
+  "schema": {
+   "type": "user",
+   "system": "assignee"
+  }
+ },
+ {
+  "id": "reporter",
+  "name": "Reporter",
+  "custom": false,
+  "orderable": true,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "reporter"
+  ],
+  "schema": {
+   "type": "user",
+   "system": "reporter"
+  }
+ },
+ {
+  "id": "updated",
+  "name": "Updated",
+  "custom": false,
+  "orderable": false,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "updated",
+   "updatedDate"
+  ],
+  "schema": {
+   "type": "datetime",
+   "system": "updated"
+  }
+ },
+ {
+  "id": "duedate",
+  "name": "Due Date",
+  "custom": false,
+  "orderable": true,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "due",
+   "duedate"
+  ],
+  "schema": {
+   "type": "date",
+   "system": "duedate"
+  }
+ },
+ {
+  "id": "customfield_10014",
+  "name": "Epic Link",
+  "custom": true,
+  "orderable": true,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "cf[10014]",
+   "Epic Link"
+  ],
+  "schema": {
+   "type": "any",
+   "custom": "com.pyxis.greenhopper.jira:gh-epic-link",
+   "customId": 10014
+  }
+ },
+ {
+  "id": "customfield_10020",
+  "name": "Sprint",
+  "custom": true,
+  "orderable": true,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "cf[10020]",
+   "Sprint"
+  ],
+  "schema": {
+   "type": "array",
+   "items": "string",
+   "custom": "com.pyxis.greenhopper.jira:gh-sprint",
+   "customId": 10020
+  }
+ },
+ {
+  "id": "customfield_10026",
+  "name": "Story Points",
+  "custom": true,
+  "orderable": true,
+  "navigable": true,
+  "searchable": true,
+  "clauseNames": [
+   "cf[10026]",
+   "Story Points"
+  ],
+  "schema": {
+   "type": "number",
+   "custom": "com.atlassian.jira.plugin.system.customfieldtypes:float",
+   "customId": 10026
+  }
+ }
+]

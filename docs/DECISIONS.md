@@ -113,6 +113,15 @@ Opus 3명 독립 검토 → 23건 → 전부 수정. 606개 통과 + 클립보�
 - **clip_image.ps1**: 테스트 전용 이음매 `-FromFile <그림>`으로 저장 경로(상대 `-Out`, 폴더 생성, PNG)를 클립보드 없이 검증. `KB_REQUIRE_CLIPBOARD=1`이면 "클립보드를 열 수 없음"이 건너뛰기 대신 실패(사용자 확인용).
 - 사용자 확인 대기(D31): Emacs 텍스트·클립보드·파일 캡처 각 1회, 접두 키 교체 1회. 자동 관문은 통과.
 
+### Phase 2 구축 결정 (2026-11-05)
+
+- **Obsidian Bases 문법 확인(§6.9)**: 공식 문서 `obsidian-help` 저장소 `en/Bases/Bases syntax.md`·`Functions.md`·`Views.md`, 마지막 커밋 578f73cc(2026-10-23). 설치된 앱 1.15.0. 확인된 것: `file.inFolder()`는 하위 폴더 포함, `file.hasProperty()`, `not:`, 뷰 필터는 전역 필터와 AND, `groupBy: {property, direction}`. **미확인**: `sort` 키는 문서에 없어 앱이 저장하는 형태를 기억으로 썼음 → 사용자가 Obsidian에서 열어 확인(Phase 2 사용자 확인). `일감.base`는 프로젝트별 그룹 뷰 하나 + "막힘" 뷰(프로젝트 키를 추적 파일에 넣지 않기 위해), 키 열은 `file.name`. `엔티티.base`는 `type` 속성이 있는 wiki/projects·people·topics.
+- **jira_client**: 404는 `NotFoundError`(종료 1). 읽기 5xx는 1초 뒤 1회 재시도, 다시 실패면 NetworkError. `search()`는 호출 즉시 첫 페이지를 받아 잘못된 JQL을 바로 알린다. `jira.sprint_field`가 설정에 있으면 `/field` 조회를 건너뛴다(init이 기록). mock 검색은 이슈당 댓글 3개까지만 실어 페이징 경로를 태운다(실 DC가 잘라 보내는지는 미확인).
+- **jira_sync**: `synced_at`만 다른 파일은 다시 쓰지 않는다. 기존 `mentions` 바이트·EOL·BOM 보존. `.cache.sqlite`가 없으면 전체 동기화. 쓰지 못한 파일(마커 손상·동시 편집·잠김)이 있으면 `last_sync`를 옮기지 않아 다음 증분이 같은 구간을 다시 받는다. 설명의 제목은 두 단계 내려 `## 설명`·`## 댓글`과 충돌하지 않게 하고, Jira 본문에 `kb:` 마커 꼴이 있으면 앞에 공백을 넣어 구역이 생기지 않게 한다. 프로젝트 `issues` 표는 디스크의 동기화된 `jira/*.md` 전체 기준(stub·완료 제외). 뷰는 프로젝트 범위로 감싸지 않는다. 옵션 조합 `--cache` 단독, `--jql`+`--key`/`--full`, `--key`+`--full`은 종료 4.
+- **wikimarkup**: 변환 실패 시 `(Jira wiki markup 변환 실패, 원문)` + 펜스 블록. 강조는 ASCII 영숫자 옆에서는 적용하지 않음(한국어 조사 옆은 적용). `-strike-`, `+underline+`, 여러 줄 표 셀은 변환하지 않음.
+- **init 마법사**: 모든 경로가 저장 뒤 doctor를 실행하고 그 종료 코드를 돌려준다. confluence 블록이 없으면 `enabled: false`로 써서 Phase 5 전까지 ✗가 나지 않게 한다. 인증·네트워크 실패 시 대화형은 URL·PAT를 3회까지 다시 묻고, 비대화형은 즉시 2/3/4로 종료. PAT 입력에서 Enter는 기존 저장값 유지. `jql_mine`과 뷰는 선택 뒤 검증하되 문제가 있어도 저장은 한다.
+- **Emacs `o`**: 페이지가 없거나 `stub: true`면 `sync --key`를 비동기로 돌린 뒤 연다. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
+
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 
 Repo root is `D:\work\work-kb`. Paths in sections 1 to 4 are repo-relative. Nothing was created or changed in this stage.

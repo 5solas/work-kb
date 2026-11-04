@@ -1,29 +1,102 @@
-"""Jira Data Center REST v2 모의 서버 (Phase 0 골격).
+"""Jira Data Center REST v2 모의 서버 (Phase 0 골격 + Phase 2 읽기).
 
-표준 라이브러리만 쓴다. 127.0.0.1에만 바인딩한다. 가상 데이터만 담는다.
+표준 라이브러리만 쓴다. 127.0.0.1에만 바인딩한다. 가상 데이터만 담는다(tests/fixtures/jira/).
 
 - `start(port=0, **modes) -> RunningMock`
 - `python tests/mock_jira.py` → 고정 포트 8081에서 Ctrl+C까지 실행.
 
+경로(GET만, 쓰기는 Phase 3):
+- /rest/api/2/myself, /project, /serverInfo (Phase 0)
+- /rest/api/2/search?jql=&startAt=&maxResults=&fields=  작은 JQL 해석기(`evaluate_jql`)로 거른다
+- /rest/api/2/issue/{key}  (없으면 404), /rest/api/2/issue/{key}/comment (페이지)
+- /rest/api/2/field  (스프린트 필드 customfield_10020, schema.custom gh-sprint)
+
 모드:
 - `bad_token="x"`: 그 토큰은 401.
 - `require_token="x"`: `Authorization: Bearer x`가 아니면 401.
+- `rate_limit=N`: 처음 N번의 검색은 429 + `Retry-After: 1`.
+- `search_500_once=True`: (429가 끝난 뒤) 첫 검색 한 번은 500.
+- `no_sprint_field=True`: /field에 스프린트 필드가 없고, 이슈에도 스프린트 값이 없고, JQL `sprint`는 400.
+- `page_size_cap=N`: 서버가 maxResults를 N으로 줄인다(검색·댓글).
+- `now_iso="2026-11-05T09:12:00+09:00"`: 모의 '지금'. 없으면 픽스처의 가장 늦은 updated.
+- `sprint_form="object"`: 스프린트 값을 DC 문자열 대신 객체 꼴 `{id, name, state, …}`로 준다.
+- `search_comment_limit=N`: 검색 결과에 싣는 댓글 수(기본 3, total은 그대로). 이슈 조회는 전부 싣는다.
+- `updates={"KB-12": {"updated": "…", "summary": "…"}}`: 시작할 때 이슈 필드를 바꾼다.
 
-라우팅은 `ROUTES` 표(메서드, 경로 정규식, 처리 함수)로 한다. 이후 단계는 표에 줄을 더하고
-`KNOWN_MODES`에 모드 이름을 더한다.
+실행 중에는 `mock.touch("KB-12", updated=None, **fields)`로 이슈를 바꾸고, `mock.issues`로 데이터를 본다.
+`mock.count("search")`는 받은 검색 요청 수(429·500 포함).
+
+라우팅은 `ROUTES` 표(메서드, 경로 정규식, 처리 함수)로 한다. 처리 함수는 (상태, 본문) 또는
+(상태, 본문, 추가 헤더)를 돌려준다.
 """
 from __future__ import annotations
 
+import copy
+import datetime as dt
 import json
 import re
 import socketserver
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any, Callable
 from urllib.parse import parse_qsl, urlsplit
 
 FIXED_PORT = 8081
-KNOWN_MODES = {"bad_token", "require_token"}
+KNOWN_MODES = {
+    "bad_token",
+    "require_token",
+    "rate_limit",
+    "search_500_once",
+    "no_sprint_field",
+    "page_size_cap",
+    "now_iso",
+    "sprint_form",
+    "search_comment_limit",
+    "updates",
+}
+
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "jira"
+SPRINT_FIELD = "customfield_10020"
+SPRINT_SCHEMA = "com.pyxis.greenhopper.jira:gh-sprint"
+CURRENT_USER = "honggildong"
+TZ = dt.timezone(dt.timedelta(hours=9))
+JIRA_TIME = "%Y-%m-%dT%H:%M:%S.000%z"
+DEFAULT_MAX_RESULTS = 50
+SERVER_MAX_RESULTS = 1000  # jira.search.views.default.max
+DEFAULT_SEARCH_COMMENT_LIMIT = 3
+
+USERS = {
+    "honggildong": {"name": "honggildong", "key": "honggildong", "displayName": "홍길동"},
+    "kimcs": {"name": "kimcs", "key": "kimcs", "displayName": "김철수"},
+}
+PROJECTS = [{"id": "10000", "key": "KB", "name": "지식 저장고"}, {"id": "10001", "key": "OPS", "name": "운영"}]
+# 워크플로의 모든 상태(픽스처에 안 쓰인 것 포함): 이름 소문자 → 상태 범주 키
+STATUSES = {"to do": "new", "open": "new", "in progress": "indeterminate", "in review": "indeterminate", "blocked": "indeterminate", "done": "done", "closed": "done"}
+CATEGORY_ALIASES = {
+    "to do": "new", "new": "new", "2": "new",
+    "in progress": "indeterminate", "indeterminate": "indeterminate", "4": "indeterminate",
+    "done": "done", "complete": "done", "3": "done",
+}  # fmt: skip
+
+_FIXTURE_CACHE: dict[str, Any] = {}
+
+
+def load_fixture(name: str) -> Any:
+    """tests/fixtures/jira/<name>.json (한 번 읽어 두고 깊은 복사본을 준다)."""
+    if name not in _FIXTURE_CACHE:
+        _FIXTURE_CACHE[name] = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+    return copy.deepcopy(_FIXTURE_CACHE[name])
+
+
+def parse_time(value: str) -> dt.datetime:
+    return dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
+
+
+def format_time(value: dt.datetime) -> str:
+    return value.astimezone(TZ).strftime(JIRA_TIME)
+
 
 # ---------------------------------------------------------------- 공통 골격
 
@@ -53,6 +126,12 @@ class RunningMock:
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.log: list[dict] = []
         self.modes = dict(modes)
+        self._lock = threading.Lock()
+        self._counts: dict[str, int] = {}
+        self._flags: set[str] = set()
+        self.issues: dict[str, dict] = {item["key"]: item for item in load_fixture("issues")}
+        for key, changes in (modes.get("updates") or {}).items():
+            self.issues[key]["fields"].update(copy.deepcopy(changes))
 
     def stop(self) -> None:
         thread, self._thread = self._thread, None
@@ -67,6 +146,44 @@ class RunningMock:
 
     def __exit__(self, *exc):
         self.stop()
+
+    # ------------------------------------------------------------ Phase 2 도움
+
+    def bump(self, name: str) -> int:
+        with self._lock:
+            self._counts[name] = self._counts.get(name, 0) + 1
+            return self._counts[name]
+
+    def count(self, name: str) -> int:
+        with self._lock:
+            return self._counts.get(name, 0)
+
+    def once(self, flag: str) -> bool:
+        """처음 부를 때만 True."""
+        with self._lock:
+            if flag in self._flags:
+                return False
+            self._flags.add(flag)
+            return True
+
+    def now(self) -> dt.datetime:
+        """모의 '지금': now_iso 모드, 없으면 이슈들의 가장 늦은 updated."""
+        fixed = self.modes.get("now_iso")
+        if fixed:
+            value = dt.datetime.fromisoformat(str(fixed))
+            return (value if value.tzinfo else value.replace(tzinfo=TZ)).astimezone(TZ)
+        with self._lock:
+            return max(parse_time(item["fields"]["updated"]) for item in self.issues.values()).astimezone(TZ)
+
+    def touch(self, key: str, updated: str | None = None, **fields: Any) -> str:
+        """이슈 필드를 바꾸고 updated를 새로 매긴다(없으면 지금+1분). 새 updated 문자열을 돌려준다."""
+        if updated is None:
+            updated = format_time(self.now() + dt.timedelta(minutes=1))
+        with self._lock:
+            target = self.issues[key]["fields"]
+            target.update(copy.deepcopy(fields))
+            target["updated"] = updated
+        return updated
 
 
 class _Server(ThreadingHTTPServer):
@@ -116,11 +233,15 @@ class _Handler(BaseHTTPRequestHandler):
         token = _bearer(self.headers.get("Authorization"))
         mock.log.append({"method": self.command, "path": parts.path, "query": query, "has_auth": token is not None, "json": body})
         req = Request(method=self.command, path=parts.path, query=query, headers=self.headers, json_body=body, bad_json=bad_json, token=token, mock=mock)
-        status, payload = handle(req)
+        result = handle(req)
+        status, payload = result[0], result[1]
+        extra = result[2] if len(result) > 2 else {}
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
+        for name, value in extra.items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -137,7 +258,11 @@ def _start(port: int, modes: dict, verbose: bool) -> RunningMock:
         raise TypeError(f"알 수 없는 모드: {sorted(unknown)}")
     server = _Server(("127.0.0.1", port), _Handler)
     server.verbose = verbose
-    mock = RunningMock(server, modes)
+    try:
+        mock = RunningMock(server, modes)
+    except Exception:
+        server.server_close()
+        raise
     server.mock = mock
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, name=f"{__name__}:{mock.port}", daemon=True)
     mock._thread = thread
@@ -161,6 +286,588 @@ def main() -> None:
         mock.stop()
 
 
+# ---------------------------------------------------------------- JQL 해석기
+
+
+class JqlError(Exception):
+    """400 {"errorMessages": [문장]}으로 바뀌는 JQL 오류."""
+
+
+class _Tok:
+    __slots__ = ("kind", "value", "pos")
+
+    def __init__(self, kind: str, value: str, pos: int):
+        self.kind, self.value, self.pos = kind, value, pos
+
+    def word(self, *names: str) -> bool:
+        return self.kind == "word" and self.value.upper() in names
+
+
+_TOKEN = re.compile(
+    r"""(?P<ws>\s+)
+    |(?P<str>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')
+    |(?P<op>!=|>=|<=|!~|=|>|<|~)
+    |(?P<punc>[(),])
+    |(?P<word>[^\s()",'=!<>~]+)""",
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def _where(pos: int) -> str:
+    return f"(line 1, character {pos + 1})"
+
+
+def _tokenize(jql: str) -> list[_Tok]:
+    out: list[_Tok] = []
+    pos = 0
+    while pos < len(jql):
+        match = _TOKEN.match(jql, pos)
+        if match is None:
+            ch = jql[pos]
+            if ch in "'\"":
+                raise JqlError(f"Error in the JQL Query: The quoted string has not been completed. {_where(pos)}")
+            raise JqlError(f"Error in the JQL Query: The character '{ch}' is a reserved JQL character. {_where(pos)}")
+        kind = match.lastgroup
+        text = match.group()
+        if kind == "str":
+            out.append(_Tok("str", re.sub(r"\\(.)", r"\1", text[1:-1]), pos))
+        elif kind != "ws":
+            out.append(_Tok(kind, text, pos))
+        pos = match.end()
+    return out
+
+
+class _Parser:
+    """query := [expr] [ORDER BY sort {, sort}]; expr := term {OR term}; term := factor {AND factor}
+    factor := NOT factor | '(' expr ')' | clause."""
+
+    def __init__(self, tokens: list[_Tok]):
+        self.toks = tokens
+        self.i = 0
+
+    def peek(self) -> _Tok | None:
+        return self.toks[self.i] if self.i < len(self.toks) else None
+
+    def take(self) -> _Tok:
+        tok = self.peek()
+        if tok is None:
+            raise JqlError("Error in the JQL Query: Expecting more input but reached the end of the query.")
+        self.i += 1
+        return tok
+
+    def expect_punc(self, ch: str) -> None:
+        tok = self.take()
+        if tok.kind != "punc" or tok.value != ch:
+            raise JqlError(f"Error in the JQL Query: Expecting '{ch}' but got '{tok.value}'. {_where(tok.pos)}")
+
+    def parse(self):
+        tok = self.peek()
+        where = None
+        if tok is not None and not tok.word("ORDER"):
+            where = self.expr()
+        order: list[tuple[str, bool, int]] = []
+        tok = self.peek()
+        if tok is not None and tok.word("ORDER"):
+            self.take()
+            by = self.take()
+            if not by.word("BY"):
+                raise JqlError(f"Error in the JQL Query: Expecting 'BY' but got '{by.value}'. {_where(by.pos)}")
+            order.append(self.sort_item())
+            while (tok := self.peek()) is not None and tok.kind == "punc" and tok.value == ",":
+                self.take()
+                order.append(self.sort_item())
+        tok = self.peek()
+        if tok is not None:
+            if order:
+                raise JqlError(f"Error in the JQL Query: Expecting either ',' or the end of the query but got '{tok.value}'. {_where(tok.pos)}")
+            raise JqlError(f"Error in the JQL Query: Expecting either 'OR' or 'AND' but got '{tok.value}'. {_where(tok.pos)}")
+        return where, order
+
+    def sort_item(self) -> tuple[str, bool, int]:
+        tok = self.take()
+        if tok.kind not in ("word", "str"):
+            raise JqlError(f"Error in the JQL Query: Expecting a field name but got '{tok.value}'. {_where(tok.pos)}")
+        desc = False
+        nxt = self.peek()
+        if nxt is not None and nxt.word("ASC", "DESC"):
+            desc = self.take().value.upper() == "DESC"
+        return tok.value, desc, tok.pos
+
+    def expr(self):
+        node = self.term()
+        while (tok := self.peek()) is not None and tok.word("OR"):
+            self.take()
+            node = ("or", node, self.term())
+        return node
+
+    def term(self):
+        node = self.factor()
+        while (tok := self.peek()) is not None and tok.word("AND"):
+            self.take()
+            node = ("and", node, self.factor())
+        return node
+
+    def factor(self):
+        tok = self.peek()
+        if tok is None:
+            raise JqlError("Error in the JQL Query: Expecting a field name but reached the end of the query.")
+        if tok.word("NOT"):
+            self.take()
+            return ("not", self.factor())
+        if tok.kind == "punc" and tok.value == "(":
+            self.take()
+            node = self.expr()
+            self.expect_punc(")")
+            return node
+        return self.clause()
+
+    def value(self):
+        tok = self.take()
+        if tok.kind == "str":
+            return ("lit", tok.value)
+        if tok.kind != "word" or tok.word("AND", "OR", "ORDER", "NOT"):
+            raise JqlError(f"Error in the JQL Query: Expecting a value but got '{tok.value}'. {_where(tok.pos)}")
+        nxt = self.peek()
+        if nxt is not None and nxt.kind == "punc" and nxt.value == "(":
+            self.take()
+            args = []
+            if not ((p := self.peek()) is not None and p.kind == "punc" and p.value == ")"):
+                args.append(self.value()[1])
+                while (p := self.peek()) is not None and p.kind == "punc" and p.value == ",":
+                    self.take()
+                    args.append(self.value()[1])
+            self.expect_punc(")")
+            return ("func", tok.value, args)
+        return ("lit", tok.value)
+
+    def clause(self):
+        field = self.take()
+        if field.kind not in ("word", "str") or field.word("AND", "OR", "ORDER", "BY"):
+            raise JqlError(f"Error in the JQL Query: Expecting a field name but got '{field.value}'. {_where(field.pos)}")
+        tok = self.take()
+        if tok.word("NOT"):
+            nxt = self.take()
+            if not nxt.word("IN"):
+                raise JqlError(f"Error in the JQL Query: Expecting 'IN' but got '{nxt.value}'. {_where(nxt.pos)}")
+            return ("clause", field.value, "not in", self.in_values(), field.pos)
+        if tok.word("IN"):
+            return ("clause", field.value, "in", self.in_values(), field.pos)
+        if tok.word("IS"):
+            negate = False
+            nxt = self.take()
+            if nxt.word("NOT"):
+                negate, nxt = True, self.take()
+            if not nxt.word("EMPTY", "NULL"):
+                raise JqlError(f"Error in the JQL Query: Expecting 'EMPTY' but got '{nxt.value}'. {_where(nxt.pos)}")
+            return ("clause", field.value, "is not" if negate else "is", None, field.pos)
+        if tok.kind != "op":
+            raise JqlError(f"Error in the JQL Query: Expecting operator but got '{tok.value}'. {_where(tok.pos)}")
+        return ("clause", field.value, tok.value, self.value(), field.pos)
+
+    def in_values(self):
+        tok = self.peek()
+        if tok is not None and tok.kind == "punc" and tok.value == "(":
+            self.take()
+            values = [self.value()]
+            while (p := self.peek()) is not None and p.kind == "punc" and p.value == ",":
+                self.take()
+                values.append(self.value())
+            self.expect_punc(")")
+            return ("list", values)
+        return self.value()  # 함수: sprint in openSprints()
+
+
+# ---------------------------------------------------------------- 절 → 판정 함수
+
+
+class _Ctx:
+    def __init__(self, mock: RunningMock):
+        self.mock = mock
+        self.now = mock.now()
+        self.user = CURRENT_USER
+        self.no_sprint = bool(mock.modes.get("no_sprint_field"))
+        self.keys = set(mock.issues)
+
+
+def _no_field(name: str) -> JqlError:
+    return JqlError(f"Field '{name}' does not exist or you do not have permission to view it.")
+
+
+def _bad_value(value: str, field: str) -> JqlError:
+    return JqlError(f"The value '{value}' does not exist for the field '{field}'.")
+
+
+def _sprints(issue: dict) -> list[dict]:
+    out = []
+    for raw in issue["fields"].get(SPRINT_FIELD) or []:
+        body = re.search(r"\[(.*)\]\s*$", raw, re.DOTALL)
+        attrs = {}
+        if body:
+            for part in re.split(r",(?=[A-Za-z][A-Za-z0-9_]*=)", body.group(1)):
+                k, _, v = part.partition("=")
+                attrs[k] = v
+        out.append({"id": attrs.get("id"), "name": attrs.get("name"), "state": (attrs.get("state") or "").upper()})
+    return out
+
+
+def _literals(value, field: str) -> list:
+    """("lit", x) 또는 ("list", [...]) → 값 목록. 함수는 ("func", 이름, 인수) 그대로."""
+    if value is None:
+        return []
+    if value[0] == "list":
+        return [item for v in value[1] for item in _literals(v, field)]
+    return [value]
+
+
+def _set_clause(field: str, op: str, value, getter: Callable[[dict], list[str]], norm: Callable[[Any], str]):
+    """=, !=, in, not in, is [not] empty 를 값 집합으로 판정한다."""
+    if op in ("is", "is not"):
+        empty = op == "is"
+        return lambda issue: (not getter(issue)) == empty
+    if op not in ("=", "!=", "in", "not in"):
+        raise JqlError(f"The operator '{op}' is not supported by the '{field}' field.")
+    wanted = {norm(v) for v in _literals(value, field)}
+    if op in ("=", "in"):
+        return lambda issue: bool(wanted & set(getter(issue)))
+    return lambda issue: bool(getter(issue)) and not (wanted & set(getter(issue)))
+
+
+def _name_norm(field: str, known: Callable[[str], str | None]):
+    def norm(v):
+        if v[0] == "func":
+            raise JqlError(f"Unable to find JQL function '{v[1]}()'.")
+        out = known(v[1])
+        if out is None:
+            raise _bad_value(v[1], field)
+        return out
+
+    return norm
+
+
+def _user_norm(field: str, ctx: _Ctx):
+    def norm(v):
+        if v[0] == "func":
+            if v[1].lower() == "currentuser":
+                return ctx.user
+            raise JqlError(f"Unable to find JQL function '{v[1]}()'.")
+        name = v[1].lower()
+        for user in USERS.values():
+            if name in (user["name"], user["displayName"].lower()):
+                return user["name"]
+        raise _bad_value(v[1], field)
+
+    return norm
+
+
+_REL = re.compile(r"^([+-]?)(\d+)([wdhm])$")
+
+
+def _date_value(v, field: str, ctx: _Ctx) -> dt.datetime:
+    if v[0] == "func":
+        name, args = v[1].lower(), v[2]
+        base = {"now": ctx.now, "startofday": ctx.now.replace(hour=0, minute=0, second=0, microsecond=0),
+                "endofday": ctx.now.replace(hour=23, minute=59, second=59, microsecond=999000)}.get(name)  # fmt: skip
+        if base is None:
+            raise JqlError(f"Unable to find JQL function '{v[1]}()'.")
+        if args:
+            return base + _offset(args[0], field)
+        return base
+    text = v[1].strip()
+    if _REL.match(text):
+        return ctx.now + _offset(text, field)
+    for fmt in ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M", "%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            return dt.datetime.strptime(text, fmt).replace(tzinfo=TZ)
+        except ValueError:
+            continue
+    raise JqlError(
+        f"Date value '{text}' for field '{field}' is invalid. Valid formats include: 'yyyy/MM/dd HH:mm', "
+        "'yyyy-MM-dd HH:mm', 'yyyy/MM/dd', 'yyyy-MM-dd', or a period format e.g. '-5d', '4w 2d'."
+    )
+
+
+def _offset(text: str, field: str) -> dt.timedelta:
+    match = _REL.match(text.strip())
+    if match is None:
+        raise JqlError(f"Date value '{text}' for field '{field}' is invalid.")
+    sign = -1 if match.group(1) == "-" else 1
+    amount = int(match.group(2)) * sign
+    unit = {"w": "weeks", "d": "days", "h": "hours", "m": "minutes"}[match.group(3)]
+    return dt.timedelta(**{unit: amount})
+
+
+def _date_clause(field: str, op: str, value, getter: Callable[[dict], dt.datetime | None], ctx: _Ctx):
+    if op in ("is", "is not"):
+        empty = op == "is"
+        return lambda issue: (getter(issue) is None) == empty
+    compare = {
+        "=": lambda a, b: a == b, "!=": lambda a, b: a != b, ">": lambda a, b: a > b,
+        ">=": lambda a, b: a >= b, "<": lambda a, b: a < b, "<=": lambda a, b: a <= b,
+    }.get(op)  # fmt: skip
+    if compare is None or value[0] == "list":
+        raise JqlError(f"The operator '{op}' is not supported by the '{field}' field.")
+    bound = _date_value(value, field, ctx)
+
+    def pred(issue):
+        got = getter(issue)
+        return got is not None and compare(got, bound)
+
+    return pred
+
+
+def _due(issue: dict) -> dt.datetime | None:
+    raw = issue["fields"].get("duedate")
+    return dt.datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=TZ) if raw else None
+
+
+def _stamp(name: str):
+    def get(issue):
+        raw = issue["fields"].get(name)
+        return parse_time(raw) if raw else None
+
+    return get
+
+
+def _text_clause(field: str, op: str, value, getter: Callable[[dict], str]):
+    if op not in ("~", "!~") or value[0] != "lit":
+        raise JqlError(f"The operator '{op}' is not supported by the '{field}' field.")
+    needle = value[1].lower().strip("*")
+    if op == "~":
+        return lambda issue: needle in getter(issue).lower()
+    return lambda issue: needle not in getter(issue).lower()
+
+
+def _key_known(ctx: _Ctx, field: str):
+    def known(text: str) -> str | None:
+        key = text.upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]+-\d+", key):
+            raise JqlError(f"The issue key '{text}' for field '{field}' is invalid.")
+        if key not in ctx.keys:
+            raise JqlError(f"An issue with key '{key}' does not exist for field '{field}'.")
+        return key
+
+    return known
+
+
+def _project_known(text: str) -> str | None:
+    for project in PROJECTS:
+        if text.upper() == project["key"] or text == project["name"]:
+            return project["key"]
+    return None
+
+
+def _sprint_clause(field: str, op: str, value, ctx: _Ctx):
+    if ctx.no_sprint:
+        raise _no_field(field)
+    if op in ("is", "is not"):
+        empty = op == "is"
+        return lambda issue: (not _sprints(issue)) == empty
+    if op not in ("=", "!=", "in", "not in"):
+        raise JqlError(f"The operator '{op}' is not supported by the '{field}' field.")
+    tests: list[Callable[[dict], bool]] = []
+    for v in _literals(value, field):
+        if v[0] == "func":
+            states = {"opensprints": {"ACTIVE", "FUTURE"}, "closedsprints": {"CLOSED"}, "futuresprints": {"FUTURE"}}.get(v[1].lower())
+            if states is None:
+                raise JqlError(f"Unable to find JQL function '{v[1]}()'.")
+            tests.append(lambda s, states=states: s["state"] in states)
+        else:
+            text = v[1]
+            tests.append(lambda s, text=text: s["id"] == text or (s["name"] or "").lower() == text.lower())
+
+    def hit(issue):
+        return any(t(s) for s in _sprints(issue) for t in tests)
+
+    if op in ("=", "in"):
+        return hit
+    return lambda issue: bool(_sprints(issue)) and not hit(issue)
+
+
+def _clause(node, ctx: _Ctx):
+    _, field, op, value, _pos = node
+    name = field.lower()
+    if name == "project":
+        return _set_clause(field, op, value, lambda i: [i["fields"]["project"]["key"]], _name_norm(field, _project_known))
+    if name in ("key", "issuekey", "issue", "id"):
+        return _set_clause(field, op, value, lambda i: [i["key"]], _name_norm(field, _key_known(ctx, field)))
+    if name == "status":
+        return _set_clause(field, op, value, lambda i: [i["fields"]["status"]["name"].lower()],
+                           _name_norm(field, lambda t: t.lower() if t.lower() in STATUSES else None))  # fmt: skip
+    if name in ("statuscategory", "category"):
+        return _set_clause(field, op, value, lambda i: [i["fields"]["status"]["statusCategory"]["key"]],
+                           _name_norm(field, lambda t: CATEGORY_ALIASES.get(t.lower())))  # fmt: skip
+    if name in ("assignee", "reporter"):
+        def users(issue, name=name):
+            person = issue["fields"].get(name)
+            return [person["name"]] if person else []
+
+        return _set_clause(field, op, value, users, _user_norm(field, ctx))
+    if name == "watcher":
+        return _set_clause(field, op, value, lambda i: [ctx.user] if i["fields"]["watches"]["isWatching"] else [], _user_norm(field, ctx))
+    if name in ("labels", "label"):
+        return _set_clause(field, op, value, lambda i: [x.lower() for x in i["fields"].get("labels") or []],
+                           _name_norm(field, lambda t: t.lower()))  # fmt: skip
+    if name in ("component", "components"):
+        return _set_clause(field, op, value, lambda i: [c["name"].lower() for c in i["fields"].get("components") or []],
+                           _name_norm(field, lambda t: t.lower()))  # fmt: skip
+    if name == "priority":
+        return _set_clause(field, op, value, lambda i: [i["fields"]["priority"]["name"].lower()], _name_norm(field, lambda t: t.lower()))
+    if name in ("issuetype", "type"):
+        return _set_clause(field, op, value, lambda i: [i["fields"]["issuetype"]["name"].lower()], _name_norm(field, lambda t: t.lower()))
+    if name == "sprint":
+        return _sprint_clause(field, op, value, ctx)
+    if name in ("updated", "updateddate"):
+        return _date_clause(field, op, value, _stamp("updated"), ctx)
+    if name in ("created", "createddate"):
+        return _date_clause(field, op, value, _stamp("created"), ctx)
+    if name in ("duedate", "due"):
+        return _date_clause(field, op, value, _due, ctx)
+    if name in ("summary", "description", "text"):
+        def text(issue, name=name):
+            f = issue["fields"]
+            if name == "text":
+                return f"{f.get('summary') or ''}\n{f.get('description') or ''}"
+            return f.get(name) or ""
+
+        return _text_clause(field, op, value, text)
+    raise _no_field(field)
+
+
+def _compile(node, ctx: _Ctx) -> Callable[[dict], bool]:
+    if node is None:
+        return lambda issue: True
+    kind = node[0]
+    if kind == "and":
+        left, right = _compile(node[1], ctx), _compile(node[2], ctx)
+        return lambda issue: left(issue) and right(issue)
+    if kind == "or":
+        left, right = _compile(node[1], ctx), _compile(node[2], ctx)
+        return lambda issue: left(issue) or right(issue)
+    if kind == "not":
+        inner = _compile(node[1], ctx)
+        return lambda issue: not inner(issue)
+    return _clause(node, ctx)
+
+
+def _key_order(issue: dict):
+    project, _, number = issue["key"].partition("-")
+    return (project, int(number))
+
+
+_SORTS: dict[str, Callable[[dict], Any]] = {
+    "key": _key_order,
+    "issuekey": _key_order,
+    "updated": lambda i: parse_time(i["fields"]["updated"]),
+    "created": lambda i: parse_time(i["fields"]["created"]),
+    "duedate": lambda i: i["fields"].get("duedate") or "",
+    "due": lambda i: i["fields"].get("duedate") or "",
+}
+
+
+def evaluate_jql(mock: RunningMock, jql: str) -> list[dict]:
+    """JQL에 맞는 이슈(픽스처 원본 dict)를 정렬해 돌려준다. 틀리면 JqlError."""
+    where, order = _Parser(_tokenize(jql or "")).parse()
+    ctx = _Ctx(mock)
+    pred = _compile(where, ctx)
+    for name, _desc, _pos in order:
+        if name.lower() not in _SORTS:
+            raise _no_field(name)
+    with mock._lock:
+        found = [copy.deepcopy(issue) for issue in mock.issues.values()]
+    found = [issue for issue in found if pred(issue)]
+    if not order:
+        order = [("updated", True, 0)]  # 정렬을 주지 않으면 키 순서가 아니다(클라이언트가 붙여야 한다)
+    for name, desc, _pos in reversed(order):
+        found.sort(key=_SORTS[name.lower()], reverse=desc)
+    return found
+
+
+# ---------------------------------------------------------------- 응답 만들기
+
+
+def _sprint_object(raw: str) -> dict:
+    body = re.search(r"\[(.*)\]\s*$", raw, re.DOTALL)
+    attrs: dict[str, str] = {}
+    if body:
+        for part in re.split(r",(?=[A-Za-z][A-Za-z0-9_]*=)", body.group(1)):
+            k, _, v = part.partition("=")
+            attrs[k] = v
+    out: dict[str, Any] = {"id": int(attrs["id"]) if attrs.get("id", "").isdigit() else attrs.get("id"), "name": attrs.get("name"),
+                           "state": (attrs.get("state") or "").lower(), "boardId": int(attrs.get("rapidViewId") or 0)}  # fmt: skip
+    for key in ("startDate", "endDate", "completeDate", "goal"):
+        value = attrs.get(key)
+        if value not in (None, "", "<null>"):
+            out[key] = value
+    return out
+
+
+def _wanted_fields(raw: str | None, all_names: list[str], *, navigable_default: bool) -> list[str]:
+    navigable = [n for n in all_names if n != "comment"]
+    if raw is None or raw.strip() == "":
+        return navigable if navigable_default else list(all_names)
+    include: list[str] = []
+    exclude: set[str] = set()
+    for part in (p.strip() for p in raw.split(",")):
+        if not part:
+            continue
+        if part == "*all":
+            include.extend(all_names)
+        elif part == "*navigable":
+            include.extend(navigable)
+        elif part.startswith("-"):
+            exclude.add(part[1:])
+        else:
+            include.append(part)
+    if not include:
+        include = navigable if navigable_default else list(all_names)
+    seen: list[str] = []
+    for name in include:
+        if name in all_names and name not in exclude and name not in seen:
+            seen.append(name)
+    return seen
+
+
+def render_issue(mock: RunningMock, issue: dict, fields_param: str | None, *, search: bool) -> dict:
+    fields = copy.deepcopy(issue["fields"])
+    if mock.modes.get("no_sprint_field"):
+        fields.pop(SPRINT_FIELD, None)
+    elif mock.modes.get("sprint_form") == "object" and fields.get(SPRINT_FIELD):
+        fields[SPRINT_FIELD] = [_sprint_object(raw) for raw in fields[SPRINT_FIELD]]
+    if search and isinstance(fields.get("comment"), dict):
+        limit = int(mock.modes.get("search_comment_limit", DEFAULT_SEARCH_COMMENT_LIMIT))
+        comment = fields["comment"]
+        comment["comments"] = comment["comments"][:limit]
+        comment["maxResults"] = limit
+    names = _wanted_fields(fields_param, list(fields), navigable_default=search)
+    return {
+        "expand": "operations,versionedRepresentations,editmeta,changelog,renderedFields",
+        "id": issue["id"],
+        "self": f"{mock.base_url}/rest/api/2/issue/{issue['id']}",
+        "key": issue["key"],
+        "fields": {name: fields[name] for name in names},
+    }
+
+
+def _int_param(req: Request, name: str, default: int) -> int:
+    raw = req.query.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise JqlError(f"'{name}' 값이 정수가 아닙니다: {raw}") from None
+
+
+def _cap(req: Request, wanted: int) -> int:
+    cap = req.mock.modes.get("page_size_cap")
+    limit = min(SERVER_MAX_RESULTS, int(cap)) if cap else SERVER_MAX_RESULTS
+    return max(0, min(wanted, limit))
+
+
+def _error(status: int, *messages: str):
+    return status, {"errorMessages": list(messages), "errors": {}}
+
+
 # ---------------------------------------------------------------- Jira 동작
 
 
@@ -176,10 +883,75 @@ def _server_info(req: Request):
     return 200, {"baseUrl": req.mock.base_url, "version": "9.17.0", "deploymentType": "Server"}
 
 
+def _fields(req: Request):
+    items = load_fixture("fields")
+    if req.mock.modes.get("no_sprint_field"):
+        items = [f for f in items if (f.get("schema") or {}).get("custom") != SPRINT_SCHEMA]
+    return 200, items
+
+
+def _search(req: Request):
+    mock = req.mock
+    calls = mock.bump("search")
+    limit = int(mock.modes.get("rate_limit") or 0)
+    if calls <= limit:
+        return 429, {"errorMessages": ["요청이 너무 많습니다. 잠시 뒤 다시 시도하세요."]}, {"Retry-After": "1"}
+    if mock.modes.get("search_500_once") and mock.once("search_500"):
+        return _error(500, "내부 서버 오류 (모의)")
+    try:
+        start = max(0, _int_param(req, "startAt", 0))
+        wanted = _int_param(req, "maxResults", DEFAULT_MAX_RESULTS)
+        found = evaluate_jql(mock, req.query.get("jql", ""))
+    except JqlError as exc:
+        return _error(400, str(exc))
+    max_results = _cap(req, wanted)
+    page = found[start : start + max_results] if max_results else []
+    return 200, {
+        "expand": "schema,names",
+        "startAt": start,
+        "maxResults": max_results,
+        "total": len(found),
+        "issues": [render_issue(mock, issue, req.query.get("fields"), search=True) for issue in page],
+    }
+
+
+def _find_issue(req: Request) -> dict | None:
+    wanted = req.params["key"]
+    with req.mock._lock:
+        for issue in req.mock.issues.values():
+            if issue["key"] == wanted.upper() or issue["id"] == wanted:
+                return copy.deepcopy(issue)
+    return None
+
+
+def _issue(req: Request):
+    issue = _find_issue(req)
+    if issue is None:
+        return _error(404, "이슈가 존재하지 않거나 볼 권한이 없습니다.")
+    return 200, render_issue(req.mock, issue, req.query.get("fields"), search=False)
+
+
+def _comments(req: Request):
+    issue = _find_issue(req)
+    if issue is None:
+        return _error(404, "이슈가 존재하지 않거나 볼 권한이 없습니다.")
+    try:
+        start = max(0, _int_param(req, "startAt", 0))
+        max_results = _cap(req, _int_param(req, "maxResults", DEFAULT_MAX_RESULTS))
+    except JqlError as exc:
+        return _error(400, str(exc))
+    items = issue["fields"]["comment"]["comments"]
+    return 200, {"startAt": start, "maxResults": max_results, "total": len(items), "comments": items[start : start + max_results]}
+
+
 ROUTES = [
     ("GET", r"/rest/api/2/myself", _myself),
     ("GET", r"/rest/api/2/project", _projects),
     ("GET", r"/rest/api/2/serverInfo", _server_info),
+    ("GET", r"/rest/api/2/field", _fields),
+    ("GET", r"/rest/api/2/search", _search),
+    ("GET", r"/rest/api/2/issue/(?P<key>[^/]+)/comment", _comments),
+    ("GET", r"/rest/api/2/issue/(?P<key>[^/]+)", _issue),
 ]
 
 

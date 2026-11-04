@@ -8,6 +8,7 @@
 점검은 `CHECKS` 목록 순서로 돈다. 이후 Phase는 목록에 함수를 더한다.
 Python·의존성 점검은 외부 패키지를 가져오기 전에 한다. 외부 호출은 lib/net으로만, 짧은 시간 제한으로 한다.
 LLM 점검은 `GET {base_url}/models` 한 번뿐이다(D28). llm_client는 쓰지 않는다.
+Jira가 ✓이면 이어서 서버 버전, sprint 필드(D51), jql_mine·뷰 JQL(maxResults=0, D49)을 lib/jira_client로 확인한다.
 """
 from __future__ import annotations
 
@@ -97,6 +98,7 @@ class Context:
     public_profiles: set[str] = field(default_factory=set)
     # 회사 환경에서는 공개 호스트 검사가 끝까지 돈 뒤에만 LLM을 부른다(D44, 안전 쪽).
     public_check_done: bool = False
+    jira_base: str | None = None  # Jira ✓일 때만 채운다. 세부 점검(JQL·sprint·버전)은 이것이 있을 때만 돈다
 
     def vault_root(self) -> Path:
         if self.cfg is not None:
@@ -375,10 +377,77 @@ def check_jira(ctx: Context) -> None:
     if resp.status_code == 200 and isinstance(data, Mapping):
         who = data.get("displayName") or data.get("name") or "?"
         ctx.report.ok("Jira", f"{who} 으로 연결 ({base})")
+        ctx.jira_base = base
     elif resp.status_code == 200:
         ctx.report.fail("Jira", "응답이 JSON이 아닙니다 → base_url이 Jira 서버 주소인지 확인하세요")
     else:
         ctx.report.fail("Jira", f"{net.describe_status(resp)} → base_url을 확인하세요 ({base})")
+
+
+def _jira_client(ctx: Context):
+    from lib import jira_client
+
+    cfg = ctx.cfg
+    return jira_client.JiraClient(ctx.jira_base, ctx.secrets.get("jira.pat_ref"), conn=_conn(cfg, cfg.get("jira")))
+
+
+@check("Jira 세부")
+def check_jira_details(ctx: Context) -> None:
+    """Jira에 연결된 뒤에만: 서버 버전, sprint 필드, jql_mine·뷰 JQL 확인(D49, D51).
+
+    JQL은 maxResults=0 검색으로 확인하고, 400이면 Jira의 메시지를 그대로 보여 준다.
+    """
+    cfg = ctx.cfg
+    if cfg is None or not ctx.jira_base or not ctx.secrets.get("jira.pat_ref"):
+        return
+    with _jira_client(ctx) as client:
+        _jira_details(ctx, client)
+
+
+def _jira_details(ctx: Context, client: Any) -> None:
+    from lib import net
+
+    cfg = ctx.cfg
+    try:
+        info = client.server_info()
+    except core.KbError as exc:
+        ctx.report.info("Jira 서버", f"버전을 읽지 못했습니다 ({net.error_text(exc)})")
+    else:
+        info = info if isinstance(info, Mapping) else {}
+        version = info.get("version") or "?"
+        kind = info.get("deploymentType")
+        ctx.report.info("Jira 서버", f"{version}" + (f" ({kind})" if kind else ""))
+
+    configured = cfg.get("jira.sprint_field")
+    try:
+        field_id = client.sprint_field_id()
+    except core.KbError as exc:
+        ctx.report.info("sprint 필드", f"확인하지 못했습니다 ({net.error_text(exc)})")
+    else:
+        text = field_id or "없음"
+        if configured and configured != field_id:
+            text += f" (설정값 {configured}와 다릅니다 → kb.py init --section jira)"
+        ctx.report.info("sprint 필드", text)
+
+    items: list[tuple[str, Any, str]] = [("JQL jql_mine", cfg.get("jira.jql_mine"), "jira.jql_mine")]
+    views = cfg.get("jira.views")
+    if isinstance(views, Mapping):
+        items.extend((f"JQL 뷰 {name}", jql, f"jira.views.{name}") for name, jql in views.items())
+    elif views not in (None, ""):
+        ctx.report.fail("JQL 뷰", "jira.views는 '이름: JQL' 묶음이어야 합니다 → config.yaml·config.local.yaml을 고치세요")
+    for label, jql, where in items:
+        if not isinstance(jql, str) or not jql.strip():
+            ctx.report.fail(label, f"비어 있습니다 → {where}에 JQL을 쓰세요")
+            continue
+        try:
+            error = client.validate_jql(jql)
+        except core.KbError as exc:
+            ctx.report.fail(label, f"확인하지 못했습니다: {net.error_text(exc)}")
+            continue
+        if error:
+            ctx.report.fail(label, f"{error} → config.local.yaml(또는 config.yaml)의 {where}를 고치세요")
+        else:
+            ctx.report.ok(label, "유효")
 
 
 @check("Confluence")
@@ -702,6 +771,7 @@ CHECKS: list[Checker] = [
     check_secrets,
     check_keyring,
     check_jira,
+    check_jira_details,
     check_confluence,
     check_llm,
     check_detected,

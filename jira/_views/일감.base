@@ -1,0 +1,61 @@
+# Obsidian Bases: Jira 일감 캐시 (jira/KEY.md, jira_sync가 생성)
+# 문법: obsidian-help commit 578f73cc (2026-10-23), Obsidian 1.15.0 기준. D64, 지시서 §6.9.
+# 미완료만: status_category가 있는 파일(스텁 제외) 중 done이 아닌 것. _views 표는 제외.
+# 키 열은 file.name(= jira/KEY.md의 KEY, front matter key와 같음)이라 눌러서 연다.
+# sort는 문서에 없는 뷰 상태 키다(앱이 정렬을 저장하는 형식). 앱에서 열어 확인한다.
+filters:
+  and:
+    - file.inFolder("jira")
+    - not:
+        - file.inFolder("jira/_views")
+    - file.hasProperty("status_category")
+    - 'status_category != "done"'
+properties:
+  file.name:
+    displayName: 키
+  note.summary:
+    displayName: 제목
+  note.status:
+    displayName: 상태
+  note.assignee:
+    displayName: 담당
+  note.due:
+    displayName: 마감
+  note.updated:
+    displayName: 갱신
+  note.project:
+    displayName: 프로젝트
+views:
+  - type: table
+    name: 미완료 (프로젝트별)
+    groupBy:
+      property: note.project
+      direction: ASC
+    order:
+      - file.name
+      - note.summary
+      - note.status
+      - note.assignee
+      - note.due
+      - note.updated
+    sort:
+      - property: note.updated
+        direction: DESC
+  - type: table
+    name: 막힘
+    filters:
+      and:
+        - 'status == "Blocked"'
+    groupBy:
+      property: note.project
+      direction: ASC
+    order:
+      - file.name
+      - note.summary
+      - note.status
+      - note.assignee
+      - note.due
+      - note.updated
+    sort:
+      - property: note.updated
+        direction: DESC

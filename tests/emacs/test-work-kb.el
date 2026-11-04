@@ -727,33 +727,214 @@
       (should (equal (at "a@b") nil))
       (should (equal (at "xKB-1") nil)))))
 
-(ert-deftest work-kb-test-open-key-with-cache ()
-  (work-kb-test--with-vault vault
-    (let ((page (expand-file-name "jira/KB-12.md" vault)))
-      (work-kb-test--write-bytes page "---\nkey: KB-12\n---\n# KB-12\n")
-      (cl-letf (((symbol-function 'work-kb--run-sync) (lambda (&rest _) (error "캐시가 있으면 호출 안 함"))))
-        (with-temp-buffer
-          (insert "회의 KB-12 논의")
-          (goto-char (point-min)) (search-forward "KB-1")
-          (work-kb-open-at-point)
-          (should (file-equal-p (buffer-file-name) page)))))))
+(defconst work-kb-test--jira-full
+  "---\nkey: %s\nproject: KB\nsummary: \"캐시 동기화\"\nstatus: 진행 중\nstatus_category: indeterminate\n---\n# %s 캐시 동기화\n\n## 노트에서 언급\n<!-- kb:mentions:start -->\n<!-- kb:mentions:end -->\n"
+  "jira_sync가 쓴 것 같은 페이지 (%s 둘 = 키).")
 
-(ert-deftest work-kb-test-open-key-without-cache ()
-  "캐시가 없으면 `kb.py link --stub KEY'를 부른 뒤 연다 (Phase 1)."
+(defconst work-kb-test--jira-stub
+  "---\nkey: %s\nproject: KB\nstub: true\nsummary: \"\"\nstatus: \"\"\n---\n# %s\n\n> 아직 동기화되지 않은 일감입니다.\n\n## 노트에서 언급\n<!-- kb:mentions:start -->\n<!-- kb:mentions:end -->\n"
+  "notes.page_template(\"jira\")와 같은 꼴의 stub (%s 둘 = 키).")
+
+(defun work-kb-test--jira-page (template key) (format template key key))
+
+(defmacro work-kb-test--fake-run (calls handler &rest body)
+  "BODY 동안 `work-kb--run'을 가짜로: ARGS·:buffer를 CALLS에 (args . buffer)로 쌓고
+\(HANDLER ARGS)를 종료 코드로 삼아 :on-exit를 곧바로 부른다 (센티널 흉내). `kb.py'는 돌지 않는다."
+  (declare (indent 2))
+  `(let ((work-kb--syncing-keys nil))
+     (cl-letf (((symbol-function 'work-kb--run)
+                (lambda (args &rest plist)
+                  (push (cons args (plist-get plist :buffer)) ,calls)
+                  (let ((code (funcall ,handler args))
+                        (on-exit (plist-get plist :on-exit)))
+                    (when on-exit (funcall on-exit nil code)))
+                  'fake-proc))
+               ((symbol-function 'work-kb--run-sync) (lambda (&rest _) (error "동기 실행은 쓰지 않음"))))
+       ,@body)))
+
+(defun work-kb-test--open-key-at (text needle)
+  "TEXT를 담은 임시 버퍼에서 NEEDLE 위에 커서를 두고 `o'. (돌려준 값 . 창의 버퍼)."
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min)) (search-forward needle)
+    (let ((result (work-kb-open-at-point)))
+      (cons result (window-buffer (selected-window))))))
+
+(ert-deftest work-kb-test-jira-stub-p ()
+  "front matter의 `stub: true'만 stub으로 본다 (BOM·CRLF·대소문자 허용, 본문 무시)."
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "jira/KB-1.md" vault)))
+      (dolist (case `((,(work-kb-test--jira-page work-kb-test--jira-stub "KB-1") . t)
+                      (,(string-replace "\n" "\r\n" (work-kb-test--jira-page work-kb-test--jira-stub "KB-1")) . t)
+                      (,(concat "﻿" (work-kb-test--jira-page work-kb-test--jira-stub "KB-1")) . t)
+                      ("---\nkey: KB-1\nstub: True  # link\n---\n" . t)
+                      ("---\nstub: 'true'\n---\n" . t)
+                      (,(work-kb-test--jira-page work-kb-test--jira-full "KB-1") . nil)
+                      ("---\nkey: KB-1\nstub: false\n---\n" . nil)
+                      ("---\nkey: KB-1\nstubborn: true\n---\n" . nil)
+                      ("---\nkey: KB-1\n---\nstub: true\n" . nil)
+                      ("# 제목만\nstub: true\n" . nil)
+                      ("" . nil)))
+        (work-kb-test--write-bytes file (car case))
+        (should (eq (cdr case) (and (work-kb--jira-stub-p file) t)))))))
+
+(ert-deftest work-kb-test-open-key-with-cache ()
+  "동기화된 페이지가 있으면 sync 없이 바로 연다."
+  (work-kb-test--with-vault vault
+    (let ((page (expand-file-name "jira/KB-12.md" vault))
+          calls)
+      (work-kb-test--write-bytes page (work-kb-test--jira-page work-kb-test--jira-full "KB-12"))
+      (work-kb-test--fake-run calls (lambda (_) (error "캐시가 있으면 호출 안 함"))
+        (save-window-excursion
+          (let ((buf (cdr (work-kb-test--open-key-at "회의 KB-12 논의" "KB-1"))))
+            (should (file-equal-p (buffer-file-name buf) page)))))
+      (should-not calls))))
+
+(ert-deftest work-kb-test-open-key-missing-syncs-then-opens ()
+  "캐시가 없으면 `kb.py sync --root V --key KEY'를 자기 버퍼로 돌리고, 성공하면 연다."
   (work-kb-test--with-vault vault
     (let ((page (expand-file-name "jira/KB-99.md" vault))
           calls)
-      (cl-letf (((symbol-function 'work-kb--run-sync)
-                 (lambda (args &rest _)
-                   (push args calls)
-                   (work-kb-test--write-bytes page "---\nkey: KB-99\nstub: true\n---\n# KB-99\n")
-                   0)))
-        (with-temp-buffer
-          (insert "링크 [[KB-99]]")
-          (goto-char (point-min)) (search-forward "KB-9")
-          (work-kb-open-at-point)
-          (should (file-equal-p (buffer-file-name) page))))
-      (should (equal calls (list (list "link" "--root" (directory-file-name vault) "--stub" "KB-99")))))))
+      (work-kb-test--capturing-messages msgs
+        (work-kb-test--fake-run calls
+            (lambda (_args)
+              (work-kb-test--write-bytes page (work-kb-test--jira-page work-kb-test--jira-full "KB-99"))
+              0)
+          (save-window-excursion
+            (let ((buf (cdr (work-kb-test--open-key-at "링크 [[KB-99]]" "KB-9"))))
+              (should (file-equal-p (buffer-file-name buf) page))
+              (should (string-match-p "캐시 동기화" (with-current-buffer buf (buffer-string)))))))
+        (should (cl-some (lambda (m) (string-match-p "KB-99 동기화했습니다" m)) msgs)))
+      (should (equal calls (list (cons (list "sync" "--root" (directory-file-name vault) "--key" "KB-99")
+                                       "*work-kb-sync KB-99*"))))
+      (should-not work-kb--syncing-keys))))
+
+(ert-deftest work-kb-test-open-key-stub-syncs-and-reverts ()
+  "stub이 열려 있어도: sync 성공 뒤 그 버퍼를 묻지 않고 다시 읽어 보인다."
+  (work-kb-test--with-vault vault
+    (let ((page (expand-file-name "jira/KB-12.md" vault))
+          (create-lockfiles nil)
+          calls)
+      (work-kb-test--write-bytes page (work-kb-test--jira-page work-kb-test--jira-stub "KB-12"))
+      (let ((stub-buf (let ((coding-system-for-read 'utf-8)) (find-file-noselect page))))
+        (work-kb-test--fake-run calls
+            (lambda (_args)
+              (work-kb-test--rewrite-on-disk page (work-kb-test--jira-page work-kb-test--jira-full "KB-12"))
+              0)
+          (save-window-excursion
+            (work-kb-test--no-prompts
+              (should (eq (cdr (work-kb-test--open-key-at "회의 KB-12" "KB-1")) stub-buf)))))
+        (with-current-buffer stub-buf
+          (should-not (buffer-modified-p))
+          (should (string-match-p "status_category: indeterminate" (buffer-string)))
+          (should-not (string-match-p "stub: true" (buffer-string)))))
+      (should (equal (mapcar #'car calls)
+                     (list (list "sync" "--root" (directory-file-name vault) "--key" "KB-12")))))))
+
+(ert-deftest work-kb-test-open-key-sync-fails-makes-stub ()
+  "sync 실패(네트워크 3)·캐시 없음: `kb.py link --stub KEY'로 만들어 열고 이유를 알린다."
+  (work-kb-test--with-vault vault
+    (let ((page (expand-file-name "jira/KB-99.md" vault))
+          calls)
+      (work-kb-test--capturing-messages msgs
+        (work-kb-test--fake-run calls
+            (lambda (args)
+              (pcase (car args)
+                ("sync" (with-current-buffer (get-buffer-create "*work-kb-sync KB-99*")
+                          (erase-buffer) (insert "jira_sync: 연결 실패 (주소.invalid)\n"))
+                        3)
+                ("link" (work-kb-test--write-bytes page (work-kb-test--jira-page work-kb-test--jira-stub "KB-99"))
+                        0)))
+          (save-window-excursion
+            (let ((buf (cdr (work-kb-test--open-key-at "KB-99 확인" "KB-9"))))
+              (should (file-equal-p (buffer-file-name buf) page)))))
+        (should (cl-some (lambda (m) (and (string-match-p "KB-99 동기화 실패" m)
+                                          (string-match-p "종료 3: 네트워크" m)
+                                          (string-match-p "연결 실패" m)
+                                          (string-match-p "stub" m)))
+                         msgs)))
+      (should (equal (mapcar #'car (reverse calls))
+                     (list (list "sync" "--root" (directory-file-name vault) "--key" "KB-99")
+                           (list "link" "--root" (directory-file-name vault) "--stub" "KB-99"))))
+      (should (get-buffer "*work-kb-sync KB-99*"))
+      (kill-buffer "*work-kb-sync KB-99*")
+      (should-not work-kb--syncing-keys))))
+
+(ert-deftest work-kb-test-open-key-sync-fails-keeps-stub ()
+  "stub이 이미 있고 sync가 실패(설정 4)하면 link 없이 stub을 열고 알린다."
+  (work-kb-test--with-vault vault
+    (let ((page (expand-file-name "jira/OPS-3.md" vault))
+          calls)
+      (work-kb-test--write-bytes page (work-kb-test--jira-page work-kb-test--jira-stub "OPS-3"))
+      (work-kb-test--capturing-messages msgs
+        (work-kb-test--fake-run calls (lambda (_) 4)
+          (save-window-excursion
+            (let ((buf (cdr (work-kb-test--open-key-at "배포 [[OPS-3]]" "OPS"))))
+              (should (file-equal-p (buffer-file-name buf) page)))))
+        (should (cl-some (lambda (m) (and (string-match-p "OPS-3 동기화 실패" m)
+                                          (string-match-p "종료 4: 설정" m)))
+                         msgs)))
+      (should (equal (mapcar #'caar calls) '("sync")))
+      (should (equal (work-kb-test--bytes page)
+                     (work-kb-test--utf8 (work-kb-test--jira-page work-kb-test--jira-stub "OPS-3")))))))
+
+(ert-deftest work-kb-test-open-key-sync-ok-but-missing ()
+  "sync가 0으로 끝났는데도 페이지가 없으면(Jira에 없는 키) stub으로 물러선다."
+  (work-kb-test--with-vault vault
+    (let ((page (expand-file-name "jira/KB-404.md" vault))
+          calls)
+      (work-kb-test--capturing-messages msgs
+        (work-kb-test--fake-run calls
+            (lambda (args)
+              (when (equal (car args) "link")
+                (work-kb-test--write-bytes page (work-kb-test--jira-page work-kb-test--jira-stub "KB-404")))
+              0)
+          (save-window-excursion
+            (should (file-equal-p (buffer-file-name (cdr (work-kb-test--open-key-at "KB-404" "KB-4"))) page))))
+        (should (cl-some (lambda (m) (string-match-p "Jira에서 받아 오지 못함" m)) msgs)))
+      (should (equal (mapcar #'caar (reverse calls)) '("sync" "link"))))))
+
+(ert-deftest work-kb-test-open-key-sync-in-flight ()
+  "같은 키의 sync가 도는 중에 다시 `o'를 누르면 또 돌리지 않는다."
+  (work-kb-test--with-vault vault
+    (let ((calls nil)
+          (work-kb--syncing-keys nil))
+      (cl-letf (((symbol-function 'work-kb--run)
+                 (lambda (args &rest _) (push args calls) 'fake-proc)))
+        (work-kb-test--capturing-messages msgs
+          (should (eq (car (work-kb-test--open-key-at "KB-7" "KB-")) 'fake-proc))
+          (should-not (car (work-kb-test--open-key-at "KB-7" "KB-")))
+          (should (cl-some (lambda (m) (string-match-p "이미 진행 중" m)) msgs))))
+      (should (= 1 (length calls)))
+      (should (equal work-kb--syncing-keys '("KB-7"))))))
+
+(ert-deftest work-kb-test-open-key-real-async-sentinel ()
+  "실제 비동기 프로세스: 센티널이 끝난 뒤 페이지를 연다 (sync 대신 stdin JSON을 읽어 쓰는 Python)."
+  (work-kb-test--with-vault vault
+    (let* ((orig (symbol-function 'make-process))
+           (python (work-kb-test--python))
+           (page (expand-file-name "jira/KB-12.md" vault))
+           (code (concat "import sys, json, pathlib; a = json.loads(sys.stdin.buffer.read().decode('utf-8')); "
+                         "assert a[0] == 'sync'; root = a[a.index('--root') + 1]; key = a[a.index('--key') + 1]; "
+                         "pathlib.Path(root, 'jira', key + '.md').write_bytes(('---\\nkey: ' + key + "
+                         "'\\nsummary: \"\\ube44\\ub3d9\\uae30 \\ub3d9\\uae30\\ud654\"\\nstatus_category: new\\n---\\n# ' + key + '\\n').encode('utf-8'))"))
+           (work-kb--syncing-keys nil)
+           captured)
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest plist)
+                   (setq captured plist)
+                   (apply orig (plist-put (copy-sequence plist) :command (append python (list "-c" code)))))))
+        (save-window-excursion
+          (let* ((proc (car (work-kb-test--open-key-at "회의 KB-12" "KB-1"))))
+            (should (processp proc))
+            (should-not (file-exists-p page))
+            (should (eq 0 (work-kb--wait proc 60)))
+            (let ((buf (window-buffer (selected-window))))
+              (should (file-equal-p (buffer-file-name buf) page))
+              (should (string-match-p "비동기 동기화" (with-current-buffer buf (buffer-string))))))))
+      (should (equal (last (plist-get captured :command) 4) '("-X" "utf8" "scripts/kb.py" "--argv-stdin")))
+      (should-not (get-buffer "*work-kb-sync KB-12*"))
+      (should-not work-kb--syncing-keys))))
 
 (ert-deftest work-kb-test-open-person-and-link ()
   (work-kb-test--with-vault vault

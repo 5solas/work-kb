@@ -1,0 +1,73 @@
+# Obsidian Bases: wiki 엔티티 페이지 (projects, people, topics)
+# 문법: obsidian-help commit 578f73cc (2026-10-23), Obsidian 1.15.0 기준. 지시서 §5.4, §6.9.
+# 프로젝트는 title, 사람·주제는 name 속성을 쓴다(notes.page_template).
+# sort는 문서에 없는 뷰 상태 키다(앱이 정렬을 저장하는 형식). 앱에서 열어 확인한다.
+filters:
+  and:
+    - or:
+        - file.inFolder("wiki/projects")
+        - file.inFolder("wiki/people")
+        - file.inFolder("wiki/topics")
+    - file.hasProperty("type")
+properties:
+  file.name:
+    displayName: 파일
+  note.type:
+    displayName: 종류
+  note.title:
+    displayName: 제목
+  note.name:
+    displayName: 이름
+  note.updated:
+    displayName: 갱신
+views:
+  - type: table
+    name: 전체 (종류별)
+    groupBy:
+      property: note.type
+      direction: ASC
+    order:
+      - file.name
+      - note.type
+      - note.title
+      - note.name
+      - note.updated
+    sort:
+      - property: note.updated
+        direction: DESC
+  - type: table
+    name: 프로젝트
+    filters:
+      and:
+        - 'type == "project"'
+    order:
+      - file.name
+      - note.title
+      - note.updated
+    sort:
+      - property: note.updated
+        direction: DESC
+  - type: table
+    name: 사람
+    filters:
+      and:
+        - 'type == "person"'
+    order:
+      - file.name
+      - note.name
+      - note.updated
+    sort:
+      - property: note.updated
+        direction: DESC
+  - type: table
+    name: 주제
+    filters:
+      and:
+        - 'type == "topic"'
+    order:
+      - file.name
+      - note.name
+      - note.updated
+    sort:
+      - property: note.updated
+        direction: DESC
