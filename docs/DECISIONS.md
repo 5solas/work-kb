@@ -162,7 +162,43 @@ Opus 3명 독립 검토(지시서·Jira DC API 대조 / 데이터 안전 / 거�
 - **mock**: `down` 모드는 소켓을 실제로 닫는다(`go_down()`/`come_up()`). 끊긴 연결은 "불확실"로 보이기 때문. 추가 모드 `write_500_times`, `slow_write_sec`, `transition_500`, `assign_denied`(401), `worklog_denied`(403), `on_write` 훅.
 - **`today --check-done`**: `## 오늘`의 `- [x] [[KEY]]`만 읽어 `jira/KEY.md` 상태가 done이 아니면 전환 제안 명령을 출력(`jira.done_transition_names`, 기본 `[Done, 완료]`). `moved_to`를 최대 5단계 따라간다. 캐시 없음·stub이면 동기화 안내. 쓰지 않고 Jira를 부르지 않으며 항상 종료 0. `--json` 지원.
 - **Emacs `j`**: transient에 v c t a w n p q S f d. 확인이 필요한 명령(create·transition·promote)은 `y-or-n-p` 뒤 `--yes`로 보낸다(`--argv-stdin`에서는 y/N 프롬프트가 EOF).
-- Phase 3 관문(mock): 댓글 즉시 전송 → done → `sync --key`로 캐시의 `## 댓글`에 반영; 다운 → pending(종료 3) → 복구 → flush. 970개 테스트 통과(양쪽 venv). 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
+- Phase 3 관문(mock): 댓글 즉시 전송 → done → `sync --key`로 캐시의 `## 댓글`에 반영; 다운 → pending(종료 3) → 복구 → flush. 970개 테스트 통과(양쪽 venv).
+
+### Phase 3 검토·수정 라운드 (2026-11-05)
+
+Opus 3명 독립 검토 → 16건 → 전부 수정. 추가 결정(위 표를 다음으로 대체):
+
+- **전송 전 점유(write-ahead)**: `submit`은 기록을 처음부터 `sending`(claimed_at·pid·attempts=1)로 잠금 아래에서 한 번에 추가하고, flush는 보내기 직전에 잠금 아래에서 다시 읽어 점유한다. 결과는 점유를 지우는 한 번의 잠긴 갱신으로 기록한다. 중단(Ctrl+C·kill·FileBusy·잠금 초과)되면 `sending`으로 남는다. pid가 죽었거나 `2 × jira.write_timeout_sec`(기본 120초)보다 오래된 점유는 `uncertain`으로 취급: `list`에 표시되고 `--retry-uncertain [ID…]`로만 다시 보낸다. 겹치는 flush 두 개·`act comment`+flush는 정확히 한 번만 보낸다(테스트).
+- **쓰기 응답 엄격 검사**: 쓰기는 리다이렉트를 따르지 않는다(3xx → failed, Location과 함께 "https 주소로 고치세요"). 댓글·워크로그는 200/201 + 문자열 `id`, 전환·담당은 200/204, 생성은 201 + `key`만 성공. 그 밖의 2xx(HTML, id/key 없음)는 `UnexpectedResponse`(종료 3) → `uncertain`. mock 모드 `redirect_writes`, `html_200`, `on_read`, `myself_status`.
+- **uncertain은 failed가 되지 않는다**(5번째 시도도). `--retry-failed`·`--retry-uncertain`은 기록 id를 받을 수 있다.
+- **promote 대상 줄 제한**: front matter·코드 펜스·마커·관리 구역 안·제목·빈 목록 항목은 종료 4. 되돌림 링크는 파일 sha256(`payload.source_sha256`)이 같으면 줄 번호를 믿고, 바뀌었으면 해시가 유일할 때만 붙인다(아니면 `linked: false`, daily 불변).
+- **본문의 토큰**: `submit`·확인 프롬프트 전·`deliver`에서 `core.redact`로 검사해 토큰이 들어 있으면 보내지 않는다(종료 4, 이미 큐에 있으면 failed). `describe()` 출력도 가린다.
+- **outbox 읽기**: PermissionError(winerror 5/32/33 및 winerror 없는 errno 13)를 재시도, 계속되면 FileBusy.
+- **승격한 할 일의 이월**: 원본 줄이 ` [[KEY]]`로 끝나거나 줄 해시가 pending/sending/done promote 기록과 맞으면 이월하지 않는다. 승격 성공 시 이후 carryover 구역의 사본에도 ` [[KEY]]`를 붙인다.
+- **Emacs**: 전환은 'name → to (id)' 목록에서 고르고 id로 보낸다. `[[jira/KB-12]]`·`|별칭`·`#제목`은 키로 정규화하고, 키가 아닌 링크 위에서는 줄의 첫 키로 대체하지 않는다(묻는다). 워크로그는 `XhYm`만.
+- status에 `전송 중` 개수 추가. `act list --json`에 `state` 필드.
+- 알려진 한계: 전송 성공 뒤 outbox 갱신 실패 시 `sending`으로 남고 자동 재전송은 없다(수동으로 done 처리하는 명령은 아직 없음). `act list`는 PAT를 읽지 않아 옛 기록의 토큰을 가리지 못한다.
+
+| 경우 | 기록 | 종료 |
+|---|---|---|
+| 전송 중 | `sending` + claimed_at/pid, attempts+1 | — |
+| 연결 거부 | pending, attempts+1, flush 중단 | 3 |
+| 5xx | pending, attempts+1, flush 계속 | 3 |
+| 5번째 실패(uncertain 아님) | failed | 1 |
+| 전환 500 | 즉시 failed | 1 |
+| 429 | pending, 시도 수 안 셈 | 3 |
+| 읽기 타임아웃·전송 뒤 끊김·형태가 다른 2xx | pending `uncertain`, failed가 되지 않음, `--retry-uncertain [ID…]`로만 재전송 | 3 |
+| 오래된 `sending` | uncertain으로 표시 | — |
+| 전송 뒤 결과 기록 실패 | `sending` 유지 | 6/1 |
+| 401/403 → `/myself` 200 | failed | 1 |
+| 401/403 → `/myself` 401 | pending, 시도 수 안 셈, flush 중단 | 2 |
+| 401/403 → `/myself` 다운·5xx | pending, attempts+1, flush 중단 | 3 |
+| 3xx | failed, flush 중단 | 1 |
+| 그 밖의 4xx | failed | 1 |
+| 본문에 토큰 | 큐에 넣지 않음(이미 큐에 있으면 failed) | 4(1) |
+| project_keys 밖 | 보내지 않음 | 4 |
+| 전환 후보 0·2+ | 후보 목록 | 4 |
+| 확인 거부·EOF | 큐에 넣지 않음 | 1 | 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 

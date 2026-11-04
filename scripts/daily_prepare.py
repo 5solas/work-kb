@@ -13,6 +13,10 @@
 - `carryover`(merge): 이전 daily들의 `## 기록`과 `carryover` 구역에서 Jira 키 없는 `- [ ]` 줄을
   `- [ ] 내용 (← YYYY-MM-DD)`로 옮기고, 원래 줄은 `- [>] 내용 (YYYY-MM-DD로 이월)`로 표시한다.
   `[>]` 줄은 다시 옮기지 않으므로 원장 없이 멱등이다. 이미 구역에 있는 항목(체크 여부 무관)은 더하지 않는다.
+- 승격한 할 일은 옮기지 않는다(D53): 원본 줄(이월 사본이면 `(← 날짜)`의 daily에 있는 원래 줄)이 ` [[KEY]]`로
+  끝나거나, 그 줄의 해시가 `jira/outbox.jsonl`의 pending·sending·done 승격 기록과 같으면 건너뛴다.
+  outbox는 읽기만 한다(없거나 못 읽으면 없는 것으로 본다). 승격이 성공하면 jira_act가
+  `link_carried_copies`로 뒤 날짜 carryover 구역에 이미 있는 사본에도 ` [[KEY]]`를 붙인다.
 - 쓰기는 잠금 안에서, daily는 expect_sha256로. 사람이 도중에 고친 파일은 건너뛰고 보고한다.
 
 `--check-done [--json]`(지시서 §5.1·§6.4, Phase 3): 그날 daily의 `## 오늘`에서 `- [x] [[KEY]]` 줄마다
@@ -31,7 +35,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
-from lib import config, core, frontmatter, managed, notes
+from lib import config, core, frontmatter, managed, notes, outbox
 from lib.config import Config
 
 NOTE_NO_SYNC = "- (Jira 동기화 전)"
@@ -45,6 +49,11 @@ _ANY_TASK = re.compile(r"^- \[[ xX>]\] (.*)$")
 _TIME = re.compile(r"^\d{2}:\d{2}(?:\s+|$)")
 _TASK_PROBE = b"- [ ]"
 _TRAILING_BLANKS = " \t"
+_CARRIED_MARK = re.compile(r"^- \[>\] (.*) \(\d{4}-\d{2}-\d{2}로 이월\)$")
+_CARRY_COPY = re.compile(r"^(.*) \(← (\d{4}-\d{2}-\d{2})\)$")
+_COPY_TASK = re.compile(r"^- \[[ xX]\] (.*)$")
+_ENDS_WITH_KEY = re.compile(r"\s\[\[[A-Z][A-Z0-9_]+-\d+\]\]$")
+_PROMOTE_LIVE = (outbox.PENDING, outbox.SENDING, outbox.DONE)
 
 
 @dataclass(frozen=True)
@@ -321,7 +330,7 @@ def _mark(line: notes.NoteLine, path: Path, content: str, day: dt.date) -> _Edit
     return _Edit(path, line.offset, line.text.encode("utf-8"), new.encode("utf-8"))
 
 
-def _earlier_dailies(cfg: Config, day: dt.date) -> list[tuple[dt.date, Path]]:
+def _dailies(cfg: Config) -> list[tuple[dt.date, Path]]:
     base = cfg.path("daily")
     if not base.is_dir():
         return []
@@ -334,16 +343,159 @@ def _earlier_dailies(cfg: Config, day: dt.date) -> list[tuple[dt.date, Path]]:
             when = dt.date.fromisoformat(match.group(1))
         except ValueError:
             continue
-        if when < day:
-            found.append((when, path))
+        found.append((when, path))
     return sorted(found)
 
 
+def _earlier_dailies(cfg: Config, day: dt.date) -> list[tuple[dt.date, Path]]:
+    return [(when, path) for when, path in _dailies(cfg) if when < day]
+
+
+# ---------------------------------------------------------------- 승격한 할 일(D53)
+
+
+def task_body(text: str) -> str | None:
+    """`- [ ] B`·`- [>] B (날짜로 이월)`(끝의 ` [[KEY]]` 무시) → 이월 사본과 비교할 정규화 본문.
+
+    이월 사본은 B의 앞 시각(`HH:MM`)을 떼므로 여기서도 뗀다. 할 일 줄이 아니면 None.
+    """
+    line = _ENDS_WITH_KEY.sub("", text.rstrip(_TRAILING_BLANKS)).rstrip(_TRAILING_BLANKS)
+    match = _CARRIED_MARK.match(line) or _OPEN_TASK.match(line)
+    if match is None:
+        return None
+    body = _TIME.sub("", match.group(1).strip(), count=1).strip()
+    return core.normalize_line(body) or None
+
+
+def source_hashes(text: str) -> set[str]:
+    """줄의 해시와, `[>] … (이월)` 꼴이면 원래 `- [ ] …` 꼴의 해시(승격 기록의 line_hash와 맞춰 본다)."""
+    line = text.rstrip(_TRAILING_BLANKS)
+    out = {core.line_hash(line)}
+    carried = _CARRIED_MARK.match(line.strip())
+    if carried:
+        out.add(core.line_hash(f"- [ ] {carried.group(1)}"))
+    return out
+
+
+def promoted_lines(cfg: Config) -> dict[str, set[str]]:
+    """outbox의 pending·sending·done 승격 기록: {daily 상대 경로: 줄 해시들}. 읽기만 하고, 없거나 못 읽으면 {}."""
+    try:
+        items = outbox.records(cfg.root)
+    except (core.KbError, OSError) as exc:
+        core.get_logger(cfg.root).warning("이월: outbox를 읽지 못해 승격 기록을 보지 않습니다 (%s)", exc)
+        return {}
+    out: dict[str, set[str]] = {}
+    for record in items:
+        if record.get("action") != "promote" or record.get("status") not in _PROMOTE_LIVE:
+            continue
+        rel = str(record.get("source") or "").rpartition(":")[0]
+        want = (record.get("payload") or {}).get("line_hash") if isinstance(record.get("payload"), dict) else None
+        if rel and isinstance(want, str) and want:
+            out.setdefault(rel, set()).add(want)
+    return out
+
+
+def _is_promoted(text: str, rel: str, promoted: Mapping[str, set[str]]) -> bool:
+    return bool(_ENDS_WITH_KEY.search(text.rstrip(_TRAILING_BLANKS))) or bool(promoted.get(rel, set()) & source_hashes(text))
+
+
+def _source_lines(cfg: Config, rel: str, cache: dict[str, list[notes.NoteLine]]) -> list[notes.NoteLine]:
+    """daily의 `## 기록` 줄(관리 구역·코드 밖). 없거나 못 읽으면 []."""
+    if rel not in cache:
+        lines: list[notes.NoteLine] = []
+        path = cfg.path(*rel.split("/"))
+        try:
+            data = path.read_bytes()
+            span = notes.section_span(data, "기록")
+            if span is not None:
+                lines = [
+                    line for line in notes.iter_lines(rel, data)
+                    if not line.in_code and line.region is None and span[0] <= line.offset < span[1]
+                ]  # fmt: skip
+        except (OSError, UnicodeDecodeError):
+            lines = []
+        cache[rel] = lines
+    return cache[rel]
+
+
+def _copy_promoted(cfg: Config, text: str, promoted: Mapping[str, set[str]], cache: dict[str, list[notes.NoteLine]]) -> bool:
+    """carryover 사본 `내용 (← 날짜)`의 원래 줄(그 날짜 daily의 `## 기록`)이 승격됐는가."""
+    match = _CARRY_COPY.match(text.rstrip(_TRAILING_BLANKS))
+    if match is None:
+        return False
+    body = core.normalize_line(match.group(1))
+    rel = f"daily/{match.group(2)}.md"
+    for line in _source_lines(cfg, rel, cache):
+        if task_body(line.text) == body and _is_promoted(line.text, rel, promoted):
+            return True
+    return False
+
+
+def link_carried_copies(cfg: Config, source_rel: str, source_text: str, key: str) -> tuple[int, list[str]]:
+    """승격한 줄(source_rel의 source_text)의 이월 사본이 뒤 날짜 carryover 구역에 있으면 끝에 ` [[KEY]]`를 붙인다.
+
+    `- [ ]`·`- [x]` 사본만 본다(`[>]`는 이미 옮긴 흔적). 잠금 안, expect_sha256로 쓴다.
+    (붙인 사본 수, 건너뛴 파일 설명들).
+    """
+    day = notes.day_of(source_rel)
+    body = task_body(source_text)
+    if day is None or body is None:
+        return 0, []
+    link = f"[[{key}]]"
+    probe = f"(← {day})".encode("utf-8")
+    count = 0
+    problems: list[str] = []
+    with core.kb_lock(cfg.root, "daily_prepare"):
+        for when, path in _dailies(cfg):
+            if when.isoformat() <= day:
+                continue
+            data = path.read_bytes()
+            if probe not in data:
+                continue
+            rel = _rel(cfg, path)
+            try:
+                lines = list(notes.iter_lines(rel, data))
+            except UnicodeDecodeError:
+                continue
+            edits: list[notes.NoteLine] = []
+            for line in lines:
+                if line.in_code or line.region != "carryover":
+                    continue
+                task = _COPY_TASK.match(line.text)
+                if task is None:
+                    continue
+                text = task.group(1).rstrip(_TRAILING_BLANKS)
+                copy = _CARRY_COPY.match(text)
+                if link in text or _ENDS_WITH_KEY.search(text) or copy is None:
+                    continue
+                if copy.group(2) == day and core.normalize_line(copy.group(1)) == body:
+                    edits.append(line)
+            if not edits:
+                continue
+            new = data
+            for line in reversed(edits):
+                old = line.text.encode("utf-8")
+                replacement = f"{line.text.rstrip(_TRAILING_BLANKS)} {link}".encode("utf-8")
+                new = new[: line.offset] + replacement + new[line.offset + len(old):]
+            try:
+                core.atomic_write(path, new, expect_sha256=core.sha256_hex(data))
+            except (core.ConcurrentEdit, core.FileBusy) as exc:
+                problems.append(f"{rel}: {exc}")
+                continue
+            count += len(edits)
+    return count, problems
+
+
 def collect_carryover(cfg: Config, day: dt.date, keys: list[str], skipped: list[str]) -> tuple[list[_Candidate], dict[Path, bytes]]:
-    """이전 daily들에서 옮길 항목과 그 파일의 읽은 바이트. 못 읽거나 표시가 깨진 파일은 skipped에 적는다."""
+    """이전 daily들에서 옮길 항목과 그 파일의 읽은 바이트. 못 읽거나 표시가 깨진 파일은 skipped에 적는다.
+
+    승격한(또는 승격 중인) 할 일과 그 이월 사본은 옮기지 않는다(D53).
+    """
     logger = core.get_logger(cfg.root)
     candidates: list[_Candidate] = []
     sources: dict[Path, bytes] = {}
+    promoted = promoted_lines(cfg)
+    cache: dict[str, list[notes.NoteLine]] = {}
     for when, path in _earlier_dailies(cfg, day):
         data = _read_bytes(path)
         if _TASK_PROBE not in data:
@@ -370,7 +522,11 @@ def collect_carryover(cfg: Config, day: dt.date, keys: list[str], skipped: list[
                 continue
             if line.region == "carryover":
                 text = match.group(1).strip()
+                if _ENDS_WITH_KEY.search(text) or _copy_promoted(cfg, text, promoted, cache):
+                    continue
             elif line.region is None and span is not None and span[0] <= line.offset < span[1]:
+                if _is_promoted(line.text, rel, promoted):
+                    continue
                 body = _TIME.sub("", match.group(1).strip(), count=1).strip()
                 text = f"{body} (← {when.isoformat()})" if body else ""
             else:

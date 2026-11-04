@@ -6,13 +6,19 @@
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
+import os
+import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import daily_prepare
 import jira_act
 import mock_jira
 from lib import config, core, frontmatter, net, outbox
@@ -530,6 +536,69 @@ def test_worklog_403_is_failed(make_env, capsys):
     code, _out, _err = run(capsys, env.vault, "worklog", "KB-12", "1h")
     assert code == 1
     assert only(env.vault)["status"] == "failed"
+    assert [e["path"] for e in env.jira.log][-1] == "/rest/api/2/myself"  # 403도 D52 재확인
+
+
+def test_403_then_myself_401_stays_pending_exit_2_and_stops(make_env, capsys):
+    """403 뒤 /myself가 401이면 토큰 문제: pending(시도 수 그대로), 종료 2, flush 중단."""
+    env = make_env(down=True, worklog_denied=True)
+    assert run(capsys, env.vault, "worklog", "KB-12", "1h")[0] == 3
+    assert run(capsys, env.vault, "comment", "KB-12", "--body", "둘째")[0] == 3
+
+    def expire_token(req):
+        req.mock.modes["bad_token"] = TOKEN  # 쓰기는 통과했고, 그 뒤로 토큰이 죽었다
+        return None
+
+    env.jira.modes["on_write"] = expire_token
+    env.jira.come_up()
+    code, _out, err = run(capsys, env.vault, "flush")
+    assert code == 2 and "인증 실패" in err and "나머지 1건" in err
+    assert [(r["status"], r["attempts"]) for r in records(env.vault)] == [("pending", 1), ("pending", 1)]
+    assert "401" in records(env.vault)[0]["last_error"]
+    assert [e["path"] for e in env.jira.log][-1] == "/rest/api/2/myself"
+    assert env.jira.count("write") == 1
+
+
+def test_403_then_myself_down_stays_pending_exit_3(make_env, capsys):
+    env = make_env(worklog_denied=True, myself_status=503)
+    code, _out, _err = run(capsys, env.vault, "worklog", "KB-12", "1h")
+    assert code == 3
+    rec = only(env.vault)
+    assert rec["status"] == "pending" and rec["attempts"] == 1 and "503" in rec["last_error"]
+    assert [e["path"] for e in env.jira.log][-1] == "/rest/api/2/myself"
+
+
+def test_other_4xx_is_failed_with_jira_message_and_not_resent(env, capsys):
+    code, _out, err = run(capsys, env.vault, "assign", "KB-12", "nobody")  # 모의 400
+    assert code == 1 and "실패" in err
+    rec = only(env.vault)
+    assert rec["status"] == "failed" and rec["attempts"] == 1
+    assert "400" in rec["last_error"] and "does not exist" in rec["last_error"]
+    code, _out, _err = run(capsys, env.vault, "comment", "KB-999", "--body", "없는 일감")  # 모의 404
+    assert code == 1
+    rec = records(env.vault)[1]
+    assert rec["status"] == "failed" and rec["attempts"] == 1
+    assert "404" in rec["last_error"] and "이슈가 존재하지 않거나" in rec["last_error"]
+    sent = env.jira.count("write")
+    assert sent == 2
+    code, out, _err = run(capsys, env.vault, "flush")
+    assert code == 0 and "보낼 항목이 없습니다" in out
+    assert env.jira.count("write") == sent  # 그냥 flush는 실패 항목을 다시 보내지 않는다
+    assert [r["status"] for r in records(env.vault)] == ["failed", "failed"]
+
+
+def test_5xx_keeps_pending_and_flush_continues(make_env, capsys):
+    env = make_env(down=True)
+    for body in ("첫째", "둘째"):
+        assert run(capsys, env.vault, "comment", "KB-12", "--body", body)[0] == 3
+    env.jira.modes["write_500_times"] = 1
+    env.jira.come_up()
+    code, _out, err = run(capsys, env.vault, "flush")
+    assert code == 3 and "나머지" not in err
+    first, second = records(env.vault)
+    assert (first["status"], first["attempts"]) == ("pending", 2) and "500" in first["last_error"]
+    assert (second["status"], second["attempts"]) == ("done", 2)
+    assert [e["json"]["body"] for e in writes(env.jira)] == ["첫째", "둘째"]
 
 
 def test_bad_token_stays_pending_exit_2(make_env, capsys):
@@ -711,6 +780,48 @@ def test_lock_not_held_during_send(make_env, run_kb):
     assert [r["status"] for r in records(env.vault)] == ["done", "done"]
 
 
+def test_lock_not_held_during_flush_or_promote(make_env, run_kb, capsys):
+    """하위 프로세스 flush(두 건)와 promote: 보내는 동안 잠금이 없고, promote는 줄에 키를 붙인 뒤
+    잠금 없이 sync_key(GET)를 한다."""
+    probes: list[str] = []
+    reads: list[tuple[str, str, bool]] = []
+    holder: dict = {}
+
+    def lock_state() -> str:
+        try:
+            with core.kb_lock(holder["vault"], "probe", timeout=0.2):
+                return "ok"
+        except core.LockBusy:
+            return "busy"
+
+    def probe(req):
+        probes.append(lock_state())
+        return None
+
+    def read_probe(req):
+        if holder.get("watch_reads"):
+            linked = "[[KB-16]]" in holder["daily"].read_text(encoding="utf-8")
+            reads.append((req.path, lock_state(), linked))
+        return None
+
+    env = make_env(down=True, on_write=probe, on_read=read_probe)
+    holder.update(vault=env.vault, daily=env.daily)
+    for body in ("하나", "둘"):
+        assert run(capsys, env.vault, "comment", "KB-12", "--body", body)[0] == 3
+    env.jira.come_up()
+    result = run_kb("act", "flush")
+    assert result.returncode == 0, result.stderr
+    assert probes == ["ok", "ok"]
+    assert [r["status"] for r in records(env.vault)] == ["done", "done"]
+
+    holder["watch_reads"] = True
+    result = run_kb("act", "promote", "--from", f"daily/{DAY}.md:{LINE_REVIEW}", "KB", "--yes")
+    assert result.returncode == 0, result.stderr
+    assert probes == ["ok", "ok", "ok"]
+    assert reads, "sync_key가 Jira를 읽지 않았다"
+    assert all(state == "ok" and linked for _path, state, linked in reads), reads
+
+
 def test_lock_probe_detects_a_holder(vault, tmp_path):
     """대조: 다른 프로세스가 잠금을 쥐고 있으면 같은 시험이 busy를 본다(위 시험이 헛통과가 아님)."""
     import subprocess
@@ -735,3 +846,426 @@ def test_lock_probe_detects_a_holder(vault, tmp_path):
                 pass
     finally:
         proc.wait(timeout=30)
+
+
+# ---------------------------------------------------------------- 보내는 중 표시(claim): 한 번만 보낸다
+
+SCRIPTS = Path(jira_act.__file__).resolve().parent
+TESTS = Path(__file__).resolve().parent
+
+
+def _spawn(tmp_path: Path, vault: Path, *args: str, extra: dict[str, str] | None = None) -> subprocess.Popen:
+    """run_kb와 같은 환경으로 `kb.py …`를 띄우고 기다리지 않는다(동시 실행 시험용)."""
+    drop = {"DEEPINFRA_API_KEY", "PYTHONUTF8", "PYTHONIOENCODING"}
+    child = {k: v for k, v in os.environ.items() if not k.startswith("KB_") and k not in drop and "PROXY" not in k.upper()}
+    child.update({
+        "PYTHONPATH": str(TESTS), "PYTHON_KEYRING_BACKEND": "fake_keyring.FileKeyring",
+        "KB_FAKE_KEYRING_FILE": str(tmp_path / "keyring.json"), "KB_ROOT": str(vault), "PYTHONUTF8": "1",
+        "HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9", "NO_PROXY": "127.0.0.1,localhost",
+    })  # fmt: skip
+    if "KB_FAKE_NOW" in os.environ:
+        child["KB_FAKE_NOW"] = os.environ["KB_FAKE_NOW"]
+    child.update(extra or {})
+    return subprocess.Popen(
+        [sys.executable, "-X", "utf8", str(SCRIPTS / "kb.py"), *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
+        env=child, cwd=str(SCRIPTS.parent),
+    )  # fmt: skip
+
+
+def _bodies(server, key: str = "KB-12") -> list[str]:
+    return [c["body"] for c in server.issues[key]["fields"]["comment"]["comments"]]
+
+
+def _dead_pid() -> int:
+    done = subprocess.run(
+        [sys.executable, "-c", "import os; print(os.getpid())"], capture_output=True, text=True, encoding="utf-8", timeout=60
+    )
+    return int(done.stdout.strip())
+
+
+def _real_now_iso(seconds_ago: float = 0) -> str:
+    return (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=seconds_ago)).isoformat(timespec="seconds")
+
+
+def test_two_concurrent_flush_processes_send_once(make_env, capsys, tmp_path):
+    env = make_env(down=True)
+    assert run(capsys, env.vault, "comment", "KB-12", "--body", "한 번만 보내야 함")[0] == 3
+    env.jira.come_up()
+    env.jira.modes["slow_write_sec"] = 2.5
+    procs = [_spawn(tmp_path, env.vault, "act", "flush") for _ in range(2)]
+    outputs = [proc.communicate(timeout=120) for proc in procs]
+    assert [proc.returncode for proc in procs] == [0, 0], outputs
+    assert env.jira.count("write") == 1
+    assert _bodies(env.jira).count("한 번만 보내야 함") == 1
+    rec = only(env.vault)
+    assert rec["status"] == "done" and "pid" not in rec and "claimed_at" not in rec
+
+
+def test_comment_and_concurrent_flush_send_once(make_env, capsys, tmp_path):
+    env = make_env(slow_write_sec=2.5)
+    proc = _spawn(tmp_path, env.vault, "act", "comment", "KB-12", "--body", "겹친 전송")
+    try:
+        deadline = time.monotonic() + 60
+        while not records(env.vault):
+            assert time.monotonic() < deadline and proc.poll() is None, proc.communicate()
+            time.sleep(0.05)
+        assert only(env.vault)["status"] == "sending"  # 넣기와 표시가 한 걸음
+        code, out, _err = run(capsys, env.vault, "flush")
+        assert code == 0 and "보내는 중 1건은 건너뜀" in out
+    finally:
+        stdout, stderr = proc.communicate(timeout=120)
+    assert proc.returncode == 0, stderr
+    assert env.jira.count("write") == 1
+    assert _bodies(env.jira).count("겹친 전송") == 1
+    assert only(env.vault)["status"] == "done"
+
+
+def test_dead_owner_sending_is_uncertain_skipped_and_listed(make_env, capsys):
+    env = make_env()
+    record = outbox.make_record(action="comment", key="KB-12", payload={"body": "끊긴 전송"}, ts=NOW)
+    record.update(status="sending", attempts=1, claimed_at=_real_now_iso(), pid=_dead_pid())
+    outbox.append(env.vault, record)
+    before = outbox_bytes(env.vault)
+
+    code, out, _err = run(capsys, env.vault, "flush")
+    assert code == 0 and "불확실 1건은 건너뜀" in out
+    code, out, _err = run(capsys, env.vault, "flush", "--retry-failed")
+    assert code == 0 and "보낼 항목이 없습니다" in out
+    assert writes(env.jira) == [] and outbox_bytes(env.vault) == before
+    code, _out, err = run(capsys, env.vault, "flush", "--retry-failed", record["id"])
+    assert code == 4 and "failed 상태가 아닙니다" in err
+
+    code, out, _err = run(capsys, env.vault, "list")
+    assert f"{record['id']} uncertain 시도 1" in out and "보내다 끊김" in out and "불확실 1" in out
+    code, out, _err = run(capsys, env.vault, "list", "--json")
+    assert json.loads(out)[0]["state"] == "uncertain"
+
+    code, _out, err = run(capsys, env.vault, "flush", "--retry-uncertain", record["id"])
+    assert code == 0, err
+    rec = only(env.vault)
+    assert rec["status"] == "done" and rec["attempts"] == 2 and "pid" not in rec
+    assert _bodies(env.jira).count("끊긴 전송") == 1
+
+
+def test_live_owner_is_sending_and_old_claim_is_stale(make_env, capsys):
+    env = make_env()
+    sleeper = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )  # fmt: skip
+    try:
+        record = outbox.make_record(action="comment", key="KB-12", payload={"body": "보내는 중"}, ts=NOW)
+        record.update(status="sending", attempts=1, claimed_at=_real_now_iso(), pid=sleeper.pid)
+        outbox.append(env.vault, record)
+        code, out, _err = run(capsys, env.vault, "flush", "--retry-uncertain")
+        assert code == 0 and "보내는 중 1건은 건너뜀" in out
+        code, _out, err = run(capsys, env.vault, "flush", "--retry-uncertain", record["id"])
+        assert code == 4 and "uncertain 상태가 아닙니다" in err
+        code, out, _err = run(capsys, env.vault, "list")
+        assert f"{record['id']} sending" in out
+        assert writes(env.jira) == []
+    finally:
+        sleeper.kill()
+        sleeper.wait(timeout=30)
+    assert jira_act.stale_after(env.cfg) == 120
+    alive_old = {"pid": os.getpid(), "claimed_at": _real_now_iso(seconds_ago=121)}
+    alive_new = {"pid": os.getpid(), "claimed_at": _real_now_iso(seconds_ago=5)}
+    assert jira_act.claim_is_stale(alive_old, 120) and not jira_act.claim_is_stale(alive_new, 120)
+    assert jira_act.claim_is_stale({"pid": _dead_pid(), "claimed_at": _real_now_iso()}, 120)
+
+
+def test_interrupted_result_write_leaves_sending_not_pending(make_env, capsys, run_kb):
+    """보낸 뒤 결과를 적지 못하면(잠금 시간 초과) 기록은 sending으로 남고, 그냥 flush는 다시 보내지 않는다."""
+    threads: list[threading.Thread] = []
+    holder: dict = {}
+
+    def grab_lock(req):
+        started = threading.Event()
+
+        def hold():
+            with core.kb_lock(holder["vault"], "holder"):
+                started.set()
+                time.sleep(4)
+
+        thread = threading.Thread(target=hold, daemon=True)
+        thread.start()
+        threads.append(thread)
+        started.wait(10)
+        return None
+
+    env = make_env(on_write=grab_lock)
+    holder["vault"] = env.vault
+    result = run_kb("act", "comment", "KB-12", "--body", "결과를 못 적음", env={"KB_LOCK_TIMEOUT": "1.5"})
+    for thread in threads:
+        thread.join(timeout=30)
+    assert result.returncode == 6, result.stderr
+    assert "Jira에는 보냈지만" in result.stderr and "다시 보내지 마세요" in result.stderr
+    rec = only(env.vault)
+    assert rec["status"] == "sending" and rec["attempts"] == 1
+    env.jira.modes.pop("on_write")
+    code, out, _err = run(capsys, env.vault, "flush")
+    assert code == 0 and "불확실 1건은 건너뜀" in out
+    assert env.jira.count("write") == 1 and _bodies(env.jira).count("결과를 못 적음") == 1
+
+
+# ---------------------------------------------------------------- 불확실은 실패가 되지 않는다
+
+
+def test_uncertain_on_fifth_attempt_stays_uncertain(make_env, capsys):
+    env = make_env(jira={"timeout": 0.4}, write_500_times=4)
+    assert run(capsys, env.vault, "comment", "KB-12", "--body", "다섯째는 느림")[0] == 3
+    for attempt in (2, 3, 4):
+        assert run(capsys, env.vault, "flush")[0] == 3
+        assert only(env.vault)["attempts"] == attempt
+    env.jira.modes["slow_write_sec"] = 1.5
+    code, _out, err = run(capsys, env.vault, "flush")
+    assert code == 3 and "불확실" in err and "5번 시도" not in err
+    rec = only(env.vault)
+    assert (rec["status"], rec["last_error"], rec["attempts"]) == ("pending", "uncertain", 5)
+    sent = env.jira.count("write")
+    code, out, _err = run(capsys, env.vault, "flush", "--retry-failed")
+    assert code == 0 and "보낼 항목이 없습니다" in out
+    assert run(capsys, env.vault, "flush", "--retry-failed", rec["id"])[0] == 4
+    assert env.jira.count("write") == sent
+    assert _bodies(env.jira).count("다섯째는 느림") == 1
+
+
+def test_retry_uncertain_with_ids_only_sends_those(make_env, capsys):
+    env = make_env(jira={"timeout": 0.4}, slow_write_sec=1.5)
+    for body in ("가", "나"):
+        assert run(capsys, env.vault, "comment", "KB-12", "--body", body)[0] == 3
+    first, second = records(env.vault)
+    env.jira.modes["slow_write_sec"] = 0
+    assert run(capsys, env.vault, "flush", "--retry-uncertain", "없는id")[0] == 4
+    code, _out, err = run(capsys, env.vault, "flush", "--retry-uncertain", second["id"])
+    assert code == 0, err
+    assert [(r["status"], r["last_error"]) for r in records(env.vault)] == [("pending", "uncertain"), ("done", None)]
+    assert [e["json"]["body"] for e in writes(env.jira)] == ["가", "나", "나"]
+
+
+def test_redirect_on_write_is_failed_and_stops_flush(make_env, capsys):
+    env = make_env(down=True)
+    for body in ("리다이렉트 하나", "리다이렉트 둘"):
+        assert run(capsys, env.vault, "comment", "KB-12", "--body", body)[0] == 3
+    before = _bodies(env.jira)
+    env.jira.modes["redirect_writes"] = True
+    env.jira.come_up()
+    code, _out, err = run(capsys, env.vault, "flush")
+    assert code == 1 and "리다이렉트" in err and "나머지 1건" in err
+    first, second = records(env.vault)
+    assert first["status"] == "failed" and "https 주소로 고치세요" in first["last_error"]
+    assert (second["status"], second["attempts"]) == ("pending", 1)
+    assert env.jira.count("write") == 1 and [e["method"] for e in env.jira.log] == ["POST"]  # GET으로 따라가지 않음
+    assert _bodies(env.jira) == before
+
+
+def test_html_200_is_uncertain_not_done(make_env, capsys):
+    env = make_env(html_200=True)
+    before = _bodies(env.jira)
+    code, _out, err = run(capsys, env.vault, "comment", "KB-12", "--body", "화면이 옴")
+    assert code == 3 and "불확실" in err
+    rec = only(env.vault)
+    assert (rec["status"], rec["last_error"]) == ("pending", "uncertain") and "JSON이 아닙니다" in rec["error_detail"]
+    assert env.jira.count("write") == 1 and _bodies(env.jira) == before
+    code, _out, err = run(capsys, env.vault, "transition", "KB-12", "Done", "--yes")
+    assert code == 3 and records(env.vault)[1]["last_error"] == "uncertain"
+    assert env.jira.issues["KB-12"]["fields"]["status"]["name"] == "In Progress"
+    code, out, _err = run(capsys, env.vault, "flush")
+    assert code == 0 and "불확실 2건" in out and env.jira.count("write") == 2
+
+
+def test_create_201_without_key_is_uncertain(make_env, capsys):
+    env = make_env(on_write=lambda req: (201, {}) if req.path == "/rest/api/2/issue" else None)
+    code, out, err = run(capsys, env.vault, "create", "KB", "--summary", "키 없는 응답", "--type", "Task", "--yes")
+    assert code == 3 and "불확실" in err and "새 일감: " not in out
+    rec = only(env.vault)
+    assert (rec["status"], rec["last_error"], rec["attempts"]) == ("pending", "uncertain", 1)
+    assert "키가 없습니다" in rec["error_detail"]
+    for args in (("flush",), ("flush", "--retry-failed")):
+        code, out, _err = run(capsys, env.vault, *args)
+        assert code == 0 and "보낼 항목이 없습니다" in out
+    assert env.jira.count("write") == 1
+
+
+# ---------------------------------------------------------------- 토큰이 든 본문
+
+
+def test_token_in_payload_is_refused_everywhere(env, capsys, monkeypatch):
+    text = DAILY_TEXT + f"- 09:30 토큰 붙여넣음 {TOKEN} 실수\n"  # 13번째 줄
+    env.daily.write_bytes(text.encode("utf-8"))
+    asked = answer(monkeypatch, "y")
+    cases = [
+        ("comment", "KB-12", "--from-line", f"daily/{DAY}.md:13"),
+        ("comment", "KB-12", "--body", f"토큰 {TOKEN}"),
+        ("create", "KB", "--summary", "제목", "--type", "Task", "--description", f"설명 {TOKEN}", "--yes"),
+        ("create", "KB", "--summary", f"제목 {TOKEN}", "--type", "Task"),
+        ("promote", "--from", f"daily/{DAY}.md:13", "KB", "--yes"),
+        ("promote", "--from", f"daily/{DAY}.md:13", "KB"),
+    ]
+    for args in cases:
+        code, out, err = run(capsys, env.vault, *args)
+        assert code == 4, (args, err)
+        assert "본문에 토큰이 들어 있어 보내지 않습니다" in err
+        assert TOKEN not in out and TOKEN not in err
+    assert asked == []  # 확인 질문(제목이 보임)보다 먼저 거부
+    assert outbox_bytes(env.vault) is None and writes(env.jira) == []
+    assert env.daily.read_bytes() == text.encode("utf-8")
+    log = env.vault / ".state" / "logs" / "kb.log"
+    assert not log.exists() or TOKEN not in log.read_text(encoding="utf-8")
+
+
+def test_queued_record_with_token_is_not_sent(env, capsys):
+    """예전에 큐에 들어간 기록에 토큰이 있으면 보내지 않고 실패로 둔다. 출력에도 토큰을 보이지 않는다."""
+    outbox.append(env.vault, outbox.make_record(action="comment", key="KB-12", payload={"body": f"옛 기록 {TOKEN}"}, ts=NOW))
+    code, out, err = run(capsys, env.vault, "flush")
+    assert code == 1 and "본문에 토큰이 들어 있어" in err
+    assert TOKEN not in out and TOKEN not in err
+    assert writes(env.jira) == [] and only(env.vault)["status"] == "failed"
+
+
+# ---------------------------------------------------------------- promote: 줄 고르기
+
+
+PROMOTE_TEXT = DAILY_TEXT + (
+    "```\n"  # 13
+    "- [ ] 코드 안 할 일\n"  # 14
+    "```\n"  # 15
+    "## 이월\n"  # 16
+    "<!-- kb:carryover:start -->\n"  # 17
+    "- [ ] 개인: 옮긴 일 (← 2026-11-04)\n"  # 18
+    "<!-- kb:carryover:end -->\n"  # 19
+    "- \n"  # 20 빈 목록 항목
+)
+
+
+@pytest.mark.parametrize(
+    ("lineno", "why"),
+    [
+        (1, "front matter"), (2, "front matter"), (4, "제목 줄"), (5, "관리 구역 표시"), (6, "관리 구역(today)"),
+        (7, "관리 구역 표시"), (13, "코드 블록"), (14, "코드 블록"), (15, "코드 블록"), (17, "관리 구역 표시"),
+        (18, "daily/2026-11-04.md"), (20, "빈 줄"),
+    ],
+)  # fmt: skip
+def test_promote_refuses_lines_that_are_not_human_items(env, capsys, lineno, why):
+    env.daily.write_bytes(PROMOTE_TEXT.encode("utf-8"))
+    code, _out, err = run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:{lineno}", "KB", "--yes")
+    assert code == 4, err
+    assert why in err
+    assert writes(env.jira) == [] and outbox_bytes(env.vault) is None
+    assert env.daily.read_bytes() == PROMOTE_TEXT.encode("utf-8")
+
+
+def test_promote_fallback_ignores_lines_in_code_fence(make_env, capsys):
+    env = make_env(down=True)
+    assert run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:{LINE_REVIEW}", "KB", "--yes")[0] == 3
+    edited = env.daily.read_text(encoding="utf-8").replace("PR 리뷰 요청 옴\n", "PR 리뷰 요청 옴 (취소함)\n")
+    edited += "```\n- 11:40 개인: PR 리뷰 요청 옴\n```\n"  # 같은 글이 코드 블록 안에만 있다
+    env.daily.write_bytes(edited.encode("utf-8"))
+    env.jira.come_up()
+    code, _out, err = run(capsys, env.vault, "flush")
+    assert code == 0, err
+    assert "붙이지 않았습니다" in err
+    assert env.daily.read_text(encoding="utf-8") == edited
+    assert only(env.vault)["result"] == {"key": "KB-16", "linked": False}
+
+
+@pytest.mark.parametrize("adjacent", [False, True])
+def test_promote_duplicate_lines_are_not_guessed(make_env, capsys, adjacent):
+    """같은 줄이 여럿이고 파일이 바뀌었으면 어느 줄인지 모르므로 붙이지 않는다(linked:false, daily 그대로)."""
+    env = make_env(down=True)
+    dup = "- [ ] 개인: 11월 회의실 예약\n"  # 12번째 줄과 같은 줄
+    text = DAILY_TEXT + ("" if adjacent else "- 13:00 사이 줄\n") + dup
+    env.daily.write_bytes(text.encode("utf-8"))
+    target = 13 if adjacent else 14
+    assert run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:{target}", "KB", "--yes")[0] == 3
+    inserted = text.replace("## 기록\n", "## 기록\n- 08:00 새로 끼운 줄\n")
+    env.daily.write_bytes(inserted.encode("utf-8"))
+    env.jira.come_up()
+    code, _out, err = run(capsys, env.vault, "flush")
+    assert code == 0, err
+    assert "어느 줄인지 모릅니다" in err
+    assert env.daily.read_text(encoding="utf-8") == inserted
+    assert only(env.vault)["result"] == {"key": "KB-16", "linked": False}
+
+
+def test_promote_duplicate_line_unchanged_file_links_exact_line(env, capsys):
+    dup = "- [ ] 개인: 11월 회의실 예약\n"
+    text = DAILY_TEXT + dup  # 12·13번째 줄이 같다
+    env.daily.write_bytes(text.encode("utf-8"))
+    code, _out, err = run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:13", "KB", "--yes")
+    assert code == 0, err
+    lines = env.daily.read_text(encoding="utf-8").split("\n")
+    assert lines[11] == "- [ ] 개인: 11월 회의실 예약" and lines[12] == "- [ ] 개인: 11월 회의실 예약 [[KB-16]]"
+
+
+# ---------------------------------------------------------------- promote와 이월(D53)
+
+
+def _day_text(vault: Path, day: str) -> str:
+    return (vault / "daily" / f"{day}.md").read_text(encoding="utf-8")
+
+
+def test_pending_promote_is_not_carried_over(make_env, capsys):
+    env = make_env(down=True)
+    assert run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:{LINE_TODO}", "KB", "--yes")[0] == 3
+    daily_prepare.run(env.cfg, "2026-11-06")
+    assert "회의실 예약" not in _day_text(env.vault, "2026-11-06")
+    assert "- [ ] 개인: 11월 회의실 예약\n" in _day_text(env.vault, DAY)  # [>] 표시도 하지 않는다
+    env.jira.come_up()
+    assert run(capsys, env.vault, "flush")[0] == 0
+    assert "- [ ] 개인: 11월 회의실 예약 [[KB-16]]\n" in _day_text(env.vault, DAY)
+    daily_prepare.run(env.cfg, "2026-11-07")
+    assert "회의실 예약" not in _day_text(env.vault, "2026-11-07")
+
+
+def test_promote_after_carryover_links_the_carried_copy(env, capsys):
+    daily_prepare.run(env.cfg, "2026-11-06")
+    assert "- [ ] 개인: 11월 회의실 예약 (← 2026-11-05)\n" in _day_text(env.vault, "2026-11-06")
+    code, out, err = run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:{LINE_TODO}", "KB", "--yes")
+    assert code == 0, err
+    assert "이월 사본 1곳" in out
+    assert "- [>] 개인: 11월 회의실 예약 (2026-11-06로 이월) [[KB-16]]\n" in _day_text(env.vault, DAY)
+    assert "- [ ] 개인: 11월 회의실 예약 (← 2026-11-05) [[KB-16]]\n" in _day_text(env.vault, "2026-11-06")
+    daily_prepare.run(env.cfg, "2026-11-07")
+    assert "회의실 예약" not in _day_text(env.vault, "2026-11-07")
+
+
+# ---------------------------------------------------------------- outbox 읽기: 공유 위반
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 공유 위반")
+def test_outbox_read_retries_while_another_holder_locks_the_file(vault, monkeypatch):
+    import msvcrt
+
+    record = outbox.append(vault, outbox.make_record(action="assign", key="KB-1", payload={}, ts=NOW))
+    path = outbox.path_for(vault)
+
+    def hold(seconds: float, locked: threading.Event) -> None:
+        size = path.stat().st_size
+        with open(path, "rb+") as fh:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, size)
+            locked.set()
+            time.sleep(seconds)
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, size)
+
+    locked = threading.Event()
+    thread = threading.Thread(target=hold, args=(0.4, locked))
+    thread.start()
+    assert locked.wait(10)
+    assert [r["id"] for r in outbox.records(vault)] == [record["id"]]  # 풀릴 때까지 다시 읽는다
+    assert outbox.update(vault, record["id"], {"status": "done"})["status"] == "done"  # 그 뒤 다시 쓰기
+    thread.join(timeout=10)
+    assert outbox.get(vault, record["id"])["status"] == "done"
+
+    monkeypatch.setattr(outbox, "READ_RETRIES", 1)
+    locked = threading.Event()
+    thread = threading.Thread(target=hold, args=(1.5, locked))
+    thread.start()
+    assert locked.wait(10)
+    try:
+        with pytest.raises(core.FileBusy):
+            outbox.records(vault)
+    finally:
+        thread.join(timeout=10)

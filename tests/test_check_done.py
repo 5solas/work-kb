@@ -213,10 +213,15 @@ def test_config_transition_names(vault, issues):
 
 
 def test_default_names_without_config(vault):
+    """설정 어디에도 done_transition_names가 없으면 기본값. 볼트로 복사된 저장소 config.yaml에서 그 키를 뺀다."""
+    shared = vault / "config.yaml"
+    if shared.exists():
+        text = shared.read_text(encoding="utf-8")
+        kept = "".join(line for line in text.splitlines(keepends=True) if "done_transition_names" not in line)
+        shared.write_bytes(kept.encode("utf-8"))
     config.save_local(vault, {"environment": "home"})
     cfg = config.load(vault)
-    if cfg.get("jira.done_transition_names") is not None:
-        pytest.skip("저장소 config.yaml에 done_transition_names가 있음")
+    assert cfg.get("jira.done_transition_names") is None
     assert daily_prepare.done_transition_names(cfg) == ["Done", "완료"]
 
 

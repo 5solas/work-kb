@@ -367,6 +367,76 @@ def test_existing_item_not_duplicated_even_if_source_unmarked(cfg, vault):
     assert "- [>] 개인: 할 일 (2026-11-05로 이월)" in _daily(vault, "2026-11-04").read_text(encoding="utf-8")
 
 
+def _promote_record(vault: Path, rel: str, lineno: int, line: str, status: str) -> None:
+    from lib import outbox
+
+    record = outbox.make_record(
+        action="promote", key="KB", payload={"summary": "x", "issuetype": "Task", "line_hash": core.line_hash(line)},
+        ts="2026-11-05T09:00:00+09:00", source=f"{rel}:{lineno}",
+    )  # fmt: skip
+    record["status"] = status
+    outbox.append(vault, record)
+
+
+@pytest.mark.parametrize(("status", "carried"), [("pending", False), ("sending", False), ("done", False), ("failed", True)])
+def test_promoted_item_is_not_carried(cfg, vault, status, carried):
+    """승격 기록(pending·sending·done)의 줄은 옮기지 않고 [>] 표시도 하지 않는다. 실패한 승격은 옮긴다."""
+    src = _write(_daily(vault, "2026-11-04"), "## 기록\n- [ ] 개인: 승격한 할 일\n- [ ] 개인: 그냥 할 일\n")
+    _promote_record(vault, "daily/2026-11-04.md", 2, "- [ ] 개인: 승격한 할 일", status)
+    daily_prepare.run(cfg, D05)
+    region = _region(_daily(vault, "2026-11-05").read_bytes(), "carryover")
+    assert ("- [ ] 개인: 승격한 할 일 (← 2026-11-04)" in region) is carried
+    assert "- [ ] 개인: 그냥 할 일 (← 2026-11-04)" in region
+    source = _daily(vault, "2026-11-04").read_text(encoding="utf-8")
+    assert ("- [ ] 개인: 승격한 할 일\n" in source) is not carried
+    assert src != source.encode("utf-8")  # 다른 줄은 [>] 표시
+
+
+def test_missing_outbox_is_tolerated(cfg, vault):
+    _write(_daily(vault, "2026-11-04"), "## 기록\n- [ ] 개인: 할 일\n")
+    assert not (vault / "jira" / "outbox.jsonl").exists()
+    daily_prepare.run(cfg, D05)
+    assert _region(_daily(vault, "2026-11-05").read_bytes(), "carryover") == ["- [ ] 개인: 할 일 (← 2026-11-04)"]
+    assert not (vault / "jira" / "outbox.jsonl").exists()  # 읽기만 한다
+
+
+def test_carried_copy_of_promoted_line_is_not_carried_again(cfg, vault):
+    """원래 줄이 ` [[KEY]]`로 끝나거나(승격 성공) 승격 기록과 해시가 같으면 이월 사본도 다시 옮기지 않는다."""
+    _write(_daily(vault, "2026-11-04"), (
+        "## 기록\n"
+        "- [>] 09:10 개인: 키 붙은 일 (2026-11-05로 이월) [[KB-16]]\n"
+        "- [>] 개인: 대기 중 승격 (2026-11-05로 이월)\n"
+        "- [>] 개인: 보통 일 (2026-11-05로 이월)\n"
+    ))  # fmt: skip
+    _write(_daily(vault, "2026-11-05"), (
+        "## 이월\n<!-- kb:carryover:start -->\n"
+        "- [ ] 개인: 키 붙은 일 (← 2026-11-04)\n"
+        "- [ ] 개인: 대기 중 승격 (← 2026-11-04)\n"
+        "- [ ] 개인: 보통 일 (← 2026-11-04)\n"
+        "<!-- kb:carryover:end -->\n## 기록\n"
+    ))  # fmt: skip
+    _promote_record(vault, "daily/2026-11-04.md", 3, "- [>] 개인: 대기 중 승격 (2026-11-05로 이월)", "pending")
+    daily_prepare.run(cfg, dt.date(2026, 11, 6))
+    assert _region(_daily(vault, "2026-11-06").read_bytes(), "carryover") == ["- [ ] 개인: 보통 일 (← 2026-11-04)"]
+
+
+def test_link_carried_copies_marks_later_carryover_regions(cfg, vault):
+    _write(_daily(vault, "2026-11-06"), (
+        "## 이월\n<!-- kb:carryover:start -->\n"
+        "- [ ] 개인: 회의실 예약 (← 2026-11-05)\n"
+        "- [x] 개인: 다른 일 (← 2026-11-05)\n"
+        "<!-- kb:carryover:end -->\n## 기록\n- [ ] 개인: 회의실 예약 (← 2026-11-05)\n"
+    ))  # fmt: skip
+    before_old = _write(_daily(vault, "2026-11-04"), "## 이월\n<!-- kb:carryover:start -->\n- [ ] 개인: 회의실 예약 (← 2026-11-05)\n<!-- kb:carryover:end -->\n")
+    count, problems = daily_prepare.link_carried_copies(cfg, "daily/2026-11-05.md", "- [ ] 10:30 개인: 회의실 예약", "KB-16")
+    assert (count, problems) == (1, [])
+    text = _daily(vault, "2026-11-06").read_text(encoding="utf-8")
+    assert "<!-- kb:carryover:start -->\n- [ ] 개인: 회의실 예약 (← 2026-11-05) [[KB-16]]\n- [x] 개인: 다른 일" in text
+    assert text.endswith("## 기록\n- [ ] 개인: 회의실 예약 (← 2026-11-05)\n")  # 구역 밖은 그대로
+    assert _daily(vault, "2026-11-04").read_bytes() == before_old  # 앞 날짜는 보지 않는다
+    assert daily_prepare.link_carried_copies(cfg, "daily/2026-11-05.md", "- [ ] 10:30 개인: 회의실 예약", "KB-16") == (0, [])
+
+
 def test_no_carryover_option_leaves_sources(cfg, vault):
     src = _write(_daily(vault, "2026-11-04"), "## 기록\n- [ ] 개인: 할 일\n")
     daily_prepare.run(cfg, D05, carryover=False)

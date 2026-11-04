@@ -801,6 +801,23 @@ TEXT가 있으면 바로 추가하고, 없으면 캡처 버퍼를 연다 (C-c C-
 
 (defconst work-kb--key-regexp "[A-Z][A-Z0-9_]+-[0-9]+")
 
+(defun work-kb--key-bounded-p (beg end bol eol)
+  "BEG..END의 키 후보가 홀로 선 키인가.
+앞뒤에 키 글자나 `-'가 붙어 있으면 아니다.
+`xKB-1'·`KB-12-설계'(문서 이름)는 키가 아니다."
+  (and (or (= beg bol) (not (string-match-p "[A-Za-z0-9_-]" (string (char-before beg)))))
+       (or (= end eol) (not (string-match-p "[A-Za-z0-9_-]" (string (char-after end)))))))
+
+(defun work-kb--link-key (target)
+  "위키링크 대상 TARGET이 Jira 키를 가리키면 그 키, 아니면 nil.
+앞의 `jira/'와 뒤의 `.md'를 떼고 본다.
+[[jira/KB-12]]·[[KB-12.md]] → KB-12, [[KB-12-설계]] → nil."
+  (let ((name (let ((case-fold-search t))
+                (replace-regexp-in-string
+                 "\\.md\\'" "" (replace-regexp-in-string "\\`jira/" "" (string-trim target) t t) t t))))
+    (let ((case-fold-search nil))
+      (and (string-match-p (concat "\\`" work-kb--key-regexp "\\'") name) name))))
+
 (defun work-kb--thing-at-point ()
   "커서 위치의 대상: (link . 대상) / (key . KEY-1) / (person . 이름) / nil."
   (let ((pos (point))
@@ -817,9 +834,7 @@ TEXT가 있으면 바로 추가하고, 없으면 캡처 버퍼를 연다 (C-c C-
       (goto-char bol)
       (while (and (not found) (re-search-forward work-kb--key-regexp eol t))
         (let ((beg (match-beginning 0)) (end (match-end 0)))
-          (when (and (<= beg pos end)
-                     (or (= beg bol) (not (string-match-p "[A-Za-z0-9_-]" (string (char-before beg)))))
-                     (or (= end eol) (not (string-match-p "[A-Za-z0-9_]" (string (char-after end))))))
+          (when (and (<= beg pos end) (work-kb--key-bounded-p beg end bol eol))
             (setq found (cons 'key (match-string-no-properties 0))))))
       (goto-char bol)
       (while (and (not found) (re-search-forward "@\\([[:alnum:]_]+\\)" eol t))
@@ -1031,23 +1046,27 @@ Jira 키는 캐시가 없거나 stub이면 먼저 `kb.py sync --key'로 받아 �
           found)
       (goto-char bol)
       (while (and (not found) (re-search-forward work-kb--key-regexp eol t))
-        (let ((beg (match-beginning 0)) (end (match-end 0)))
-          (when (and (or (= beg bol) (not (string-match-p "[A-Za-z0-9_-]" (string (char-before beg)))))
-                     (or (= end eol) (not (string-match-p "[A-Za-z0-9_]" (string (char-after end))))))
-            (setq found (match-string-no-properties 0)))))
+        (when (work-kb--key-bounded-p (match-beginning 0) (match-end 0) bol eol)
+          (setq found (match-string-no-properties 0))))
       found)))
 
 (defun work-kb--key-at-point ()
-  "작업할 Jira 키: 커서 위치의 키 → 현재 줄의 첫 키 → 지금 연 jira/KEY.md의 키. 없으면 nil."
-  (or (pcase (work-kb--thing-at-point) (`(key . ,key) key))
-      (work-kb--key-on-line)
-      (let ((dir (or work-kb-vault work-kb-root)))
-        (and buffer-file-name (stringp dir)
-             (string-prefix-p (file-name-as-directory (expand-file-name "jira" dir))
-                              (expand-file-name buffer-file-name) t)
-             (let ((base (file-name-base buffer-file-name))
-                   (case-fold-search nil))
-               (and (string-match-p (concat "\\`" work-kb--key-regexp "\\'") base) base))))))
+  "작업할 Jira 키. 없으면 nil.
+커서 위치의 키·키 링크 → 현재 줄의 첫 키 → 지금 연 jira/KEY.md의 키.
+커서가 키가 아닌 링크([[KB-12-설계]]·[[projects/KB]]) 위면
+줄의 다른 키로 넘어가지 않고 nil이다 (엉뚱한 일감에 보내지 않게 묻는다)."
+  (pcase (work-kb--thing-at-point)
+    (`(key . ,key) key)
+    (`(link . ,target) (work-kb--link-key target))
+    (_
+     (or (work-kb--key-on-line)
+         (let ((dir (or work-kb-vault work-kb-root)))
+           (and buffer-file-name (stringp dir)
+                (string-prefix-p (file-name-as-directory (expand-file-name "jira" dir))
+                                 (expand-file-name buffer-file-name) t)
+                (let ((base (file-name-base buffer-file-name))
+                      (case-fold-search nil))
+                  (and (string-match-p (concat "\\`" work-kb--key-regexp "\\'") base) base))))))))
 
 (defun work-kb--jira-key ()
   "커서 위치의 Jira 키. 없으면 묻는다 (소문자는 대문자로)."
@@ -1109,26 +1128,35 @@ Python은 디스크의 줄을 읽으므로 저장 안 된 수정이 있으면 �
   "DATA가 JSON 객체(alist)인가."
   (and (consp data) (consp (car data)) (symbolp (caar data))))
 
-(defun work-kb--transition-names (data)
-  "`act transitions KEY --json' 결과에서 전환 이름 목록 (순서 유지, 같은 이름은 한 번).
-배열(객체 {\"name\"…} 또는 문자열)이나 {\"transitions\": 배열} 둘 다 받는다."
-  (let ((items (if (work-kb--alist-p data) (alist-get 'transitions data) data)))
-    (delete-dups
-     (delq nil (mapcar (lambda (item)
-                         (cond ((stringp item) item)
-                               ((work-kb--alist-p item)
-                                (let ((name (alist-get 'name item)))
-                                  (and (stringp name) (not (string-empty-p name)) name)))))
-                       (and (listp items) items))))))
+(defun work-kb--json-text (value)
+  "JSON 값 VALUE를 비어 있지 않은 문자열로 (숫자는 글자로). 아니면 nil."
+  (let ((text (cond ((stringp value) value)
+                    ((integerp value) (number-to-string value)))))
+    (and text (not (string-empty-p (string-trim text))) (string-trim text))))
 
-(defun work-kb--transition-target (data name)
-  "전환 NAME의 도착 상태 이름 (`to'가 문자열이거나 {\"name\"…}일 때). 없으면 nil."
-  (let ((items (if (work-kb--alist-p data) (alist-get 'transitions data) data)))
-    (cl-loop for item in (and (listp items) items)
-             when (and (work-kb--alist-p item) (equal (alist-get 'name item) name))
-             return (let ((to (alist-get 'to item)))
-                      (cond ((stringp to) to)
-                            ((work-kb--alist-p to) (let ((n (alist-get 'name to))) (and (stringp n) n))))))))
+(defun work-kb--transition-choices (data)
+  "`act transitions KEY --json' 결과 DATA의 전환 후보 alist.
+((표시 . 보낼 값) …), 순서 유지. 전환마다 `이름 → 도착 (id)' 한 줄이고
+보낼 값은 id다. 이름이 같은 전환(Done→Done, Done→Closed)도 따로 고르고,
+고른 그 전환이 간다. id가 없으면 이름을 보낸다.
+배열(객체 또는 문자열)이나 {\"transitions\": 배열} 둘 다 받는다."
+  (let ((items (if (work-kb--alist-p data) (alist-get 'transitions data) data))
+        choices)
+    (dolist (item (and (listp items) items))
+      (cond
+       ((work-kb--json-text item)
+        (push (cons (work-kb--json-text item) (work-kb--json-text item)) choices))
+       ((work-kb--alist-p item)
+        (let* ((name (work-kb--json-text (alist-get 'name item)))
+               (id (work-kb--json-text (alist-get 'id item)))
+               (to-raw (alist-get 'to item))
+               (to (work-kb--json-text (if (work-kb--alist-p to-raw) (alist-get 'name to-raw) to-raw))))
+          (when name
+            (push (cons (concat name (if to (format " → %s" to) "") (if id (format " (%s)" id) ""))
+                        (or id name))
+                  choices))))))
+    ;; 같은 표시가 겹치면(같은 id가 두 번) 처음 것만 둔다.
+    (cl-remove-duplicates (nreverse choices) :key #'car :test #'equal :from-end t)))
 
 (defun work-kb--find-project-keys (data &optional depth)
   "status JSON DATA 어디든 있는 `project_keys' 목록 (문자열만). 없으면 nil."
@@ -1217,19 +1245,14 @@ Python은 디스크의 줄을 읽으므로 저장 안 된 수정이 있으면 �
     (unless (eq (car out) 0)
       (display-buffer work-kb-jira-buffer)
       (user-error "work-kb: %s 전환 목록을 받지 못했습니다 (%s)" key (work-kb--exit-reason (car out))))
-    (let* ((data (work-kb--parse-json-output (cdr out)))
-           (names (work-kb--transition-names data)))
-      (unless names (user-error "work-kb: %s에서 할 수 있는 전환이 없습니다" key))
-      (let* ((completion-extra-properties
-              (list :annotation-function
-                    (lambda (name)
-                      (let ((to (work-kb--transition-target data name)))
-                        (and to (not (equal to name)) (format "  → %s" to))))))
-             (name (completing-read (format "%s 전환: " key) names nil t)))
-        (when (string-empty-p name) (user-error "전환을 고르지 않았습니다"))
-        (if (y-or-n-p (format "%s을(를) '%s'(으)로 전환할까요? " key name))
-            (work-kb--act-run (format "%s 전환(%s)" key name)
-                              (work-kb--act-args "transition" key name "--yes"))
+    (let ((choices (work-kb--transition-choices (work-kb--parse-json-output (cdr out)))))
+      (unless choices (user-error "work-kb: %s에서 할 수 있는 전환이 없습니다" key))
+      (let* ((label (completing-read (format "%s 전환: " key) choices nil t))
+             (choice (assoc label choices)))
+        (unless choice (user-error "전환을 고르지 않았습니다"))
+        (if (y-or-n-p (format "%s을(를) '%s'(으)로 전환할까요? " key label))
+            (work-kb--act-run (format "%s 전환(%s)" key label)
+                              (work-kb--act-args "transition" key (cdr choice) "--yes"))
           (message "work-kb: 전환을 취소했습니다")
           nil)))))
 
@@ -1242,8 +1265,9 @@ Python은 디스크의 줄을 읽으므로 저장 안 된 수정이 있으면 �
     (when (string-empty-p user) (user-error "담당자가 비었습니다"))
     (work-kb--act-run (format "%s 담당 %s" key user) (work-kb--act-args "assign" key user))))
 
-(defconst work-kb--duration-regexp "\\`\\(?:[0-9]+[wdhm]\\)+\\'"
-  "워크로그 시간 (예: 1h30m, 45m, 1d).")
+(defconst work-kb--duration-regexp "\\`\\(?:[0-9]+h\\)?\\(?:[0-9]+m\\)?\\'"
+  "워크로그 시간: XhYm·Xh·Ym (jira_act.parse_duration과 같다).
+일·주는 받지 않는다. 빈 문자열도 맞으므로 따로 거른다.")
 
 (defun work-kb-jira-worklog ()
   "w: 워크로그. 시간(예: 1h30m)과 설명(선택)."
@@ -1251,8 +1275,10 @@ Python은 디스크의 줄을 읽으므로 저장 안 된 수정이 있으면 �
   (let* ((key (work-kb--jira-key))
          (spent (downcase (replace-regexp-in-string
                            "[ \t]+" "" (read-string (format "%s 작업 시간 (예: 1h30m): " key)) t t))))
-    (unless (string-match-p work-kb--duration-regexp spent)
-      (user-error "시간 형식이 아닙니다: %S (예: 1h30m, 45m, 1d)" spent))
+    (unless (and (not (string-empty-p spent)) (string-match-p work-kb--duration-regexp spent))
+      (user-error "시간 형식이 아닙니다: %S (예: 1h30m, 2h, 45m)" spent))
+    (unless (string-match-p "[1-9]" spent)
+      (user-error "작업 시간은 1분 이상이어야 합니다: %S" spent))
     (let ((comment (string-trim (read-string (format "%s 워크로그 설명 (선택): " key)))))
       (work-kb--act-run (format "%s 워크로그 %s" key spent)
                         (apply #'work-kb--act-args "worklog" key spent

@@ -47,7 +47,7 @@ def last_sync(cfg: Config, problems: list[str]) -> str | None:
 
 def outbox_counts(cfg: Config, problems: list[str]) -> dict[str, int]:
     """`jira/outbox.jsonl`의 상태별 개수. 파일이 없으면 0."""
-    counts = {"pending": 0, "failed": 0}
+    counts = {"pending": 0, "sending": 0, "failed": 0}
     path = cfg.path("jira", "outbox.jsonl")
     if not path.is_file():
         return counts
@@ -251,7 +251,7 @@ def render(info: Mapping[str, Any]) -> list[str]:
     lines.append(f"오늘 daily: {today['path']} " + ("있음" if today["exists"] else "없음 → kb.py today"))
     lines.append(f"마지막 동기화: {info['last_sync'] or '없음'}")
     outbox = info["outbox"]
-    lines.append(f"outbox: 대기 {outbox['pending']}개, 실패 {outbox['failed']}개")
+    lines.append(f"outbox: 대기 {outbox['pending']}개, 전송 중 {outbox.get('sending', 0)}개, 실패 {outbox['failed']}개")
     lines.append(f"미처리 제안: {info['proposals']}개")
     lines.append(f"미처리 이미지: {info['images']}개")
     llm = info["llm"]

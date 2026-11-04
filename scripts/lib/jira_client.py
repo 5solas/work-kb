@@ -13,6 +13,11 @@
   호출자는 `/myself`로 토큰이 살아 있는지 다시 확인해 '권한 없음'과 '토큰 문제'를 가른다.
 - 그 밖의 4xx는 `WriteRejected`, 5xx는 `WriteServerError`(NetworkError), 429가 계속되면 `RateLimited`.
   모두 `status`와 Jira 문장 목록 `messages`를 단다. 연결 실패는 net의 NetworkError(after_send 포함).
+- 쓰기는 리다이렉트를 따라가지 않는다(`allow_redirects=False`). requests는 301/302/303에서 POST를 본문 없는
+  GET으로 바꿔 '성공'처럼 보이게 하므로, 3xx는 `WriteRejected`(Location을 문장에 담음)로 낸다.
+- 성공의 모양을 엄격히 본다(DC v2 문서): 댓글·워크로그 201(200도 받음) + 문자열 `id`가 있는 객체,
+  전환·담당 204(200도 받되 본문이 비었거나 JSON일 때만), 일감 생성 201 + `key`. 그 밖의 2xx(HTML 화면,
+  JSON 아님, 모양이 다름)는 `UnexpectedResponse` — 반영됐는지 모르므로 호출자는 '불확실'로 다룬다.
 - 워크로그 `started`는 `yyyy-MM-dd'T'HH:mm:ss.SSSZ`(`format_started`).
 """
 from __future__ import annotations
@@ -103,6 +108,20 @@ class WriteServerError(core.NetworkError, _WriteFailure):
 
     def __init__(self, message: str, *, status: int, messages: Iterable[str] = ()) -> None:
         super().__init__(message, after_send=True)
+        self.status = status
+        self.messages = list(messages)
+
+
+class UnexpectedResponse(core.KbError, _WriteFailure):
+    """쓰기에 2xx가 왔지만 약속한 모양이 아니다(HTML·JSON 아님·id·key 없음·다른 성공 코드).
+
+    프록시·SSO 화면일 수도, Jira가 반영하고 다른 모양을 준 것일 수도 있다. 결과를 모른다(불확실).
+    """
+
+    exit_code = 3
+
+    def __init__(self, message: str, *, status: int, messages: Iterable[str] = ()) -> None:
+        super().__init__(message)
         self.status = status
         self.messages = list(messages)
 
@@ -550,22 +569,48 @@ class JiraClient:
 
     # ------------------------------------------------------------ 쓰기 (Phase 3)
 
-    def _send(self, method: str, path: str, body: Mapping[str, Any]) -> Any:
-        """쓰기 요청 하나. 2xx면 JSON(본문이 없거나 JSON이 아니면 None). 다시 보내지 않는다."""
+    def _send(
+        self, method: str, path: str, body: Mapping[str, Any], *, ok: tuple[int, ...] = (200, 201, 204)
+    ) -> Any:
+        """쓰기 요청 하나. 리다이렉트를 따라가지 않고 다시 보내지 않는다.
+
+        상태가 ok 안의 2xx면 JSON(본문이 비었으면 None). ok 밖의 2xx나 JSON이 아닌 본문은
+        UnexpectedResponse, 3xx는 WriteRejected.
+        """
         url = self._url(path)
         what = f"{method} {API}{path}"
         resp = net.request(
-            self._session, method, url, json=dict(body), timeout=self.timeout, auth_raises=False, root=self._log_root
-        )
+            self._session, method, url, json=dict(body), timeout=self.timeout, auth_raises=False,
+            root=self._log_root, allow_redirects=False,
+        )  # fmt: skip
         status = resp.status_code
         with resp:
             if 200 <= status < 300:
+                if status not in ok:
+                    raise UnexpectedResponse(
+                        f"Jira가 예상과 다른 성공 코드를 줬습니다 ({status}, {what}). Jira에 반영됐는지 확인하세요",
+                        status=status,
+                    )
                 if status == 204 or not resp.content:
                     return None
                 try:
                     return resp.json()
                 except ValueError:
-                    return None
+                    kind = resp.headers.get("Content-Type") or "?"
+                    raise UnexpectedResponse(
+                        f"Jira 응답이 JSON이 아닙니다 ({status}, {kind}, {what}). 프록시·SSO 화면일 수 있습니다. "
+                        "Jira에 반영됐는지 확인하세요",
+                        status=status,
+                        messages=_jira_messages(resp),
+                    ) from None
+            if 300 <= status < 400:
+                location = core.redact(resp.headers.get("Location") or "?")
+                raise WriteRejected(
+                    f"base_url이 리다이렉트됩니다 ({status}, {what} → {location}). 보내지 않았습니다. "
+                    "jira.base_url을 리다이렉트 없는 https 주소로 고치세요(`kb.py init --section jira`)",
+                    status=status,
+                    messages=[f"Location: {location}"],
+                )
             messages = _jira_messages(resp)
         detail = "; ".join(messages)
         suffix = f": {detail}" if detail else ""
@@ -583,8 +628,8 @@ class JiraClient:
         key = self._check_key(key)
         if not isinstance(body, str) or not body.strip():
             raise core.ConfigError("댓글 내용이 비어 있습니다")
-        data = self._send("POST", f"/issue/{quote(key)}/comment", {"body": body})
-        return data if isinstance(data, dict) else {}
+        data = self._send("POST", f"/issue/{quote(key)}/comment", {"body": body}, ok=(200, 201))
+        return _with_id(data, f"댓글 {key}")
 
     def transitions(self, key: str) -> list[dict]:
         """지금 상태에서 가능한 전환 목록: GET /issue/{key}/transitions → [{id, name, to:{name, statusCategory}}]."""
@@ -601,7 +646,7 @@ class JiraClient:
         tid = str(transition_id or "").strip()
         if not tid:
             raise core.ConfigError("전환 id가 비어 있습니다")
-        self._send("POST", f"/issue/{quote(key)}/transitions", {"transition": {"id": tid}})
+        self._send("POST", f"/issue/{quote(key)}/transitions", {"transition": {"id": tid}}, ok=(200, 204))
 
     def assign(self, key: str, username: str) -> None:
         """담당자 지정: PUT /issue/{key}/assignee {"name"} → 204 (DC는 accountId가 아니라 name)."""
@@ -609,7 +654,7 @@ class JiraClient:
         name = str(username or "").strip()
         if not name:
             raise core.ConfigError("담당자 사용자 이름이 비어 있습니다")
-        self._send("PUT", f"/issue/{quote(key)}/assignee", {"name": name})
+        self._send("PUT", f"/issue/{quote(key)}/assignee", {"name": name}, ok=(200, 204))
 
     def add_worklog(self, key: str, seconds: int, comment: str, started: dt.datetime) -> dict:
         """워크로그: POST /issue/{key}/worklog {"timeSpentSeconds", "started", "comment"} → 201."""
@@ -619,13 +664,14 @@ class JiraClient:
         body: dict[str, Any] = {"timeSpentSeconds": seconds, "started": format_started(started)}
         if comment:
             body["comment"] = comment
-        data = self._send("POST", f"/issue/{quote(key)}/worklog", body)
-        return data if isinstance(data, dict) else {}
+        data = self._send("POST", f"/issue/{quote(key)}/worklog", body, ok=(200, 201))
+        return _with_id(data, f"워크로그 {key}")
 
     def create_issue(self, project_key: str, summary: str, issuetype: str, **fields: Any) -> dict:
         """일감 생성: POST /issue {"fields": {project:{key}, summary, issuetype:{name}, …}} → 201 {id, key, self}.
 
-        나머지 필드(description 등)는 그대로 fields에 싣는다. 응답에 key가 없으면 KbError.
+        나머지 필드(description 등)는 그대로 fields에 싣는다. 201이 아니거나 응답에 key가 없으면
+        UnexpectedResponse(일감이 만들어졌을 수 있다 → 불확실).
         """
         project = str(project_key or "").strip().upper()
         if not re.fullmatch(r"[A-Z][A-Z0-9_]+", project):
@@ -642,7 +688,16 @@ class JiraClient:
         for name, value in fields.items():
             if value is not None:
                 body_fields[name] = value
-        data = self._send("POST", "/issue", {"fields": body_fields})
+        data = self._send("POST", "/issue", {"fields": body_fields}, ok=(201,))
         if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not _KEY_RE.match(data["key"]):
-            raise core.KbError("Jira 일감 생성 응답에 키가 없습니다. Jira에서 만들어졌는지 확인하세요")
+            raise UnexpectedResponse(
+                f"Jira 일감 생성 응답에 키가 없습니다 ({project}). Jira에서 만들어졌는지 확인하세요", status=201
+            )
         return data
+
+
+def _with_id(data: Any, what: str) -> dict:
+    """댓글·워크로그 응답: 문자열 `id`가 있는 객체여야 한다. 아니면 UnexpectedResponse."""
+    if not isinstance(data, dict) or not isinstance(data.get("id"), str) or not data["id"].strip():
+        raise UnexpectedResponse(f"Jira 응답에 {what}의 id가 없습니다. Jira에 반영됐는지 확인하세요", status=0)
+    return data

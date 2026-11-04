@@ -9,23 +9,31 @@
   create PROJECT --summary … --type … [--description …] [--yes]
   promote --from daily/YYYY-MM-DD.md:N PROJECT [--type Task] [--yes]
                                      그 줄로 일감을 만들고 성공하면 줄 끝에 ` [[새 키]]`를 붙인다(D53)
-  flush [--retry-failed] [--retry-uncertain]
+  flush [--retry-failed [ID …]] [--retry-uncertain [ID …]]
   list [--json] [--all]
 
-흐름(모든 쓰기): outbox에 pending으로 넣기(잠금 안) → 잠금 풀기 → 보내기 → 결과 기록(잠금 안) →
-성공이면 `jira_sync.sync_key`로 캐시 갱신(잠금 밖, sync_key가 스스로 잠근다). 네트워크 요청을 하는
-동안에는 절대 잠금을 쥐지 않는다(D26).
+흐름(모든 쓰기): 잠금 안에서 기록을 `sending`으로 표시(claim: claimed_at·pid·attempts+1) → 잠금 풀기 →
+보내기 → 결과 기록과 표시 지우기(잠금 안, 한 번에) → 성공이면 `jira_sync.sync_key`로 캐시 갱신(잠금 밖,
+sync_key가 스스로 잠근다). 네트워크 요청을 하는 동안에는 절대 잠금을 쥐지 않는다(D26).
+`submit`은 기록을 처음부터 `sending`으로 넣는다(넣기와 표시가 한 걸음). flush는 잠금 안에서 다시 읽어
+아직 보낼 수 있는 기록만 표시하고, 다른 실행이 표시한 기록은 건너뛴다. 그래서 두 flush가 겹치거나
+`act comment`와 flush가 겹쳐도 한 번만 보낸다. 보내다 끊기면(Ctrl+C·강제 종료·잠금 시간 초과·FileBusy)
+기록은 `sending`으로 남는다. 주인 프로세스가 죽었거나 표시가 `jira.write_timeout_sec`(기본 60)×2초보다
+오래되면 불확실로 보고(`list`에 uncertain), `--retry-uncertain`일 때만 다시 보낸다.
 
 결과 규칙(D52):
-- 2xx → done, done_at.
+- 약속한 모양의 2xx → done, done_at.
 - 연결 실패·5xx → pending, attempts+1, 종료 3. 5번째 실패면 failed. 전환의 500은 잘못된 id라서 바로 failed.
 - 429(재시도 뒤에도) → pending, 시도로 세지 않음, 종료 3.
-- 응답 시간 초과·응답 전 끊김 → pending, last_error "uncertain"(보냈을 수 있음). 그냥 flush는 건너뛰고
+- 응답 시간 초과·응답 전 끊김·모양이 다른 2xx(HTML 화면, id·key 없음) → pending, last_error "uncertain"
+  (보냈을 수 있음). 몇 번째 시도든 failed가 되지 않는다. 그냥 flush와 `--retry-failed`는 건너뛰고
   `--retry-uncertain`일 때만 다시 보낸다.
 - 401/403 → `/myself`로 다시 확인: 200이면 권한 없음 → failed(종료 1), 401이면 토큰 문제 → pending, 종료 2.
-- 그 밖의 4xx → failed(종료 1).
+- 3xx(리다이렉트) → failed, flush 중단(종료 1). 그 밖의 4xx → failed(종료 1).
 flush는 pending을 id 순서로 보낸다. project_keys 밖 프로젝트의 기록은 보내지 않는다(종료 4).
+`--retry-failed`·`--retry-uncertain`에 기록 id를 주면 그 기록만 다시 보낸다(그 상태가 아니면 종료 4).
 
+본문(댓글·제목·설명 등)에 등록된 비밀값(토큰)이 들어 있으면 outbox에 넣지 않고 거부한다(종료 4).
 자동 상태 전환은 없다. `create`·`transition`·`promote`는 `--yes`가 없으면 y/N을 묻는다(EOF는 거절, 종료 1).
 `KB_AGENT=1`이면 `list`·`transitions` 말고는 모두 거부(종료 7). kb.py 경로와 별개로 여기서도 확인한다.
 """
@@ -34,12 +42,14 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, TextIO
+from typing import Any, Callable, Iterator, Mapping, TextIO
 
+import daily_prepare
 import jira_sync
 from lib import config, core, notes, outbox
 from lib import jira_client as jc
@@ -54,10 +64,15 @@ SOURCE_RE = re.compile(r"^(daily/\d{4}-\d{2}-\d{2}\.md):([1-9][0-9]*)$")
 DURATION_RE = re.compile(r"^(?:(\d+)h)?(?:(\d+)m)?$")
 LIST_PREFIX = re.compile(r"^\s*[-*+]\s+(?:\[[ xX>]\]\s+)?(?:\d{1,2}:\d{2}(?:\s+|$))?")
 CARRIED_RE = re.compile(r"^- \[>\] (.*) \(\d{4}-\d{2}-\d{2}로 이월\)$")
+HEADING_RE = re.compile(r"^\s{0,3}#{1,6}(?:\s|$)")
+MARKER_RE = re.compile(r"^\s*<!--\s*kb:")
+CARRY_SOURCE_RE = re.compile(r"\(← (\d{4}-\d{2}-\d{2})\)\s*$")
 EMBED_RE = re.compile(r"!\[\[[^\]]*\]\]")
 LINK_RE = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|([^\]]*))?\]\]")
 SUMMARY_MAX = 255
 YES_WORDS = frozenset({"y", "yes", "예", "네", "ㅇ"})
+STALE_BASE_SEC = 60.0  # jira.write_timeout_sec 기본값. 보내는 중 표시는 이것의 두 배보다 오래되면 불확실
+SECRET_REFUSED = "본문에 토큰이 들어 있어 보내지 않습니다. 토큰을 지운 뒤 다시 하세요"
 
 _input: Callable[[str], str] = input  # 테스트가 바꿔 끼운다(확인 질문)
 
@@ -76,7 +91,7 @@ def _err(message: str) -> None:
 def confirm(question: str) -> bool:
     """y/N 질문. EOF·빈 답·그 밖의 답은 모두 거절."""
     try:
-        answer = _input(f"{question} [y/N] ")
+        answer = _input(f"{core.redact(question)} [y/N] ")
     except EOFError:
         print()
         return False
@@ -144,6 +159,119 @@ def line_content(text: str) -> str:
     return re.sub(r"\s+", " ", body).strip()
 
 
+def _strings(value: Any) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
+
+
+def refuse_secret(payload: Mapping[str, Any]) -> None:
+    """본문에 등록된 비밀값(JiraClient.from_config가 등록한 PAT 등)이 있으면 ConfigError(종료 4)."""
+    text = json.dumps(payload, ensure_ascii=False)
+    if core.redact(text) != text or any(core.redact(item) != item for item in _strings(payload)):
+        raise core.ConfigError(SECRET_REFUSED)
+
+
+# ---------------------------------------------------------------- 보내는 중 표시(claim)
+
+
+def stale_after(cfg: Config) -> float:
+    """보내는 중 표시를 불확실로 볼 나이(초): `jira.write_timeout_sec`(기본 60)의 두 배."""
+    raw = cfg.get("jira.write_timeout_sec")
+    try:
+        base = float(raw) if raw not in (None, "") and not isinstance(raw, bool) else STALE_BASE_SEC
+    except (TypeError, ValueError):
+        base = STALE_BASE_SEC
+    return 2 * (base if base > 0 else STALE_BASE_SEC)
+
+
+def pid_alive(pid: Any) -> bool:
+    """그 pid의 프로세스가 살아 있는가. 모르면 살아 있다고 본다(권한 거부 등)."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ACCESS_DENIED: 있지만 열 수 없음
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _claim_fields() -> dict[str, Any]:
+    # 실제 시계(KB_FAKE_NOW와 무관): 표시의 나이를 재는 데 쓴다
+    return {"claimed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "pid": os.getpid()}
+
+
+def claim_is_stale(record: Mapping[str, Any], stale_sec: float, now: dt.datetime | None = None) -> bool:
+    """보내는 중 표시의 주인이 죽었거나 표시가 stale_sec보다 오래됐는가."""
+    if not pid_alive(record.get("pid")):
+        return True
+    try:
+        claimed = dt.datetime.fromisoformat(str(record.get("claimed_at") or ""))
+    except ValueError:
+        return True
+    if claimed.tzinfo is None:
+        claimed = claimed.replace(tzinfo=dt.timezone.utc)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return (now - claimed).total_seconds() > stale_sec
+
+
+def state_of(record: Mapping[str, Any], stale_sec: float) -> str:
+    """보이는 상태: pending · sending(다른 실행이 보내는 중) · uncertain · failed · done."""
+    status = str(record.get("status") or "")
+    if status == outbox.SENDING:
+        return outbox.UNCERTAIN if claim_is_stale(record, stale_sec) else outbox.SENDING
+    if status == outbox.PENDING and record.get("last_error") == outbox.UNCERTAIN:
+        return outbox.UNCERTAIN
+    return status
+
+
+def _claim(cfg: Config, record_id: str, eligible: Callable[[Mapping[str, Any]], bool]) -> dict | None:
+    """잠금 안에서 다시 읽어, 아직 보낼 수 있으면 sending으로 표시하고(attempts+1) 그 기록을 돌려준다."""
+
+    def change(record: dict) -> dict | None:
+        if not eligible(record):
+            return None
+        attempts = 0 if record.get("status") == outbox.FAILED else int(record.get("attempts") or 0)
+        return {"status": outbox.SENDING, "attempts": attempts + 1, **_claim_fields()}
+
+    return outbox.modify(cfg.root, record_id, change)
+
+
+def _finish(cfg: Config, record: Mapping[str, Any], changes: Mapping[str, Any]) -> dict:
+    """결과를 적고 보내는 중 표시를 지운다(잠금 안, 한 번에)."""
+    return outbox.update(cfg.root, record["id"], {**changes, "claimed_at": outbox.REMOVE, "pid": outbox.REMOVE})
+
+
 # ---------------------------------------------------------------- 원본 줄
 
 
@@ -175,6 +303,29 @@ def read_source(cfg: Config, spec: str) -> SourceLine:
     return SourceLine(spec=f"{rel}:{lineno}", rel=rel, lineno=lineno, path=path, text=lines[lineno - 1])
 
 
+def unpromotable(line: notes.NoteLine) -> str | None:
+    """승격(줄 끝에 ` [[KEY]]`를 붙임)할 수 없는 줄이면 그 이유. 된다면 None."""
+    if line.in_code:
+        if MARKER_RE.match(line.text):
+            return "관리 구역 표시 줄입니다"
+        return "front matter나 코드 블록 안의 줄입니다"
+    if line.region is not None:
+        reason = f"관리 구역({line.region}) 안의 줄입니다. 도구가 다시 쓰는 곳이라 키를 붙이지 않습니다"
+        carried = CARRY_SOURCE_RE.search(line.text) if line.region == "carryover" else None
+        if carried:
+            reason += f". 원래 줄(daily/{carried.group(1)}.md의 `## 기록`)을 승격하세요"
+        return reason
+    if HEADING_RE.match(line.text):
+        return "제목 줄입니다"
+    if not line.text.strip() or not line_content(line.text):
+        return "빈 줄입니다"
+    return None
+
+
+def _note_lines(rel: str, data: bytes) -> list[notes.NoteLine]:
+    return list(notes.iter_lines(rel, data))
+
+
 def _line_hashes(text: str) -> set[str]:
     """줄의 해시와, 이월 표시(`- [>] … (날짜로 이월)`)가 붙었으면 원래 `- [ ] …` 꼴의 해시."""
     out = {core.line_hash(text)}
@@ -187,11 +338,15 @@ def _line_hashes(text: str) -> set[str]:
 def link_promoted(cfg: Config, record: Mapping[str, Any], new_key: str) -> tuple[bool, str]:
     """승격한 daily 줄 끝에 ` [[NEW-1]]`를 붙인다(잠금 안, expect_sha256). (붙였는가, 설명).
 
-    기록한 줄 해시와 지금 줄이 다르면 붙이지 않는다. 같은 내용의 줄이 파일에 정확히 하나 있으면(위에
-    줄이 끼어들어 번호만 밀린 경우) 그 줄에 붙인다. 이월 표시(`[>]`)가 붙은 꼴도 같은 줄로 본다.
+    승격할 수 있는 줄(관리 구역·표시·front matter·코드 블록·제목·빈 줄이 아닌 줄)만 본다.
+    파일이 승격할 때와 같으면(payload.source_sha256) 기록한 줄 번호의 줄에 붙인다. 바뀌었으면 기록한
+    해시와 같은 줄이 파일에 정확히 하나일 때만 붙인다(위에 줄이 끼어들어 번호만 밀린 경우). 같은 줄이
+    여럿이면 어느 것인지 모르므로 붙이지 않는다. 이월 표시(`[>]`)가 붙은 꼴도 같은 줄로 본다.
+    붙였으면 뒤 날짜 carryover 구역의 이월 사본에도 붙인다(daily_prepare.link_carried_copies).
     """
     match = SOURCE_RE.match(str(record.get("source") or ""))
-    want = str((record.get("payload") or {}).get("line_hash") or "")
+    payload = record.get("payload") or {}
+    want = str(payload.get("line_hash") or "")
     if match is None or not want:
         return False, "기록에 원본 줄 정보가 없습니다"
     rel, lineno = match.group(1), int(match.group(2))
@@ -205,30 +360,46 @@ def link_promoted(cfg: Config, record: Mapping[str, Any], new_key: str) -> tuple
         bom = notes.BOM if data.startswith(notes.BOM) else b""
         try:
             parts = notes.split_lines(notes.decode(data), keepends=True)
+            note_lines = _note_lines(rel, data)
         except UnicodeDecodeError:
             return False, f"{rel}: UTF-8이 아닙니다"
         bodies = [part.rstrip("\r\n") for part in parts]
+        same = [
+            i for i, body in enumerate(bodies)
+            if i < len(note_lines) and unpromotable(note_lines[i]) is None and want in _line_hashes(body)
+        ]  # fmt: skip
         index: int | None = None
-        if 0 < lineno <= len(bodies) and want in _line_hashes(bodies[lineno - 1]):
+        unchanged = payload.get("source_sha256") == core.sha256_hex(data)
+        if unchanged and (lineno - 1) in same:
             index = lineno - 1
-        else:
-            same = [i for i, body in enumerate(bodies) if want in _line_hashes(body)]
-            if len(same) == 1:
-                index = same[0]
+        elif len(same) == 1:
+            index = same[0]
         if index is None:
+            if len(same) > 1:
+                return False, f"{rel}:{lineno} 줄과 같은 줄이 {len(same)}개라 어느 줄인지 모릅니다"
             return False, f"{rel}:{lineno} 줄이 승격할 때와 달라졌습니다"
         body = bodies[index]
         if link in body:
-            return True, f"{rel}:{index + 1}에 이미 {link}가 있습니다"
-        parts[index] = body.rstrip(" \t") + f" {link}" + parts[index][len(body):]
-        new = bom + "".join(parts).encode("utf-8")
+            note = f"{rel}:{index + 1}에 이미 {link}가 있습니다"
+        else:
+            parts[index] = body.rstrip(" \t") + f" {link}" + parts[index][len(body):]
+            new = bom + "".join(parts).encode("utf-8")
+            try:
+                core.atomic_write(path, new, expect_sha256=core.sha256_hex(data))
+            except core.ConcurrentEdit:
+                return False, f"{rel}을(를) 쓰는 사이에 사람이 고쳤습니다"
+            except core.FileBusy as exc:
+                return False, str(exc)
+            note = f"{rel}:{index + 1}에 {link}를 붙였습니다"
         try:
-            core.atomic_write(path, new, expect_sha256=core.sha256_hex(data))
-        except core.ConcurrentEdit:
-            return False, f"{rel}을(를) 쓰는 사이에 사람이 고쳤습니다"
-        except core.FileBusy as exc:
-            return False, str(exc)
-    return True, f"{rel}:{index + 1}에 {link}를 붙였습니다"
+            copies, problems = daily_prepare.link_carried_copies(cfg, rel, body, new_key)
+        except (core.KbError, OSError) as exc:
+            copies, problems = 0, [str(exc)]
+    if copies:
+        note += f" (이월 사본 {copies}곳에도 붙였습니다)"
+    for problem in problems:
+        _err(f"경고: 이월 사본에 {link}를 붙이지 못했습니다: {problem}")
+    return True, note
 
 
 # ---------------------------------------------------------------- 보내기와 결과
@@ -242,6 +413,10 @@ class Outcome:
 
 
 def describe(record: Mapping[str, Any]) -> str:
+    return core.redact(_describe(record))
+
+
+def _describe(record: Mapping[str, Any]) -> str:
     action = record.get("action")
     key = record.get("key")
     payload = record.get("payload") or {}
@@ -268,7 +443,7 @@ def _send(client: JiraClient, record: Mapping[str, Any]) -> dict | None:
     payload = record.get("payload") or {}
     if action == "comment":
         data = client.add_comment(key, str(payload.get("body") or ""))
-        return {"comment_id": data.get("id")} if data.get("id") else None
+        return {"comment_id": data["id"]}
     if action == "transition":
         client.do_transition(key, str(payload.get("transition_id") or ""))
         return None
@@ -280,7 +455,7 @@ def _send(client: JiraClient, record: Mapping[str, Any]) -> dict | None:
         if started is None:
             raise core.ConfigError(f"워크로그 시작 시각을 읽지 못했습니다: {payload.get('started')!r}")
         data = client.add_worklog(key, int(payload.get("seconds") or 0), str(payload.get("comment") or ""), started)
-        return {"worklog_id": data.get("id")} if data.get("id") else None
+        return {"worklog_id": data["id"]}
     if action in ("create", "promote"):
         extra: dict[str, Any] = {}
         if payload.get("description"):
@@ -297,32 +472,32 @@ def _log(cfg: Config, record: Mapping[str, Any], note: str) -> None:
     )
 
 
-def _fail(cfg: Config, record: Mapping[str, Any], attempts: int, message: str, hint: str = "") -> Outcome:
-    rec = outbox.update(
-        cfg.root, record["id"], {"status": outbox.FAILED, "attempts": attempts, "last_error": core.redact(message)}
-    )
-    _err(f"실패: {describe(rec)} — {message}" + (f"\n  {hint}" if hint else ""))
+def _fail(cfg: Config, record: Mapping[str, Any], attempts: int, message: str, hint: str = "", *, stop: bool = False) -> Outcome:
+    rec = _finish(cfg, record, {"status": outbox.FAILED, "attempts": attempts, "last_error": core.redact(message)})
+    _err(f"실패: {describe(rec)} — {core.redact(message)}" + (f"\n  {hint}" if hint else ""))
     _log(cfg, rec, message)
-    return Outcome(1, rec)
+    return Outcome(1, rec, stop=stop)
 
 
 def _keep(cfg: Config, record: Mapping[str, Any], attempts: int, error: str, detail: str | None, *, stop: bool) -> Outcome:
-    """pending으로 남긴다. 시도가 MAX_ATTEMPTS에 닿으면 failed."""
-    if attempts >= outbox.MAX_ATTEMPTS:
+    """pending으로 남긴다. 시도가 MAX_ATTEMPTS에 닿으면 failed. 단 불확실은 몇 번째든 불확실로 남긴다
+    (failed가 되면 `--retry-failed`가 이미 반영됐을 수 있는 쓰기를 다시 보낸다)."""
+    if attempts >= outbox.MAX_ATTEMPTS and error != outbox.UNCERTAIN:
         message = detail or error
         return _fail(cfg, record, attempts, f"{outbox.MAX_ATTEMPTS}번 시도했지만 보내지 못했습니다: {message}",
                      "Jira 상태를 확인한 뒤 `kb.py act flush --retry-failed`로 다시 보낼 수 있습니다")  # fmt: skip
     changes: dict[str, Any] = {"status": outbox.PENDING, "attempts": attempts, "last_error": core.redact(error)}
     if detail is not None or "error_detail" in record:
         changes["error_detail"] = core.redact(detail) if detail else None
-    rec = outbox.update(cfg.root, record["id"], changes)
+    rec = _finish(cfg, record, changes)
     if error == outbox.UNCERTAIN:
         _err(
-            f"불확실: {describe(rec)} — {detail}\n"
-            "  Jira에 반영됐는지 먼저 확인하세요. 반영되지 않았으면 `kb.py act flush --retry-uncertain`"
+            f"불확실: {describe(rec)} — {core.redact(detail or '')}\n"
+            "  Jira에 반영됐는지 먼저 확인하세요. 반영되지 않았으면 "
+            f"`kb.py act flush --retry-uncertain {rec['id']}`"
         )
     else:
-        _err(f"대기: {describe(rec)} — {error}\n  outbox에 남겼습니다. 나중에 `kb.py act flush`로 보냅니다")
+        _err(f"대기: {describe(rec)} — {core.redact(error)}\n  outbox에 남겼습니다. 나중에 `kb.py act flush`로 보냅니다")
     _log(cfg, rec, error)
     return Outcome(3, rec, stop=stop)
 
@@ -332,9 +507,10 @@ def _denied(cfg: Config, client: JiraClient, record: Mapping[str, Any], attempts
     try:
         client.myself()
     except core.AuthError as again:
-        rec = outbox.update(cfg.root, record["id"], {"status": outbox.PENDING, "last_error": core.redact(str(again))})
+        changes = {"status": outbox.PENDING, "attempts": attempts - 1, "last_error": core.redact(str(again))}
+        rec = _finish(cfg, record, changes)  # 토큰 문제는 시도로 세지 않는다
         _err(
-            f"인증 실패: {describe(rec)} — {again}\n"
+            f"인증 실패: {describe(rec)} — {core.redact(str(again))}\n"
             "  outbox에 남겼습니다. 토큰을 고친 뒤(`kb.py init --section jira`) `kb.py act flush`"
         )
         _log(cfg, rec, "auth")
@@ -345,14 +521,21 @@ def _denied(cfg: Config, client: JiraClient, record: Mapping[str, Any], attempts
 
 
 def deliver(cfg: Config, client: JiraClient, record: Mapping[str, Any], out: TextIO) -> Outcome:
-    """pending 기록 하나를 보내고 결과를 outbox에 적는다. 잠금은 결과를 적을 때만 잡는다."""
-    attempts = int(record.get("attempts") or 0) + 1
+    """보내는 중으로 표시한(claim) 기록 하나를 보내고 결과를 outbox에 적는다(표시도 지운다).
+
+    잠금은 결과를 적을 때만 잡는다. 결과를 적지 못하면(잠금 시간 초과·FileBusy) 기록은 sending으로
+    남아 다음 flush가 다시 보내지 않는다(주인이 끝나면 불확실로 보인다).
+    """
+    attempts = int(record.get("attempts") or 1)  # claim이 이번 시도를 이미 셌다
     try:
+        refuse_secret(record.get("payload") or {})  # 예전에 큐에 들어간 기록도 토큰을 보내지 않는다
         result = _send(client, record)
     except core.AuthError as exc:  # WriteDenied 포함
         return _denied(cfg, client, record, attempts, exc)
     except jc.RateLimited as exc:
         return _keep(cfg, record, attempts - 1, str(exc), None, stop=True)
+    except jc.UnexpectedResponse as exc:  # 2xx지만 모양이 다르다: 반영됐는지 모른다
+        return _keep(cfg, record, attempts, outbox.UNCERTAIN, str(exc), stop=True)
     except jc.WriteServerError as exc:
         if record.get("action") == "transition" and exc.status == 500:
             return _fail(cfg, record, attempts, str(exc),
@@ -362,7 +545,9 @@ def deliver(cfg: Config, client: JiraClient, record: Mapping[str, Any], out: Tex
         if exc.after_send:
             return _keep(cfg, record, attempts, outbox.UNCERTAIN, str(exc), stop=True)
         return _keep(cfg, record, attempts, str(exc), None, stop=True)
-    except core.KbError as exc:  # WriteRejected(4xx), 형식 오류 등: 다시 보내도 같다
+    except jc.WriteRejected as exc:  # 3xx·4xx: 다시 보내도 같다. 리다이렉트면 나머지도 같으므로 멈춘다
+        return _fail(cfg, record, attempts, str(exc), stop=300 <= exc.status < 400)
+    except core.KbError as exc:  # 형식 오류 등: 다시 보내도 같다
         return _fail(cfg, record, attempts, str(exc))
     changes: dict[str, Any] = {"status": outbox.DONE, "attempts": attempts, "last_error": None, "done_at": _now_iso(cfg)}
     if "error_detail" in record:
@@ -370,11 +555,12 @@ def deliver(cfg: Config, client: JiraClient, record: Mapping[str, Any], out: Tex
     if result:
         changes["result"] = result
     try:
-        rec = outbox.update(cfg.root, record["id"], changes)
+        rec = _finish(cfg, record, changes)
     except core.KbError:  # 잠금·파일 문제: Jira에는 이미 반영됐다. 다시 보내면 중복이 된다
         _err(
             f"경고: Jira에는 보냈지만 outbox에 완료를 적지 못했습니다 ({record['id']} {describe(record)}).\n"
-            f"  flush하기 전에 Jira에서 반영 여부를 확인하세요. 결과: {json.dumps(result or {}, ensure_ascii=False)}"
+            "  기록은 '보내는 중'으로 남아 그냥 flush는 다시 보내지 않습니다(목록에는 uncertain으로 보입니다).\n"
+            f"  다시 보내지 마세요. 결과: {json.dumps(result or {}, ensure_ascii=False)}"
         )
         raise
     print(f"보냄: {describe(rec)}", file=out)
@@ -417,8 +603,13 @@ def submit(
     payload: Mapping[str, Any],
     source: str | None = None,
 ) -> int:
-    """outbox에 넣고(잠금 안) 잠금을 푼 뒤 바로 보낸다."""
+    """outbox에 보내는 중(sending) 상태로 넣고(잠금 안, 넣기와 표시가 한 걸음) 잠금을 푼 뒤 바로 보낸다.
+
+    본문에 비밀값이 있으면 넣지 않는다(종료 4). client를 만든 뒤에 불러야 PAT가 등록돼 있다.
+    """
+    refuse_secret(payload)
     record = outbox.make_record(action=action, key=key, payload=payload, ts=_now_iso(cfg), source=source)
+    record.update({"status": outbox.SENDING, "attempts": 1, **_claim_fields()})
     outbox.append(cfg.root, record)
     print(f"outbox에 넣음: {record['id']} {describe(record)}", file=out)
     return deliver(cfg, client, record, out).code
@@ -550,6 +741,7 @@ def cmd_create(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
     if args.description:
         payload["description"] = args.description
     with JiraClient.from_config(cfg) as client:
+        refuse_secret(payload)  # 확인 질문에 본문이 보이기 전에
         if not args.yes and not confirm(f"{project}에 새 일감 '{summary}'({issuetype})을(를) 만들까요?"):
             print("취소했습니다", file=out)
             return 1
@@ -559,6 +751,11 @@ def cmd_create(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
 def cmd_promote(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
     project = project_key(cfg, args.project)
     line = read_source(cfg, args.source)
+    data = line.path.read_bytes()
+    note_lines = _note_lines(line.rel, data)
+    reason = unpromotable(note_lines[line.lineno - 1]) if line.lineno <= len(note_lines) else "줄을 찾지 못했습니다"
+    if reason:
+        raise core.ConfigError(f"{line.spec}: {reason}. 승격하지 않습니다")
     summary = _summary(line_content(line.text))
     if re.search(rf"\[\[{re.escape(project)}-[1-9][0-9]*\]\]\s*$", line.text):
         raise core.ConfigError(f"{line.spec}: 이미 일감 키가 붙은 줄입니다")
@@ -566,33 +763,70 @@ def cmd_promote(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
     for record in outbox.records(cfg.root):
         if (
             record.get("action") == "promote"
-            and record.get("status") == outbox.PENDING
+            and record.get("status") in (outbox.PENDING, outbox.SENDING)
             and record.get("source") == line.spec
             and (record.get("payload") or {}).get("line_hash") == line_hash
         ):
             raise core.ConfigError(f"{line.spec}: 같은 줄의 승격이 이미 대기 중입니다 ({record['id']}). `kb.py act flush`로 보내세요")
     issuetype = (args.type or "").strip() or "Task"
-    payload = {"summary": summary, "issuetype": issuetype, "line_hash": line_hash}
+    payload = {"summary": summary, "issuetype": issuetype, "line_hash": line_hash, "source_sha256": core.sha256_hex(data)}
     with JiraClient.from_config(cfg) as client:
+        refuse_secret({"summary": summary})  # 확인 질문에 제목이 보이기 전에
         if not args.yes and not confirm(f"{line.spec}을(를) {project} 일감 '{summary}'({issuetype})으로 만들까요?"):
             print("취소했습니다", file=out)
             return 1
         return submit(cfg, client, out, action="promote", key=project, payload=payload, source=line.spec)
 
 
+def _selection(raw: list[str] | None, items: Mapping[str, dict], want: str, stale: float, flag: str) -> set[str] | None:
+    """--retry-failed·--retry-uncertain 값 → None(끔) · 빈 집합(그 상태 전부) · 고른 id들. 틀린 id는 종료 4."""
+    if raw is None:
+        return None
+    chosen: set[str] = set()
+    for record_id in raw:
+        record = items.get(record_id)
+        if record is None:
+            raise core.ConfigError(f"{flag}: outbox에 {record_id} 기록이 없습니다. `kb.py act list`로 id를 확인하세요")
+        if state_of(record, stale) != want:
+            raise core.ConfigError(f"{flag}: {record_id}는 {want} 상태가 아닙니다 (지금: {state_of(record, stale)})")
+        chosen.add(record_id)
+    return chosen
+
+
+def _picked(selection: set[str] | None, record_id: str) -> bool:
+    return selection is not None and (not selection or record_id in selection)
+
+
 def cmd_flush(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
+    stale = stale_after(cfg)
+    items = sorted(outbox.records(cfg.root), key=lambda r: str(r.get("id")))
+    by_id = {str(r.get("id")): r for r in items}
+    retry_failed = _selection(args.retry_failed, by_id, outbox.FAILED, stale, "--retry-failed")
+    retry_uncertain = _selection(args.retry_uncertain, by_id, outbox.UNCERTAIN, stale, "--retry-uncertain")
+
+    def eligible(record: Mapping[str, Any]) -> bool:
+        state = state_of(record, stale)
+        if state == outbox.PENDING:
+            return True
+        if state == outbox.UNCERTAIN:
+            return _picked(retry_uncertain, str(record.get("id")))
+        if state == outbox.FAILED:
+            return _picked(retry_failed, str(record.get("id")))
+        return False
+
     targets: list[dict] = []
     uncertain = 0
-    for record in sorted(outbox.records(cfg.root), key=lambda r: str(r.get("id"))):
-        status = record.get("status")
-        if status == outbox.PENDING:
-            if record.get("last_error") == outbox.UNCERTAIN and not args.retry_uncertain:
-                uncertain += 1
-                continue
+    busy = 0
+    for record in items:
+        state = state_of(record, stale)
+        if eligible(record):
             targets.append(record)
-        elif status == outbox.FAILED and args.retry_failed:
-            targets.append(record)
-    note = f" · 불확실 {uncertain}건은 건너뜀(Jira에서 확인 뒤 --retry-uncertain)" if uncertain else ""
+        elif state == outbox.UNCERTAIN:
+            uncertain += 1
+        elif state == outbox.SENDING:
+            busy += 1
+    note = f" · 불확실 {uncertain}건은 건너뜀(Jira에서 확인 뒤 --retry-uncertain ID)" if uncertain else ""
+    note += f" · 다른 실행이 보내는 중 {busy}건은 건너뜀" if busy else ""
     if not targets:
         print(f"flush: 보낼 항목이 없습니다{note}", file=out)
         return 0
@@ -603,15 +837,15 @@ def cmd_flush(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
     codes: list[int] = []
     sent = 0
     left = 0
+    skipped = 0
     if sendable:
         with JiraClient.from_config(cfg) as client:
             for index, record in enumerate(sendable):
-                fresh = outbox.get(cfg.root, record["id"])
-                if fresh is None or fresh.get("status") != record.get("status"):
-                    continue  # 다른 실행이 먼저 처리했다
-                if fresh.get("status") == outbox.FAILED:
-                    fresh = outbox.update(cfg.root, fresh["id"], {"status": outbox.PENDING, "attempts": 0, "last_error": None})
-                outcome = deliver(cfg, client, fresh, out)
+                claimed = _claim(cfg, record["id"], eligible)
+                if claimed is None:
+                    skipped += 1  # 다른 실행이 먼저 표시했거나 처리했다
+                    continue
+                outcome = deliver(cfg, client, claimed, out)
                 codes.append(outcome.code)
                 sent += outcome.code == 0
                 if outcome.stop:
@@ -619,7 +853,8 @@ def cmd_flush(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
                     if left:
                         _err(f"나머지 {left}건은 보내지 않았습니다. 문제를 고친 뒤 다시 flush하세요")
                     break
-    print(f"flush: 보냄 {sent} · 실패·대기 {len(codes) - sent} · 남김 {left} · 거부 {len(refused)}{note}", file=out)
+    taken = f" · 다른 실행이 먼저 맡음 {skipped}" if skipped else ""
+    print(f"flush: 보냄 {sent} · 실패·대기 {len(codes) - sent} · 남김 {left} · 거부 {len(refused)}{taken}{note}", file=out)
     for code in (2, 3):
         if code in codes:
             return code
@@ -629,18 +864,32 @@ def cmd_flush(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
 
 
 def cmd_list(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
+    stale = stale_after(cfg)
     items = outbox.records(cfg.root)
     shown = items if args.all else [r for r in items if r.get("status") != outbox.DONE]
     if args.json:
-        print(json.dumps(shown, ensure_ascii=False), file=out)
+        print(json.dumps([{**r, "state": state_of(r, stale)} for r in shown], ensure_ascii=False), file=out)
         return 0
+    count = {name: 0 for name in (outbox.PENDING, outbox.SENDING, outbox.UNCERTAIN, outbox.FAILED, outbox.DONE)}
+    for record in items:
+        state = state_of(record, stale)
+        if state in count:
+            count[state] += 1
     for record in shown:
+        state = state_of(record, stale)
         error = record.get("last_error")
-        tail = f" · {error}" if error else ""
-        print(f"{record.get('id')} {record.get('status')} 시도 {record.get('attempts')} {describe(record)}{tail}", file=out)
-    count = outbox.counts(items)
+        if state == outbox.UNCERTAIN:
+            detail = record.get("error_detail") if record.get("status") == outbox.PENDING else None
+            error = detail or f"보내다 끊김(pid {record.get('pid')}, {record.get('claimed_at')})"
+        elif state == outbox.SENDING:
+            error = f"pid {record.get('pid')}이(가) 보내는 중"
+        tail = f" · {core.redact(str(error))}" if error else ""
+        print(f"{record.get('id')} {state} 시도 {record.get('attempts')} {describe(record)}{tail}", file=out)
     hidden = "" if args.all or not count[outbox.DONE] else " (완료 항목은 --all로 봅니다)"
-    print(f"outbox: 대기 {count[outbox.PENDING]} · 실패 {count[outbox.FAILED]} · 완료 {count[outbox.DONE]}{hidden}", file=out)
+    extra = "".join(
+        f" · {label} {count[name]}" for name, label in ((outbox.UNCERTAIN, "불확실"), (outbox.SENDING, "보내는 중")) if count[name]
+    )
+    print(f"outbox: 대기 {count[outbox.PENDING]} · 실패 {count[outbox.FAILED]} · 완료 {count[outbox.DONE]}{extra}{hidden}", file=out)
     broken = outbox.broken_lines(cfg.root)
     if broken:
         _err(f"경고: jira/outbox.jsonl에 읽지 못한 줄 {broken}개")
@@ -710,11 +959,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--yes", action="store_true", help="확인 없이 보낸다")
 
     p = sub("flush", "outbox의 대기 항목을 id 순서로 보낸다")
-    p.add_argument("--retry-failed", action="store_true", help="실패 항목도 다시 보낸다(시도 횟수 초기화)")
-    p.add_argument("--retry-uncertain", action="store_true", help="결과를 모르는(uncertain) 항목도 다시 보낸다")
+    p.add_argument("--retry-failed", nargs="*", default=None, metavar="ID",
+                   help="실패 항목도 다시 보낸다(시도 횟수 초기화). id를 주면 그 기록만")  # fmt: skip
+    p.add_argument("--retry-uncertain", nargs="*", default=None, metavar="ID",
+                   help="결과를 모르는(uncertain) 항목도 다시 보낸다. id를 주면 그 기록만")  # fmt: skip
 
     p = sub("list", "outbox 항목 보기")
-    p.add_argument("--json", action="store_true", help="JSON 배열")
+    p.add_argument("--json", action="store_true", help="JSON 배열(각 항목에 보이는 상태 state를 더함)")
     p.add_argument("--all", action="store_true", help="완료 항목도 보인다")
     return parser
 

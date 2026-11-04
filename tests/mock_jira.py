@@ -52,10 +52,14 @@
 - `worklog_denied=True`: 워크로그 POST는 403.
 - `on_write=callable(req)`: 쓰기 요청을 처리하기 전에 부른다(테스트 훅). (상태, 본문[, 헤더])를
   돌려주면 그것으로 응답하고 반영하지 않는다(예: 429).
+- `redirect_writes=True`: 쓰기는 반영하지 않고 같은 경로로 301(`Location: base_url + 경로`).
+- `html_200=True`: 쓰기는 반영하지 않고 200 `text/html` 화면(SSO·프록시 안내 화면 흉내).
+- `on_read=callable(req)`: GET 요청(인증 통과 뒤)을 처리하기 전에 부른다. 돌려준 값이 있으면 그것으로 응답.
+- `myself_status=N`: `/myself`가 N으로 응답한다(예: 503).
 실행 중에 `mock.modes[...]`를 바꾸면 다음 요청부터 따른다. `mock.count("write")`는 받은 쓰기 수.
 
 라우팅은 `ROUTES` 표(메서드, 경로 정규식, 처리 함수)로 한다. 처리 함수는 (상태, 본문) 또는
-(상태, 본문, 추가 헤더)를 돌려준다. 본문이 None이면 빈 본문(204).
+(상태, 본문, 추가 헤더)를 돌려준다. 본문이 None이면 빈 본문(204), `Raw`면 그 바이트와 Content-Type.
 """
 from __future__ import annotations
 
@@ -92,7 +96,20 @@ KNOWN_MODES = {
     "assign_denied",
     "worklog_denied",
     "on_write",
+    "redirect_writes",
+    "html_200",
+    "on_read",
+    "myself_status",
 }
+HTML_PAGE = "<!DOCTYPE html><html><head><title>로그인</title></head><body>SSO 로그인이 필요합니다</body></html>"
+
+
+class Raw:
+    """JSON이 아닌 응답 본문(예: HTML 화면)."""
+
+    def __init__(self, data: bytes, content_type: str) -> None:
+        self.data = data
+        self.content_type = content_type
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "jira"
 SPRINT_FIELD = "customfield_10020"
@@ -333,13 +350,18 @@ class _Handler(BaseHTTPRequestHandler):
         result = handle(req)
         status, payload = result[0], result[1]
         extra = result[2] if len(result) > 2 else {}
-        data = b"" if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if isinstance(payload, Raw):
+            data, content_type = payload.data, payload.content_type
+        elif payload is None:
+            data, content_type = b"", None
+        else:
+            data, content_type = json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8"
         slow = float(mock.modes.get("slow_write_sec") or 0) if req.method in WRITE_METHODS else 0.0
         if slow > 0:
             time.sleep(slow)  # 반영은 끝났고 응답만 늦다 → 클라이언트는 결과를 모른다
         self.send_response(status)
-        if payload is not None:
-            self.send_header("Content-Type", "application/json; charset=utf-8")
+        if content_type is not None:
+            self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         for name, value in extra.items():
             self.send_header(name, value)
@@ -977,7 +999,10 @@ def _error(status: int, *messages: str):
 
 
 def _myself(req: Request):
-    return 200, {"name": "honggildong", "key": "honggildong", "displayName": "홍길동", "emailAddress": "hong@example.invalid", "timeZone": "Asia/Seoul"}
+    forced = req.mock.modes.get("myself_status")
+    if forced:
+        return _error(int(forced), f"모의 /myself 응답 {forced}")
+    return 200,{"name": "honggildong", "key": "honggildong", "displayName": "홍길동", "emailAddress": "hong@example.invalid", "timeZone": "Asia/Seoul"}
 
 
 def _projects(req: Request):
@@ -1100,6 +1125,10 @@ def _write_gate(req: Request):
         answer = hook(req)
         if answer is not None:  # 훅이 (상태, 본문[, 헤더])를 주면 그것으로 응답한다
             return answer
+    if mock.modes.get("redirect_writes"):
+        return 301, None, {"Location": f"{mock.base_url}{req.path}"}
+    if mock.modes.get("html_200"):
+        return 200, Raw(HTML_PAGE.encode("utf-8"), "text/html; charset=utf-8")
     if calls <= int(mock.modes.get("write_500_times") or 0):
         return _error(500, "내부 서버 오류 (모의 쓰기)")
     return None
@@ -1330,6 +1359,11 @@ def _authorized(req: Request) -> bool:
 def handle(req: Request):
     if req.path.startswith("/rest/") and not _authorized(req):
         return 401, {"errorMessages": ["인증이 필요합니다"]}
+    reader = req.mock.modes.get("on_read")
+    if req.method == "GET" and callable(reader):
+        answer = reader(req)
+        if answer is not None:
+            return answer
     for method, pattern, func in ROUTES:
         if method != req.method:
             continue

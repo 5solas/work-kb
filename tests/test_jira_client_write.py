@@ -285,6 +285,84 @@ def test_on_write_hook_sees_request(start_jira):
     assert seen == [("PUT", "/rest/api/2/issue/KB-12/assignee", {"name": "kimcs"})]
 
 
+# ---------------------------------------------------------------- 리다이렉트·엄격한 성공 모양
+
+
+def _comment_count(server, key: str = "KB-12") -> int:
+    return len(server.issues[key]["fields"]["comment"]["comments"])
+
+
+def test_redirect_on_write_is_rejected_and_not_followed(start_jira):
+    """301을 따라가면 requests가 POST를 GET으로 바꿔 '성공'처럼 보인다. 따라가지 않고 WriteRejected."""
+    server = start_jira(redirect_writes=True)
+    before = _comment_count(server)
+    with client_for(server) as client:
+        for call in (
+            lambda: client.add_comment("KB-12", "리다이렉트"),
+            lambda: client.do_transition("KB-12", "31"),
+            lambda: client.assign("KB-12", "kimcs"),
+            lambda: client.add_worklog("KB-12", 60, "", dt.datetime(2026, 11, 5, 9, 0, tzinfo=KST)),
+            lambda: client.create_issue("KB", "리다이렉트", "Task"),
+        ):
+            with pytest.raises(jc.WriteRejected) as info:
+                call()
+            assert 300 <= info.value.status < 400
+            assert "리다이렉트" in str(info.value) and "https 주소로 고치세요" in str(info.value)
+            assert f"{server.base_url}/rest/api/2/" in str(info.value)  # Location
+    assert [e["method"] for e in server.log] == ["POST", "POST", "PUT", "POST", "POST"]  # GET으로 따라가지 않음
+    assert _comment_count(server) == before
+    assert server.issues["KB-12"]["fields"]["status"]["name"] == "In Progress"
+    assert "KB-16" not in server.issues
+
+
+def test_html_200_on_write_is_unexpected_response(start_jira):
+    server = start_jira(html_200=True)
+    before = _comment_count(server)
+    with client_for(server) as client:
+        for call in (
+            lambda: client.add_comment("KB-12", "html"),
+            lambda: client.do_transition("KB-12", "31"),
+            lambda: client.assign("KB-12", "kimcs"),
+            lambda: client.add_worklog("KB-12", 60, "", dt.datetime(2026, 11, 5, 9, 0, tzinfo=KST)),
+            lambda: client.create_issue("KB", "html", "Task"),
+        ):
+            with pytest.raises(jc.UnexpectedResponse) as info:
+                call()
+            assert info.value.status == 200
+            assert "JSON이 아닙니다" in str(info.value) or "다른 성공 코드" in str(info.value)  # 생성은 201만
+            assert info.value.exit_code == 3
+    assert server.count("write") == 5
+    assert _comment_count(server) == before and "KB-16" not in server.issues
+
+
+@pytest.mark.parametrize(
+    ("answer", "call"),
+    [
+        ((201, {}), lambda c: c.add_comment("KB-12", "x")),  # id 없음
+        ((201, {"id": 5}), lambda c: c.add_comment("KB-12", "x")),  # 문자열 id 아님
+        ((204, None), lambda c: c.add_comment("KB-12", "x")),  # 다른 성공 코드
+        ((201, {"self": "x"}), lambda c: c.add_worklog("KB-12", 60, "", dt.datetime(2026, 11, 5, 9, 0, tzinfo=KST))),
+        ((201, {}), lambda c: c.do_transition("KB-12", "31")),  # 전환은 204(또는 200)
+        ((202, None), lambda c: c.assign("KB-12", "kimcs")),
+        ((201, {}), lambda c: c.create_issue("KB", "키 없음", "Task")),  # 키 없음
+        ((200, {"id": "1", "key": "KB-99"}), lambda c: c.create_issue("KB", "200", "Task")),  # 생성은 201만
+    ],
+)
+def test_wrong_success_shape_is_unexpected_response(start_jira, answer, call):
+    server = start_jira(on_write=lambda req: answer)
+    with client_for(server) as client, pytest.raises(jc.UnexpectedResponse):
+        call(client)
+
+
+def test_accepted_success_variants(start_jira):
+    """댓글 200 + id, 전환·담당 200 + JSON 본문은 받는다."""
+    server = start_jira(on_write=lambda req: (200, {"id": "777"}) if req.path.endswith("/comment") else (200, {}))
+    with client_for(server) as client:
+        assert client.add_comment("KB-12", "x")["id"] == "777"
+        assert client.do_transition("KB-12", "31") is None
+        assert client.assign("KB-12", "kimcs") is None
+
+
 def test_unknown_mode_rejected():
     with pytest.raises(TypeError):
         mock_jira.start(write_fail=True)

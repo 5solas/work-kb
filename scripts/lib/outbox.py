@@ -8,32 +8,43 @@
 
 - `id`: ULID 꼴(앞 10자 = 밀리초 시각, 뒤 16자 = 난수, Crockford base32). 문자열 순서 = 만든 순서.
   같은 프로세스 안에서는 늘 커진다. 시각은 실제 시계를 쓴다(KB_FAKE_NOW와 무관하게 순서가 맞게).
-- `status`: pending · done · failed. `last_error`가 "uncertain"이면 보냈지만 결과를 모른다.
-- 덧붙는 필드: `result`(예: {"key": "KB-16"}), `error_detail`, 그 밖은 그대로 보존한다.
+- `status`: pending · sending · done · failed. `last_error`가 "uncertain"이면 보냈지만 결과를 모른다.
+  `sending`은 어떤 프로세스가 지금 보내는 중이라는 표시(claim)다. `claimed_at`(실제 시계)과 `pid`가 붙는다.
+  보내기 전에 잠금 안에서 표시하고, 결과를 적을 때 지운다. 그래서 보내다 끊기면(Ctrl+C·강제 종료·
+  잠금 시간 초과) 기록은 plain pending이 아니라 sending으로 남고, 주인이 죽었거나 오래되면 불확실로 본다.
+- 덧붙는 필드: `result`(예: {"key": "KB-16"}), `error_detail`, `claimed_at`, `pid`, 그 밖은 그대로 보존한다.
 
-쓰기(append·update)는 `core.kb_lock` 안에서 파일 전체를 읽어 같은 폴더 임시 파일 → os.replace로 바꾼다.
-고치지 않은 줄(읽지 못한 줄 포함)은 바이트 그대로 둔다. 바뀐 것이 없으면 쓰지 않는다.
+쓰기(append·update·modify)는 `core.kb_lock` 안에서 파일 전체를 읽어 같은 폴더 임시 파일 → os.replace로
+바꾼다. 고치지 않은 줄(읽지 못한 줄 포함)은 바이트 그대로 둔다. 바뀐 것이 없으면 쓰지 않는다.
+읽기는 잠금 없이 하되, Windows 공유 위반(다른 프로세스가 교체하는 순간)이면 잠시 기다렸다 다시 읽고,
+계속되면 FileBusy(종료 6).
 네트워크 요청은 이 모듈에서 하지 않는다(잠금을 쥔 채 보내지 않게, D26).
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from lib import core
 
 REL = ("jira", "outbox.jsonl")
 LOCK_OWNER = "jira_act"
-PENDING, DONE, FAILED = "pending", "done", "failed"
-STATUSES = (PENDING, DONE, FAILED)
+PENDING, SENDING, DONE, FAILED = "pending", "sending", "done", "failed"
+STATUSES = (PENDING, SENDING, DONE, FAILED)
 UNCERTAIN = "uncertain"
 MAX_ATTEMPTS = 5
 FIELD_ORDER = ("id", "ts", "action", "key", "payload", "source", "status", "attempts", "last_error", "done_at")
+REMOVE: Any = object()
+"""update·modify의 changes 값으로 주면 그 필드를 기록에서 뺀다."""
+READ_RETRIES = 8  # 공유 위반으로 못 읽을 때 다시 읽는 횟수(0.05초부터 두 배씩, 최대 1초 간격)
+_READ_RETRY_WINERRORS = {5, 32, 33}  # ACCESS_DENIED, SHARING_VIOLATION, LOCK_VIOLATION
 
 _CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _ID_LEN = 26
@@ -100,11 +111,39 @@ def _parse(data: bytes) -> list[_Line]:
     return lines
 
 
+def _is_sharing_violation(exc: PermissionError) -> bool:
+    """Windows에서 다른 프로세스가 파일을 잡고 있거나 교체하는 중이라 못 읽었는가.
+
+    CreateFile 단계면 winerror 5·32·33이 붙지만, CRT의 open()·read()를 거치면 winerror 없이
+    errno 13(EACCES)만 온다(잠긴 범위 읽기, 지우는 중인 파일 열기). 둘 다 잠시 뒤 다시 읽는다.
+    """
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _READ_RETRY_WINERRORS
+    return sys.platform == "win32" and exc.errno == errno.EACCES
+
+
+def _read_bytes(path: Path) -> bytes | None:
+    """파일 바이트. 없으면 None. 공유 위반은 잠시 기다렸다 다시 읽고, 계속되면 FileBusy."""
+    delay = 0.05
+    for attempt in range(READ_RETRIES + 1):
+        try:
+            return path.read_bytes()
+        except FileNotFoundError:
+            return None
+        except PermissionError as exc:
+            if not _is_sharing_violation(exc):
+                raise
+            if attempt >= READ_RETRIES:
+                raise core.FileBusy(f"{path}: 다른 프로그램이 파일을 잡고 있어 읽지 못했습니다 ({exc})") from exc
+        time.sleep(delay)
+        delay = min(delay * 2, 1.0)
+    raise AssertionError("도달하지 않음")  # pragma: no cover
+
+
 def _read(root: Path | str) -> tuple[list[_Line], bytes | None]:
-    path = path_for(root)
-    try:
-        data = path.read_bytes()
-    except FileNotFoundError:
+    data = _read_bytes(path_for(root))
+    if data is None:
         return [], None
     return _parse(data), data
 
@@ -185,23 +224,45 @@ def append(root: Path | str, record: Mapping[str, Any]) -> dict:
     return record
 
 
-def update(root: Path | str, record_id: str, changes: Mapping[str, Any]) -> dict:
-    """id의 기록에 changes를 덮어 쓴다(잠금 안). 바뀐 값이 없으면 파일을 건드리지 않는다.
+def _merge(record: Mapping[str, Any], changes: Mapping[str, Any]) -> dict:
+    merged = {**record, **dict(changes)}
+    return {name: value for name, value in merged.items() if value is not REMOVE}
 
-    없는 id면 KeyError. 고친 기록(새 dict)을 돌려준다.
+
+def modify(
+    root: Path | str, record_id: str, change: Callable[[dict], Mapping[str, Any] | None]
+) -> dict | None:
+    """잠금 안에서 기록을 다시 읽어 `change(기록)`이 준 changes를 적용한다(읽기와 쓰기가 한 걸음).
+
+    change가 None을 주거나 id가 없으면 아무것도 쓰지 않고 None. 아니면 고친 기록(새 dict).
     """
     with core.kb_lock(root, LOCK_OWNER):
         lines, original = _read(root)
         for index, line in enumerate(lines):
             if line.record is not None and line.record.get("id") == record_id:
-                merged = {**line.record, **dict(changes)}
+                changes = change(dict(line.record))
+                if changes is None:
+                    return None
+                merged = _merge(line.record, changes)
                 if merged != line.record:
                     eol_missing = not line.raw.endswith(b"\n")
                     raw = render(merged)
                     lines[index] = _Line(merged, raw[:-1] if eol_missing else raw)
                     _write(root, lines, original)
                 return merged
-    raise KeyError(record_id)
+    return None
+
+
+def update(root: Path | str, record_id: str, changes: Mapping[str, Any]) -> dict:
+    """id의 기록에 changes를 덮어 쓴다(잠금 안). 값이 REMOVE인 필드는 뺀다. 바뀐 값이 없으면
+    파일을 건드리지 않는다.
+
+    없는 id면 KeyError. 고친 기록(새 dict)을 돌려준다.
+    """
+    found = modify(root, record_id, lambda _record: changes)
+    if found is None:
+        raise KeyError(record_id)
+    return found
 
 
 def counts(items: Iterable[Mapping[str, Any]]) -> dict[str, int]:

@@ -69,6 +69,7 @@ def sample(tmp_path):
         {"id": "2", "action": "comment", "key": "KB-7", "status": "pending"},
         {"id": "3", "action": "transition", "key": "OPS-3", "status": "failed"},
         {"id": "4", "action": "comment", "key": "KB-12", "status": "done"},
+        {"id": "5", "action": "worklog", "key": "KB-5", "status": "sending", "pid": 1, "claimed_at": "2026-11-05T08:00:00+09:00"},
     ]
     lines = [json.dumps(item, ensure_ascii=False) for item in outbox] + ["{깨진 줄", ""]
     (root / "jira" / "outbox.jsonl").write_bytes("\n".join(lines).encode("utf-8"))
@@ -98,7 +99,7 @@ def test_empty_vault(vault, fake_now, capsys):
         f"볼트: {vault.resolve()}",
         "오늘 daily: daily/2026-11-05.md 없음 → kb.py today",
         "마지막 동기화: 없음",
-        "outbox: 대기 0개, 실패 0개",
+        "outbox: 대기 0개, 전송 중 0개, 실패 0개",
         "미처리 제안: 0개",
         "미처리 이미지: 0개",
         "LLM: 꺼짐",
@@ -117,7 +118,7 @@ def test_empty_vault_json(vault, fake_now, capsys):
     assert info["environment"] == "company" and info["local_config"] is False and info["agent"] is False
     assert info["today"] == {"date": "2026-11-05", "path": "daily/2026-11-05.md", "exists": False}
     assert info["last_sync"] is None and info["lock"] is None
-    assert info["outbox"] == {"pending": 0, "failed": 0}
+    assert info["outbox"] == {"pending": 0, "sending": 0, "failed": 0}
     assert info["proposals"] == 0 and info["images"] == 0
     assert info["llm"] == {"enabled": False, "fallback_order": ["main", "fallback"], "profiles": {}}
     assert info["problems"] == []
@@ -135,7 +136,7 @@ def test_sample_vault_text(sample, fake_now, run_kb):
         f"볼트: {sample.resolve()}",
         "오늘 daily: daily/2026-11-05.md 있음",
         "마지막 동기화: 2026-11-05T08:45:00+09:00",
-        "outbox: 대기 2개, 실패 1개",
+        "outbox: 대기 2개, 전송 중 1개, 실패 1개",
         "미처리 제안: 2개",
         "미처리 이미지: 2개",
         "LLM: 켜짐 (순서: main → fallback)",
@@ -155,7 +156,7 @@ def test_sample_vault_json_keys(sample, fake_now, run_kb):
     info = json.loads(result.stdout)
     assert set(info) == JSON_KEYS
     assert info["today"]["exists"] is True and info["today"]["date"] == "2026-11-04"
-    assert info["outbox"] == {"pending": 2, "failed": 1}
+    assert info["outbox"] == {"pending": 2, "sending": 1, "failed": 1}
     assert info["images"] == 2 and info["proposals"] == 2
     main = info["llm"]["profiles"]["main"]
     assert set(main) == {"model", "host", "public_host", "detected", "detected_summary"}
