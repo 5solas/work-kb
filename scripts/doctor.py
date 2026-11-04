@@ -7,14 +7,23 @@
 
 점검은 `CHECKS` 목록 순서로 돈다. 이후 Phase는 목록에 함수를 더한다.
 Python·의존성 점검은 외부 패키지를 가져오기 전에 한다. 외부 호출은 lib/net으로만, 짧은 시간 제한으로 한다.
-LLM 점검은 `GET {base_url}/models` 한 번뿐이다(D28). llm_client는 쓰지 않는다.
+LLM 연결 점검은 프로필마다 `GET {base_url}/models` 한 번이다(D28, 키를 보내 401/403이면 ✗). 보내기 전에
+`llm_client.assert_host_allowed`로 회사 차단을 한 번 더 확인한다.
 Jira가 ✓이면 이어서 서버 버전, sprint 필드(D51), jql_mine·뷰 JQL(maxResults=0, D49)을 lib/jira_client로 확인한다.
+
+탐지 재검증(D48): 기록된 `detected`가 있고 연결된 프로필마다 채팅 3회 이하로 확인하고 저장하지 않는다.
+모든 채팅은 `LlmClient`(회사 차단, D44)로, 실제 작업과 같은 방법(기록된 토글·JSON 모드)으로 보낸다.
+1. 추론 끄기 + (json_mode면) response_format: 생각 흔적 없음·JSON 객체. method none이면 기준 상태와 같은지.
+2. 추론 켜기(토글이 있을 때만): 생각 흔적(없으면 토큰 수 2배·차이 30 이상).
+3. 비전(vision이 참일 때만): 64×64 빨강 PNG에 빨강이라고 답하는지.
+`--redetect`는 같은 자리에서 `llm_detect.detect`를 다시 돌려 config.local.yaml에 저장한다(KB_AGENT=1이면 거부).
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,7 +38,9 @@ TIMEOUT = 10
 CODE_ROOT = Path(__file__).resolve().parents[1]
 DEPENDENCIES = (("requests", "requests"), ("yaml", "pyyaml"), ("keyring", "keyring"), ("markdown", "markdown"), ("PIL", "pillow"))
 _CORE_MODULES = ("requests", "yaml", "keyring")
-_NOT_DETECTED = "탐지 안 됨 (Phase 4 kb.py init --redetect)"
+_NOT_DETECTED = "탐지 안 됨 → kb.py doctor --redetect (또는 kb.py init --section llm)"
+_PENDING = "탐지 대기 → 키를 설정한 뒤 kb.py doctor --redetect"
+_RED = re.compile(r"빨강|빨간|빨갛|\bred\b", re.IGNORECASE)
 
 
 # ---------------------------------------------------------------- 결과 모음
@@ -99,6 +110,8 @@ class Context:
     # 회사 환경에서는 공개 호스트 검사가 끝까지 돈 뒤에만 LLM을 부른다(D44, 안전 쪽).
     public_check_done: bool = False
     jira_base: str | None = None  # Jira ✓일 때만 채운다. 세부 점검(JQL·sprint·버전)은 이것이 있을 때만 돈다
+    llm_reachable: set[str] = field(default_factory=set)  # /models가 2xx·404로 답한 프로필. 탐지 점검은 이것만
+    redetect: bool = False  # --redetect: 탐지 점검 자리에서 다시 탐지해 저장한다
 
     def vault_root(self) -> Path:
         if self.cfg is not None:
@@ -514,6 +527,13 @@ def _check_profile(ctx: Context, name: str, profiles: Mapping[str, dict]) -> Non
         ctx.report.fail(label, f"llm.profiles.{name}.base_url이 없습니다 → kb.py init --section llm")
         return
     base = base.strip().rstrip("/")
+    from lib import llm_client
+
+    try:
+        llm_client.assert_host_allowed(ctx.cfg, f"{base}/models")  # 공개 호스트 검사와 겹치지만 보내기 직전에 한 번 더
+    except core.PublicHostRefused as exc:
+        ctx.report.fail(label, f"{exc}", public_host=True)
+        return
     model = str(profile.get("model") or "")
     ref_label = f"llm.profiles.{name}.api_key_ref"
     has_ref = profile.get("api_key_ref") not in (None, "")
@@ -537,11 +557,13 @@ def _check_profile(ctx: Context, name: str, profiles: Mapping[str, dict]) -> Non
         return
     note = " (키 없이 확인)" if key_missing else ""
     if status == 404:
+        ctx.llm_reachable.add(name)
         ctx.report.info(label, f"연결됨, /models 없음 (404){note}")
         return
     if not 200 <= status < 300:
         ctx.report.fail(label, f"{net.describe_status(resp)} → 서버 상태와 base_url을 확인하세요 ({base})")
         return
+    ctx.llm_reachable.add(name)
     ids = _model_ids(_json(resp))
     if ids is None:
         ctx.report.info(label, f"연결됨, 모델 목록을 읽지 못함{note}")
@@ -573,18 +595,213 @@ def check_llm(ctx: Context) -> None:
 
 @check("탐지")
 def check_detected(ctx: Context) -> None:
+    """기록된 detected 재검증(D48, 프로필마다 채팅 3회 이하, 저장 안 함). --redetect면 다시 탐지해 저장."""
     cfg = ctx.cfg
-    if cfg is None or not cfg.local_exists or not _truthy(cfg.get("llm.enabled"), False):
+    if cfg is None or not cfg.local_exists:
         return
+    if not _truthy(cfg.get("llm.enabled"), False):
+        if ctx.redetect:
+            ctx.report.info("탐지", "LLM이 비활성이라 다시 탐지하지 않았습니다 → llm.enabled: true (kb.py init --section llm)")
+        return
+    from lib import llm_client
+
     profiles = cfg.profiles()
+    client = None
+    refused: str | None = None
+    try:
+        client = llm_client.LlmClient(cfg)  # 회사 차단(D44): 공개 호스트 프로필이 하나라도 있으면 아무것도 보내지 않는다
+    except core.PublicHostRefused as exc:
+        refused = str(exc)
     for name in _profiles_to_check(cfg):
         profile = profiles.get(name)
         if profile is None:
             continue
-        if profile.get("detected"):
-            ctx.report.info(f"탐지 {name}", "기록됨 (재검증은 Phase 4에서 추가됩니다)")
-        else:
-            ctx.report.info(f"탐지 {name}", _NOT_DETECTED)
+        label = f"탐지 {name}"
+        try:
+            if ctx.redetect:
+                _redetect_profile(ctx, client, refused, name, label)
+            else:
+                _verify_profile(ctx, client, refused, name, profile, label)
+        except core.PublicHostRefused as exc:
+            ctx.report.fail(label, str(exc), public_host=True)
+        except Exception as exc:  # 프로필 하나의 실패가 나머지를 막지 않게
+            ctx.report.fail(label, f"예상치 못한 오류: {type(exc).__name__}: {core.redact(str(exc))}")
+
+
+def _call_blocked(ctx: Context, refused: str | None, name: str, label: str, what: str) -> bool:
+    """이 프로필에 채팅을 보내면 안 되면 '-' 줄을 쓰고 True."""
+    if refused is not None or name in ctx.public_profiles:
+        ctx.report.info(label, f"회사 환경의 공개 호스트 차단으로 {what}하지 않았습니다")
+        return True
+    if ctx.cfg.environment != "home" and not ctx.public_check_done:
+        ctx.report.info(label, f"공개 호스트 검사가 끝나지 않아 {what}하지 않았습니다")
+        return True
+    if name not in ctx.llm_reachable:
+        ctx.report.info(label, f"연결되지 않아 {what}하지 않았습니다 (위 LLM {name} 줄 참고)")
+        return True
+    return False
+
+
+def _redetect_profile(ctx: Context, client: Any, refused: str | None, name: str, label: str) -> None:
+    if _call_blocked(ctx, refused, name, label, "다시 탐지"):
+        return
+    import init
+    from lib import llm_detect, net
+
+    try:
+        detected = llm_detect.detect(client, name)
+    except core.PublicHostRefused:
+        raise
+    except core.KbError as exc:
+        ctx.report.fail(label, f"다시 탐지하지 못했습니다: {net.error_text(exc)} → 서버·모델 이름을 확인하세요 (kb.py init --section llm)")
+        return
+    init.save_detected(ctx.cfg.config_dir, name, detected)
+    ctx.report.ok(label, f"다시 탐지해 저장했습니다: {init.summarize_detected(detected)}")
+    for warning in detected.get("warnings") or []:
+        ctx.report.info(f"{label} 주의", str(warning))
+
+
+def _verify_profile(ctx: Context, client: Any, refused: str | None, name: str, profile: Mapping[str, Any], label: str) -> None:
+    detected = profile.get("detected")
+    if detected == "pending":
+        ctx.report.info(label, _PENDING)
+        return
+    if not isinstance(detected, Mapping) or not detected:
+        ctx.report.info(label, _NOT_DETECTED)
+        return
+    if _call_blocked(ctx, refused, name, label, "재검증"):
+        return
+    problems, done = verify_detected(client, name, detected)
+    calls = f"호출 {len(done)}회" + (f": {', '.join(done)}" if done else "")
+    if problems:
+        ctx.report.fail(label, f"기록과 다릅니다 ({calls}): {'; '.join(problems)} → kb.py doctor --redetect로 다시 탐지하세요")
+    else:
+        ctx.report.ok(label, f"기록과 같습니다 ({calls}, 저장 안 함)")
+
+
+def _verify_chat(client: Any, name: str, messages: list[dict], **kw: Any) -> tuple[Any, str | None]:
+    from lib import llm_client, llm_detect, net
+
+    try:
+        return client.chat(name, messages, max_tokens=llm_detect.PROBE_MAX_TOKENS, **kw), None
+    except core.PublicHostRefused:
+        raise
+    except llm_client.ChatHttpError as exc:
+        return None, f"{exc.status} {exc.body[:120]}".strip()
+    except core.KbError as exc:
+        return None, net.error_text(exc)
+
+
+def _json_object(text: str | None) -> bool:
+    try:
+        return isinstance(json.loads(text or ""), dict)
+    except ValueError:
+        return False
+
+
+def _tokens(result: Any) -> int | None:
+    usage = result.usage if isinstance(getattr(result, "usage", None), Mapping) else None
+    value = usage.get("completion_tokens") if usage else None
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def verify_detected(client: Any, name: str, detected: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """기록된 탐지 결과를 채팅 3회 이하로 확인한다. (문제 목록, 한 호출 이름 목록). 아무것도 저장하지 않는다.
+
+    호출은 실제 작업처럼 `client.chat(reasoning=…, json_mode=…)`로 보내 기록된 토글·JSON 모드를 그대로 쓴다.
+    """
+    from lib import llm_detect
+
+    problems: list[str] = []
+    done: list[str] = []
+    toggle = detected.get("reasoning_toggle") if isinstance(detected.get("reasoning_toggle"), Mapping) else {}
+    method = toggle.get("method")
+    switchable = method in ("param", "system_prefix")
+    raw_notes = detected.get("notes")
+    notes = {str(x) for x in raw_notes} if isinstance(raw_notes, list) else set()
+    json_on = detected.get("json_mode") is True
+
+    # 1) 끄기(+JSON 모드)
+    if json_on:
+        messages = [
+            {"role": "system", "content": llm_detect.JSON_SYSTEM_PROMPT},
+            {"role": "user", "content": llm_detect.JSON_PROMPT},
+        ]
+    else:
+        messages = [
+            {"role": "system", "content": llm_detect.SYSTEM_PROMPT},
+            {"role": "user", "content": llm_detect.ARITHMETIC_PROMPT},
+        ]
+    off, error = _verify_chat(client, name, messages, reasoning=False, json_mode=json_on)
+    done.append("끄기·JSON" if json_on else "끄기")
+    if off is None:
+        problems.append(f"끄기 호출 실패({error})")
+    else:
+        trace = llm_detect.has_trace(off)
+        if switchable and trace:
+            problems.append("추론 끄기가 듣지 않습니다(생각 흔적 있음)")
+        if not switchable and "baseline_reasoning" in detected and trace != bool(detected.get("baseline_reasoning")):
+            recorded = "켜짐" if detected.get("baseline_reasoning") else "꺼짐"
+            problems.append(f"기준 상태가 기록(생각 {recorded})과 다릅니다")
+        if json_on:
+            ok = _json_object(off.content)
+            if not ok and "json_in_reasoning" in notes and not off.content.strip() and off.reasoning:
+                try:
+                    from lib import llm_client
+
+                    llm_client.parse_json_object(off.reasoning)
+                    ok = True
+                except ValueError:
+                    ok = False
+            if not ok:
+                problems.append(f"JSON 모드 답이 JSON 객체가 아닙니다(finish={off.finish_reason})")
+        elif not off.content.strip() and not (trace and not switchable):
+            problems.append(f"끄기 상태의 답이 비었습니다(finish={off.finish_reason})")
+
+    # 2) 켜기: 토글이 있을 때만
+    if switchable:
+        on, error = _verify_chat(
+            client,
+            name,
+            [{"role": "system", "content": llm_detect.SYSTEM_PROMPT}, {"role": "user", "content": llm_detect.ARITHMETIC_PROMPT}],
+            reasoning=True,
+            json_mode=False,
+        )
+        done.append("켜기")
+        if on is None:
+            problems.append(f"켜기 호출 실패({error})")
+        elif not llm_detect.has_trace(on):
+            on_tokens, off_tokens = _tokens(on), (_tokens(off) if off is not None else None)
+            by_tokens = (
+                off is not None
+                and not llm_detect.has_trace(off)
+                and on_tokens is not None
+                and off_tokens is not None
+                and on_tokens >= llm_detect.TOKEN_RATIO * off_tokens
+                and on_tokens - off_tokens >= llm_detect.TOKEN_GAP
+            )
+            if not by_tokens:
+                problems.append("추론 켜기가 듣지 않습니다(생각 흔적 없음)")
+
+    # 3) 비전: 참으로 기록됐을 때만
+    if detected.get("vision") is True:
+        user = [
+            {"type": "text", "text": llm_detect.VISION_PROMPT},
+            {"type": "image_url", "image_url": {"url": llm_detect.red_png_data_url()}},
+        ]
+        seen, error = _verify_chat(
+            client, name, [{"role": "system", "content": llm_detect.SYSTEM_PROMPT}, {"role": "user", "content": user}],
+            reasoning=False, json_mode=False,
+        )
+        done.append("비전")
+        if seen is None:
+            problems.append(f"비전 호출 실패({error})")
+        elif not (
+            _RED.search(seen.content or "")
+            or ("vision_in_reasoning" in notes and not (seen.content or "").strip() and _RED.search(seen.reasoning or ""))
+        ):
+            problems.append("비전: 빨강 그림에 빨강이라고 답하지 않습니다(이미지를 보지 않음)")
+    return problems, done
 
 
 @check("쓰기 권한")
@@ -796,14 +1013,12 @@ def run_checks(ctx: Context, checks: list[Checker] | None = None) -> Report:
 def main(argv: list[str]) -> int:
     parser = core.make_parser("kb.py doctor", "연결·환경 점검. ✓ 정상, ✗ 문제, - 참고")
     parser.add_argument("--json", action="store_true", help="결과를 JSON 목록으로 출력")
-    parser.add_argument("--redetect", action="store_true", help="LLM 탐지 다시 하기 (Phase 4)")
+    parser.add_argument("--redetect", action="store_true", help="LLM 탐지를 다시 해서 config.local.yaml에 저장")
     args = parser.parse_args(argv)
     if args.redetect:
         core.refuse_if_agent("doctor --redetect")
-        print("LLM 탐지 다시 하기(--redetect)는 Phase 4에서 추가됩니다.")
-        return 4
     report = Report(echo=None if args.json else (lambda line: print(line, flush=True)))
-    ctx = Context(root_arg=args.root, report=report)
+    ctx = Context(root_arg=args.root, report=report, redetect=args.redetect)
     run_checks(ctx)
     if args.json:
         print(json.dumps(report.as_list(), ensure_ascii=False, indent=1))

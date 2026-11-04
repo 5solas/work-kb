@@ -1,0 +1,11 @@
+{
+  "decisions": [
+    {"title": "캐시 updated 시각은 UTC로 저장", "content": "jira 캐시의 updated 값을 UTC로 저장한다.", "rationale": "시간대 혼동을 막기 위해서다.", "related": ["KB-12", "@김철수", "ZZ-9", "@없는사람"], "source_line": "L1"},
+    {"title": "입력에 없는 줄에서 나온 결정", "content": "버려져야 한다.", "rationale": "", "related": [], "source_line": "L99"}
+  ],
+  "actions": [
+    {"text": "배포 체크리스트 초안 작성", "related": ["OPS-3"], "source_line": "L2"},
+    {"text": "경비 정산", "related": [], "source_line": "L3"},
+    {"text": "캐시 만료 24시간 반영", "related": ["[[KB-12]]"], "source_line": "X1"}
+  ]
+}

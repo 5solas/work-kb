@@ -17,7 +17,12 @@
 ;; 키 (접두 키 다음):
 ;;   c 캡처        C 클립보드 이미지   F 이미지 파일   i inbox 메모
 ;;   t 오늘 daily  s 검색             o 커서 위치 열기  l link 실행
-;;   ? 상태        j Jira 작업        g 편찬(Phase 4)  a 제안(Phase 4)
+;;   ? 상태        j Jira 작업        g 편찬(ingest → compile)  a 주제 제안 승인
+;;
+;; g: `kb.py ingest' 뒤 `kb.py compile'을 차례로 한 *work-kb* 버퍼에 돌린다
+;;   (C-u g는 둘 다 --dry-run). LLM이 없으면 두 단계 모두 조용히 건너뛴다.
+;; a: wiki/_proposals.md를 열고 번호(또는 all)를 받아 y-or-n-p로 확인한 뒤
+;;   `kb.py proposals accept <n|all>'을 보낸다.
 ;;
 ;; j (Jira 작업 transient): v 보기 · c 댓글(기본 현재 줄) · t 전환(후보 선택) · a 담당 ·
 ;;   w 워크로그 · n 새 일감 · p 현재 줄 승격 · q 라이브 JQL · S 동기화 · f outbox 다시 보내기 ·
@@ -300,10 +305,11 @@
       (when (buffer-live-p buf) (display-buffer buf))
       (message "work-kb: 실패 (종료 %s). %s 버퍼를 보세요" code (if (buffer-live-p buf) (buffer-name buf) "")))))
 
-(cl-defun work-kb--run (args &key on-exit buffer)
+(cl-defun work-kb--run (args &key on-exit buffer append header)
   "kb.py를 비동기로 실행한다. Python을 부르는 유일한 입구 (D10).
 명령줄은 `python -X utf8 scripts/kb.py --argv-stdin'(ASCII), ARGS(문자열 목록)는 stdin의
-JSON 배열로 보낸다. 출력은 BUFFER(기본 *work-kb*, 실행 전에 비움). 끝나면 ON-EXIT를
+JSON 배열로 보낸다. 출력은 BUFFER(기본 *work-kb*, 실행 전에 비움; APPEND면 비우지 않고
+끝에 잇는다). HEADER(문자열)가 있으면 출력 앞에 넣는다. 끝나면 ON-EXIT를
 \(PROC 종료코드)로 부른다. 프로세스를 돌려준다."
   (unless (and (listp args) (cl-every #'stringp args))
     (error "work-kb--run: ARGS는 문자열 목록이어야 합니다: %S" args))
@@ -316,7 +322,12 @@ JSON 배열로 보낸다. 출력은 BUFFER(기본 *work-kb*, 실행 전에 비�
          (command (append python (list "-X" "utf8" "scripts/kb.py" "--argv-stdin")))
          proc)
     (with-current-buffer buf
-      (let ((inhibit-read-only t)) (erase-buffer))
+      (let ((inhibit-read-only t))
+        (unless append (erase-buffer))
+        (when header
+          (goto-char (point-max))
+          (unless (or (bobp) (bolp)) (insert "\n"))
+          (insert header)))
       (setq default-directory root))
     (setq proc (make-process :name "work-kb"
                              :buffer buf
@@ -326,7 +337,8 @@ JSON 배열로 보낸다. 출력은 BUFFER(기본 *work-kb*, 실행 전에 비�
                              :noquery t
                              :filter #'work-kb--filter
                              :sentinel #'work-kb--sentinel))
-    (set-marker (process-mark proc) (with-current-buffer buf (point-max)))
+    ;; 버퍼를 꼭 넘긴다: 빠뜨리면 표시가 지금 버퍼를 가리켜 출력이 머리말 앞(1)에 들어간다.
+    (set-marker (process-mark proc) (with-current-buffer buf (point-max)) buf)
     (process-put proc 'work-kb-on-exit on-exit)
     (process-send-string proc (json-serialize (vconcat args)))
     (process-send-eof proc)
@@ -887,8 +899,8 @@ TEXT가 있으면 바로 추가하고, 없으면 캡처 버퍼를 연다 (C-c C-
         found))))
 
 (defun work-kb--visit-jira (file)
-  "jira FILE을 지금 창에 연다. 이미 연 버퍼가 디스크보다 낡았고 수정이 없으면 묻지 않고
-다시 읽는다 (jira/는 기계 소유). 그 버퍼를 돌려준다."
+  "기계 소유 FILE(jira/KEY.md, wiki/_proposals.md)을 지금 창에 연다. 이미 연 버퍼가
+디스크보다 낡았고 수정이 없으면 묻지 않고 다시 읽는다. 그 버퍼를 돌려준다."
   (let ((live (find-buffer-visiting file)))
     (when (and live
                (not (buffer-modified-p live))
@@ -1400,17 +1412,124 @@ Python은 디스크의 줄을 읽으므로 저장 안 된 수정이 있으면 �
     ("f" "outbox 다시 보내기" work-kb-jira-flush)
     ("d" "완료 전환 제안" work-kb-jira-check-done)]])
 
-;;;; 다음 Phase
+;;;; 편찬·주제 제안 (Phase 4, `g'·`a', §6.8)
 
-(defun work-kb-ingest ()
-  "이미지 추출과 편찬(ingest + compile). Phase 4에서 추가된다."
-  (interactive)
-  (message "work-kb: g(편찬)는 Phase 4에서 추가됩니다"))
+;; `g'와 `a'도 `work-kb--run'(stdin JSON)만 거친다. LLM 연결·회사 가드는 모두 Python 쪽 일이다.
+
+(defvar work-kb--compile-running nil
+  "`g'(ingest → compile)가 도는 중이면 t (두 번 돌려 *work-kb* 버퍼를 섞지 않는다).")
+
+(defconst work-kb-proposals-file "wiki/_proposals.md"
+  "주제 제안 파일 (볼트 기준).")
+
+(defun work-kb--step-result (name code)
+  "단계 NAME이 CODE로 끝난 결과 문구."
+  (if (eq code 0)
+      (format "%s 완료" name)
+    (format "%s 실패(%s)" name (work-kb--exit-reason code))))
+
+(defun work-kb--finish-compile (label ingest-code compile-code)
+  "`g'가 끝났다: 버퍼를 보이고 두 단계 결과를 알린다. COMPILE-CODE가 nil이면 compile을 건너뛰었다."
+  (setq work-kb--compile-running nil)
+  (let ((buf (get-buffer work-kb-output-buffer)))
+    (when (buffer-live-p buf) (display-buffer buf))
+    (cond
+     ((and (eq ingest-code 0) (eq compile-code 0))
+      (message "work-kb: %s 완료%s" label
+               (let ((last (work-kb--last-line buf))) (if last (concat " — " last) ""))))
+     ((null compile-code)
+      (message "work-kb: %s 중단 — %s. compile은 돌리지 않았습니다. %s 버퍼를 보세요"
+               label (work-kb--step-result "ingest" ingest-code) work-kb-output-buffer))
+     (t
+      (message "work-kb: %s 끝 — %s, %s. %s 버퍼를 보세요"
+               label (work-kb--step-result "ingest" ingest-code)
+               (work-kb--step-result "compile" compile-code) work-kb-output-buffer)))))
+
+(defun work-kb--after-ingest (ingest-code extra label)
+  "ingest가 INGEST-CODE로 끝난 뒤 compile을 같은 버퍼에 이어 돌린다.
+공개 호스트 거부(종료 5)면 compile도 같은 가드에 걸리므로 돌리지 않는다."
+  (if (eq ingest-code 5)
+      (work-kb--finish-compile label ingest-code nil)
+    (condition-case err
+        (work-kb--run (apply #'work-kb--kb-args "compile" extra)
+                      :buffer work-kb-output-buffer
+                      :append t
+                      :header (format "\n== compile%s ==\n" (if extra " --dry-run" ""))
+                      :on-exit (lambda (_proc code) (work-kb--finish-compile label ingest-code code)))
+      (error
+       (setq work-kb--compile-running nil)
+       (message "work-kb: compile을 시작하지 못했습니다: %s" (error-message-string err))))))
+
+(defun work-kb-ingest (&optional dry-run)
+  "g: 이미지 추출(`kb.py ingest') 뒤 편찬(`kb.py compile')을 차례로 돌린다.
+두 출력은 한 *work-kb* 버퍼에 이어 쓴다. DRY-RUN(C-u)이면 둘 다 `--dry-run'(쓰지 않고 diff만).
+ingest가 실패해도(공개 호스트 거부 제외) compile은 돌린다: 글 편찬은 이미지와 따로 쓸모가 있다.
+이미 도는 중이면 다시 돌리지 않는다. 프로세스를 돌려준다 (도는 중이면 nil)."
+  (interactive "P")
+  (if work-kb--compile-running
+      (progn (message "work-kb: 편찬이 이미 진행 중입니다 (%s 버퍼)" work-kb-output-buffer)
+             nil)
+    (let ((extra (and dry-run (list "--dry-run")))
+          (label (if dry-run "편찬 미리 보기" "편찬")))
+      (setq work-kb--compile-running t)
+      (message "work-kb: %s 중… (ingest → compile)" label)
+      (condition-case err
+          (work-kb--run (apply #'work-kb--kb-args "ingest" extra)
+                        :buffer work-kb-output-buffer
+                        :header (format "== ingest%s ==\n" (if extra " --dry-run" ""))
+                        :on-exit (lambda (_proc code) (work-kb--after-ingest code extra label)))
+        (error
+         (setq work-kb--compile-running nil)
+         (signal (car err) (cdr err)))))))
+
+(defun work-kb--proposals-args (sub &rest args)
+  "kb.py 인수 목록: proposals SUB --root <볼트> ARGS...
+하위 명령은 `proposals' 바로 뒤에 둔다 (kb.py가 argv[1]로 `proposals list'를 가른다)."
+  (append (list "proposals" sub "--root" (directory-file-name (work-kb--vault))) args))
+
+(defun work-kb--read-proposal-choice ()
+  "승인할 제안: 번호 문자열(앞의 #은 뗀다), \"all\", 비우면 nil. 그 밖은 사용자 오류."
+  (let ((text (downcase (string-trim (read-string "승인할 제안 번호 (all = 전부, 비우면 보기만): ")))))
+    (cond
+     ((string-empty-p text) nil)
+     ((member text '("all" "전부" "모두")) "all")
+     ((string-match "\\`#?\\([0-9]+\\)\\'" text) (match-string 1 text))
+     (t (user-error "제안 번호나 all이 아닙니다: %S" text)))))
 
 (defun work-kb-proposals ()
-  "주제 제안(_proposals.md) 열기와 승인. Phase 4에서 추가된다."
+  "a: wiki/_proposals.md를 열고, 번호(또는 all)를 받아 확인(y-or-n-p)하면
+`kb.py proposals accept <n|all>'을 보낸다 (승인은 wiki/topics/에 주제 페이지를 만들거나
+merge_with 주제에 별칭을 더한다, D22). 비우면 열기만 한다. 끝나면 제안 버퍼를 다시 읽는다.
+파일이 없으면 묻지 않는다. 승인을 보냈으면 프로세스, 아니면 nil."
   (interactive)
-  (message "work-kb: a(제안)는 Phase 4에서 추가됩니다"))
+  (let ((file (expand-file-name work-kb-proposals-file (work-kb--vault))))
+    (if (not (file-exists-p file))
+        (progn (message "work-kb: %s이 아직 없습니다. g(편찬)로 주제 제안을 만드세요" work-kb-proposals-file)
+               nil)
+      (let* ((buffer (work-kb--visit-jira file))
+             (choice (work-kb--read-proposal-choice))
+             (what (if (equal choice "all") "모든 제안" (format "제안 %s" choice))))
+        (cond
+         ((null choice)
+          (message "work-kb: 승인하지 않았습니다 (보기만)")
+          nil)
+         ((not (y-or-n-p (format "%s을(를) 승인할까요? (wiki/topics/에 주제 페이지를 만들거나 별칭을 더합니다) "
+                                 what)))
+          (message "work-kb: 승인을 취소했습니다")
+          nil)
+         (t
+          (work-kb--run (work-kb--proposals-args "accept" choice)
+                        :buffer work-kb-output-buffer
+                        :on-exit
+                        (lambda (_proc code)
+                          (work-kb--revert-if-stale buffer)
+                          (let ((buf (get-buffer work-kb-output-buffer)))
+                            (if (eq code 0)
+                                (message "work-kb: %s 승인 완료%s" what
+                                         (let ((last (work-kb--last-line buf))) (if last (concat " — " last) "")))
+                              (when (buffer-live-p buf) (display-buffer buf))
+                              (message "work-kb: %s 승인 실패 (%s). %s 버퍼를 보세요"
+                                       what (work-kb--exit-reason code) work-kb-output-buffer)))))))))))
 
 ;;;; 볼트 버퍼 (D11)
 

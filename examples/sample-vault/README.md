@@ -7,7 +7,10 @@
 - `daily/2026-11-01.md` ~ `2026-11-05.md`: 한국어 기록, 맨 글자·`[[…]]` 키(KB-12, KB-7, OPS-3), `@김철수`·`@이영희`,
   개인 `- [ ]` 할 일, 코드 블록 안의 가짜 키(KB-999), URL 안의 키 모양 문자열(KB-404), 인라인 코드(KB-555).
   `2026-11-03.md`는 CRLF 줄끝, `2026-11-01.md`는 뼈대 없이 `## 기록`만 있다.
-- `inbox/`: front matter(created, title)가 있는 메모 2개. 이미지는 Phase 4에서 더한다.
+- `inbox/`: front matter(created, title)가 있는 메모 2개와 드롭한 이미지 `회의실 화이트보드.png`(사이드카 없음).
+- `raw/assets/2026-11-05-1420-메일캡처.png`: `daily/2026-11-05.md`의 `- 14:20 ![[raw/assets/…]]` 줄이 임베드한 이미지.
+  두 이미지는 `tests/fixtures/make_images.py`가 그린 허구 그림의 복사본이다. `kb.py ingest`가 inbox 이미지를
+  `raw/assets/`로 옮기고 두 장의 사이드카를 `inbox/`에 쓴다(비전 LLM 필요).
 - `wiki/`, `jira/`: 비어 있다. `kb.py link`가 만든다.
 
 원본을 더럽히지 않게 임시 폴더로 복사해서 쓴다.

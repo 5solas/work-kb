@@ -5,17 +5,25 @@
 2. Jira: base_url → PAT(가려서 입력, 메모리에만) → `/myself` 확인 →
    `/project` 목록에서 번호·키로 고르기 → project_keys. sprint 필드를 찾아 jira.sprint_field에 적고(D51),
    jql_mine·뷰 JQL을 maxResults=0으로 확인한다(D49, 실패해도 저장은 한다).
-3. Confluence·LLM 단계는 이후 Phase에서 더한다(지금은 안내만).
-4. 확인된 PAT를 자격 증명 저장소 work-kb/jira에 저장(같은 값이면 건너뜀) → config.local.yaml 저장
-   (config.save_local, PAT는 쓰지 않는다) → doctor 실행, 그 종료 코드를 돌려준다.
+3. Confluence 단계는 Phase 5에서 더한다(지금은 안내만).
+4. LLM(§6.11 4단계): 설정할지 묻고 → main: 주소 → API 키(가려서, 없으면 Enter) → `GET /models` 목록에서
+   번호로 고르거나 모델 이름 입력 → `llm_detect.detect`(POST 10회 이하) → 탐지 결과(`detected`)를 보여 주고
+   프로필에 기록. 보조(fallback) 프로필도 같은 절차(선택). 회사 환경에서 공개 호스트면 아무것도 보내기 전에
+   거부한다(`llm_client.assert_host_allowed`, 종료 5). 키는 자격 증명 저장소 work-kb/llm(보조 프로필이
+   다른 키면 work-kb/llm-<이름>)에 저장하고 설정에는 참조만 쓴다.
+5. 확인된 PAT·키를 자격 증명 저장소에 저장(같은 값이면 건너뜀) → config.local.yaml 저장
+   (config.save_local, 비밀값은 쓰지 않는다) → doctor 실행, 그 종료 코드를 돌려준다.
 
 재실행하면 기존 config.local.yaml 값이 기본값이다. 입력이 끝나면(EOF) 취소하고 종료 1, 설정 파일과
-자격 증명 저장소는 그대로다. 인증·네트워크 실패도 저장된 PAT를 바꾸지 않는다.
+자격 증명 저장소는 그대로다. 인증·네트워크 실패도 저장된 PAT·키를 바꾸지 않는다.
 
 옵션
-- `--section jira`: 기존 설정 위에서 Jira 단계만. confluence·llm은 해당 Phase 안내(종료 4).
+- `--section jira|llm`: 기존 설정 위에서 그 단계만. confluence는 Phase 5 안내(종료 4).
+- `--redetect`: LLM 탐지만 다시 해서 저장한다(`doctor --redetect`와 같다, D48).
 - `--non-interactive --from-env`: 묻지 않고 KB_INIT_ENVIRONMENT, KB_INIT_JIRA_URL, KB_INIT_JIRA_PAT,
-  KB_INIT_JIRA_PROJECTS(쉼표 목록, 키 또는 번호)를 읽는다. 비어 있으면 기존 값, 그것도 없으면 종료 4.
+  KB_INIT_JIRA_PROJECTS(쉼표 목록, 키 또는 번호), KB_INIT_LLM_URL, KB_INIT_LLM_MODEL, KB_INIT_LLM_KEY를
+  읽는다. 비어 있으면 기존 값, 그것도 없으면 종료 4. 전체 마법사에서 KB_INIT_LLM_URL이 비면 LLM 단계는
+  건너뛴다(기존 설정 유지). 비대화형은 main 프로필만 설정한다.
 
 `--dev` (D45)
 - `config.local.example.yaml`의 `home` 블록을 그대로 읽는다. 코드에는 LLM 주소를 두지 않는다.
@@ -23,6 +31,8 @@
 - 시험용 주소 덮어쓰기: KB_INIT_JIRA_URL, KB_INIT_CONFLUENCE_URL, KB_INIT_LLM_URL(mock 프로필).
   KB_INIT_LLM_KEY가 있으면 키를 자격 증명 저장소 work-kb/llm에 넣고 main 프로필이 그것을 가리키게 한다.
 - 모의 PAT `mock-token`을 자격 증명 저장소 work-kb/jira, work-kb/confluence에 넣는다.
+- main 프로필의 키 참조가 풀리면 main을 탐지해 `detected`에 기록한다. 키가 없거나 탐지가 실패하면
+  `detected: pending`(탐지 대기)으로 두고 doctor가 `kb.py doctor --redetect`를 안내한다.
 - config.local.yaml을 쓰고 doctor를 실행해 그 종료 코드를 돌려준다.
 """
 from __future__ import annotations
@@ -41,12 +51,12 @@ CODE_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_NAME = "config.local.example.yaml"
 SERVICE = "work-kb"
 DEV_TOKEN = "mock-token"  # 모의 서버용 가짜 PAT. 비밀값이 아니다
-REDETECT_PHASE_MESSAGE = "LLM 탐지 다시 하기(--redetect)는 Phase 4에서 추가됩니다."
 SECTION_PHASE_MESSAGES = {
     "confluence": "Confluence 설정(--section confluence)은 Phase 5에서 추가됩니다.",
-    "llm": "LLM 설정(--section llm)은 Phase 4에서 추가됩니다.",
 }
 MAX_TRIES = 3
+LLM_KEY_NAME = "llm"  # 자격 증명 저장소 work-kb/llm (main 키)
+DETECT_PENDING = "pending"  # --dev에서 키가 없거나 탐지가 실패했을 때 detected에 쓰는 값
 
 # --from-env가 읽는 환경변수. 필드 이름 → 변수 이름
 ENV_FIELDS = {
@@ -54,9 +64,14 @@ ENV_FIELDS = {
     "jira.base_url": "KB_INIT_JIRA_URL",
     "jira.pat": "KB_INIT_JIRA_PAT",
     "jira.projects": "KB_INIT_JIRA_PROJECTS",
+    "llm.url": "KB_INIT_LLM_URL",
+    "llm.model": "KB_INIT_LLM_MODEL",
+    "llm.key": "KB_INIT_LLM_KEY",
 }
 
 _ENV_WORDS = {"home": "home", "집": "home", "company": "company", "회사": "company"}
+_YES = frozenset({"y", "yes", "예", "네", "응", "ㅇ"})
+_NO = frozenset({"n", "no", "아니오", "아니요", "아니", "ㄴ"})
 _URL = re.compile(r"^https?://[^\s/]+", re.IGNORECASE)
 _PROJECT_KEY = re.compile(r"^[A-Z][A-Z0-9_]+$")
 
@@ -146,6 +161,8 @@ class Wizard:
         self.cfg = cfg  # 병합된 설정(lib.config.Config). 뷰 JQL·연결 설정을 읽는다
         # 확인을 마친 비밀값 {저장소 이름: 값}. 마지막에 설정 파일과 함께 저장한다(실패·취소면 저장소는 그대로)
         self.pending_secrets: dict[str, str] = {}
+        # 이번 실행에서 정한 LLM 키 {프로필: (값, 참조)}. 보조 프로필이 main 키를 다시 쓸 때 본다
+        self.llm_keys: dict[str, tuple[str | None, str | None]] = {}
 
     @property
     def interactive(self) -> bool:
@@ -326,7 +343,7 @@ def step_environment(wizard: Wizard, data: dict) -> None:
         for name, profile in profiles.items():
             url = profile.get("base_url") if isinstance(profile, Mapping) else None
             if isinstance(url, str) and config.is_public_host(url, blocklist):
-                wizard.out(f"  주의: LLM 프로필 '{name}'이(가) 공개 호스트를 가리킵니다 → kb.py init --section llm(Phase 4)으로 바꾸세요")
+                wizard.out(f"  주의: LLM 프로필 '{name}'이(가) 공개 호스트를 가리킵니다 → LLM 단계(kb.py init --section llm)에서 바꾸세요")
 
 
 # ---------------------------------------------------------------- 단계: jira
@@ -466,8 +483,8 @@ def step_jira(wizard: Wizard, data: dict) -> None:
 # ---------------------------------------------------------------- 단계: 이후 Phase
 
 
-def step_later(wizard: Wizard, data: dict) -> None:
-    """Confluence·LLM 단계 자리. Phase 2에는 안내만 한다."""
+def step_confluence_later(wizard: Wizard, data: dict) -> None:
+    """Confluence 단계 자리. Phase 5 전에는 안내만 한다."""
     wizard.out("\n[3] Confluence")
     wizard.out("  " + SECTION_PHASE_MESSAGES["confluence"])
     if "confluence" not in data:
@@ -475,16 +492,364 @@ def step_later(wizard: Wizard, data: dict) -> None:
         wizard.out("  지금은 비활성(enabled: false)으로 둡니다")
     else:
         wizard.out("  기존 Confluence 설정을 그대로 둡니다")
-    wizard.out("\n[4] LLM")
-    wizard.out("  " + SECTION_PHASE_MESSAGES["llm"])
-    if "llm" in data:
-        wizard.out("  기존 LLM 설정을 그대로 둡니다")
-    else:
-        wizard.out("  지금은 설정하지 않습니다 (LLM 비활성)")
 
 
-FULL_STEPS = [step_environment, step_jira, step_later]
-SECTION_STEPS = {"jira": [step_jira]}
+# ---------------------------------------------------------------- 단계: LLM
+
+
+def parse_llm_url(raw: str) -> str:
+    text = raw.strip().rstrip("/")
+    if not _URL.match(text) or any(ch.isspace() for ch in text):
+        raise core.ConfigError(
+            f"'{raw}'은(는) 주소가 아닙니다. http:// 또는 https://로 시작하는 OpenAI 호환 주소(/v1까지)를 쓰세요"
+        )
+    return text
+
+
+def parse_yes_no(raw: str) -> bool:
+    word = raw.strip().lower()
+    if word in _YES:
+        return True
+    if word in _NO:
+        return False
+    raise core.ConfigError(f"'{raw}'은(는) 예/아니오 답이 아닙니다. y 또는 n으로 답하세요")
+
+
+def parse_model_choice(raw: str, ids: list[str]) -> str:
+    """번호(1부터) 또는 모델 이름. 목록이 없으면 입력한 이름 그대로."""
+    text = raw.strip()
+    if not text:
+        raise core.ConfigError("모델을 고르세요")
+    if ids and text.isdigit():
+        index = int(text)
+        if not 1 <= index <= len(ids):
+            raise core.ConfigError(f"번호 {text}은(는) 목록에 없습니다 (1~{len(ids)})")
+        return ids[index - 1]
+    if any(ch.isspace() for ch in text):
+        raise core.ConfigError(f"'{text}'은(는) 모델 이름 형식이 아닙니다 (공백 없이)")
+    return text
+
+
+def _confirm(wizard: Wizard, prompt: str, default: str) -> bool:
+    """대화형 예/아니오. 틀린 답은 다시 묻는다(MAX_TRIES번)."""
+    for attempt in range(1, MAX_TRIES + 1):
+        raw = (wizard.ask(prompt, default) or "").strip()
+        try:
+            return parse_yes_no(raw)
+        except core.ConfigError as exc:
+            if attempt == MAX_TRIES:
+                raise
+            wizard.out(f"  {exc}. 다시 입력하세요")
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _environment_of(data: Mapping[str, Any]) -> str:
+    """이번에 쓸 environment. 없거나 잘못되면 company(안전 쪽, D44)."""
+    value = data.get("environment")
+    if isinstance(value, str) and value.strip().lower() in ("home", "company"):
+        return value.strip().lower()
+    return "company"
+
+
+def _llm_cfg(wizard: Wizard, data: Mapping[str, Any], name: str, profile: Mapping[str, Any]):
+    """프로필 하나만 담은 설정. 탐지·/models 호출은 이 설정의 LlmClient로만 한다.
+
+    차단 목록은 불러온 설정 ∪ 이번에 쓰는 config.local.yaml 값(줄지 않는다). environment는 이번 답.
+    다른 프로필은 넣지 않는다: 회사 환경에 남은 옛 공개 프로필 때문에 사내 프로필 설정까지 막히지 않게.
+    (그 프로필들은 저장 뒤 doctor·LlmClient가 그대로 막는다.)
+    """
+    from lib import config
+
+    base = copy.deepcopy(dict(wizard.cfg.data)) if wizard.cfg is not None else copy.deepcopy(config.CODE_DEFAULTS)
+    llm = base.get("llm") if isinstance(base.get("llm"), dict) else {}
+    base["llm"] = llm
+    blocked = llm.get("public_hosts_blocklist")
+    blocked = list(blocked) if isinstance(blocked, (list, tuple)) else []
+    local_llm = data.get("llm") if isinstance(data.get("llm"), Mapping) else {}
+    extra = local_llm.get("public_hosts_blocklist")
+    if isinstance(extra, str):
+        extra = [x for x in re.split(r"[\s,]+", extra) if x]
+    if isinstance(extra, (list, tuple)):
+        blocked += [str(x) for x in extra if isinstance(x, str)]
+    llm["public_hosts_blocklist"] = blocked
+    llm["profiles"] = {name: copy.deepcopy(dict(profile))}
+    llm["fallback_order"] = [name]
+    llm["enabled"] = True
+    environment = _environment_of(data)
+    base["environment"] = environment
+    root = Path(wizard.cfg.root) if wizard.cfg is not None else wizard.root
+    return config.Config(root=root, data=base, environment=environment, local_exists=True, config_dir=wizard.root)
+
+
+def _llm_client(cfg: Any, name: str, key: str | None):
+    """LlmClient(회사 차단 검사 포함). 아직 저장하지 않은 키는 메모리의 값을 쓴다."""
+    from lib import llm_client
+
+    client = llm_client.LlmClient(cfg)
+    client._keys[name] = key or None  # 확인 전 키는 자격 증명 저장소에 없다
+    return client
+
+
+def _key_store_name(name: str) -> str:
+    return LLM_KEY_NAME if name == "main" else f"{LLM_KEY_NAME}-{name}"
+
+
+def _resolve_key(ref: Any, environment: str) -> str | None:
+    """기존 키 참조의 값. 풀리지 않거나(없음·회사의 env: 참조 등) 형식이 틀리면 None."""
+    import types
+
+    return _stored_pat(ref, types.SimpleNamespace(environment=environment))
+
+
+def summarize_detected(detected: Any) -> str:
+    """`detected` 한 줄 요약(doctor도 쓴다)."""
+    if detected == DETECT_PENDING:
+        return "탐지 대기"
+    if not isinstance(detected, Mapping) or not detected:
+        return "탐지 안 됨"
+    parts: list[str] = []
+    toggle = detected.get("reasoning_toggle")
+    if isinstance(toggle, Mapping) and toggle.get("method"):
+        method = str(toggle["method"])
+        if toggle.get("param_name"):
+            method += f" {toggle['param_name']}"
+        parts.append(f"추론 토글 {method}")
+    if "baseline_reasoning" in detected:
+        parts.append(f"기준 생각 {'켜짐' if detected['baseline_reasoning'] else '꺼짐'}")
+    for key, label in (("json_mode", "JSON 모드"), ("vision", "비전")):
+        if key in detected:
+            parts.append(f"{label} {'예' if detected[key] is True else '아니오'}")
+    tokens = detected.get("context_tokens")
+    if isinstance(tokens, int) and not isinstance(tokens, bool):
+        source = detected.get("context_source")
+        parts.append(f"컨텍스트 {tokens:,}" + (f"({source})" if source else ""))
+    return ", ".join(parts) or "기록됨"
+
+
+def _show_detected(wizard: Wizard, name: str, detected: Mapping[str, Any]) -> None:
+    """탐지 결과(detected 블록)를 보여 준다. 근거 기록(probes)은 개수만."""
+    import yaml
+
+    shown = {k: v for k, v in detected.items() if k != "probes"}
+    wizard.out(f"  탐지 결과 ({name}): {summarize_detected(detected)}")
+    body = yaml.safe_dump({"detected": shown}, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    for line in body.rstrip("\n").splitlines():
+        wizard.out("    " + core.redact(line))
+    probes = detected.get("probes")
+    if isinstance(probes, list):
+        wizard.out(f"    (근거 기록 probes {len(probes)}개는 config.local.yaml에 함께 저장합니다)")
+    for warning in detected.get("warnings") or []:
+        wizard.out(f"  주의: {warning}")
+
+
+def _llm_failure(exc: BaseException) -> tuple[str, bool]:
+    """(설명, 키 거부인가)."""
+    from lib import llm_client, net
+
+    if isinstance(exc, llm_client.ChatHttpError):
+        if exc.status in (401, 403):
+            return f"키가 거부되었습니다 ({exc.status})", True
+        return str(exc), False
+    return net.error_text(exc), isinstance(exc, core.AuthError)
+
+
+def _configure_profile(wizard: Wizard, data: dict, name: str) -> None:
+    """프로필 하나: 주소 → 키 → /models → 모델 → 탐지 → 기록. 대화형이면 실패 시 다시 묻는다."""
+    from lib import llm_detect
+
+    llm = _section(data, "llm", "config.local.yaml")
+    profiles = _section(llm, "profiles", "config.local.yaml")
+    current = profiles.get(name) if isinstance(profiles.get(name), dict) else {}
+    environment = _environment_of(data)
+    title = "main" if name == "main" else f"보조 프로필 {name}"
+
+    url_default = current.get("base_url") if isinstance(current.get("base_url"), str) and current.get("base_url") else None
+    model_default_saved = str(current["model"]) if current.get("model") else None
+    stored_ref = current.get("api_key_ref") if isinstance(current.get("api_key_ref"), str) else None
+    fallback_key = _resolve_key(stored_ref, environment)
+    fallback_ref = stored_ref if fallback_key else None
+    fallback_note = "저장된 키"
+    main_key, main_ref = wizard.llm_keys.get("main", (None, None))
+    if name != "main" and not fallback_key and main_key:
+        fallback_key, fallback_ref, fallback_note = main_key, main_ref, "main 키"
+
+    for attempt in range(1, MAX_TRIES + 1):
+        base_url = wizard.choose("llm.url", f"LLM {title} 주소 (OpenAI 호환, /v1까지. 예: https://llm.example.invalid/v1)", url_default, parse_llm_url)
+        url_default = base_url
+        # 회사 + 공개 호스트: 키를 묻기 전에, 아무것도 보내기 전에 거부한다(종료 5)
+        from lib import llm_client
+
+        llm_client.assert_host_allowed(_llm_cfg(wizard, data, name, {"base_url": base_url}), base_url)
+
+        hint = f" (비우면 {fallback_note} 사용)" if fallback_key else " (키가 없는 서버면 Enter)"
+        typed = wizard.secret("llm.key", f"LLM {title} API 키{hint}")
+        if typed:
+            key: str | None = typed
+            if name != "main" and main_key and typed == main_key:
+                ref: str | None = main_ref
+            else:
+                ref = _keyring_ref(_key_store_name(name))
+        elif fallback_key:
+            key, ref = fallback_key, fallback_ref
+            wizard.out(f"  {fallback_note}를 씁니다")
+        else:
+            key, ref = None, None
+
+        profile: dict[str, Any] = {"base_url": base_url}
+        for k, v in current.items():  # 연결 설정(ca_bundle·verify·trust_env·proxies) 등은 그대로
+            if k not in ("base_url", "model", "api_key_ref", "detected"):
+                profile[k] = copy.deepcopy(v)
+        try:
+            client = _llm_client(_llm_cfg(wizard, data, name, profile), name, key)
+            models = client.list_models(name)
+        except core.PublicHostRefused:
+            raise
+        except core.KbError as exc:
+            text, auth = _llm_failure(exc)
+            if not wizard.interactive or attempt == MAX_TRIES:
+                if auth:
+                    raise core.AuthError(f"LLM {title}: {text}. 키를 확인하세요") from None
+                raise
+            wizard.out(f"  연결하지 못했습니다: {text}")
+            wizard.out("  주소와 키를 다시 입력하세요")
+            if auth and key == fallback_key:
+                fallback_key = fallback_ref = None  # 거부된 키는 기본값으로 다시 내놓지 않는다
+            continue
+
+        ids = [str(m.get("id")) for m in (models or []) if m.get("id") is not None]
+        if ids:
+            wizard.out("  모델 목록 (/models):")
+            width = len(str(len(ids)))
+            for i, model_id in enumerate(ids, 1):
+                wizard.out(f"    {i:>{width}}. {model_id}")
+        else:
+            wizard.out("  /models 목록이 없습니다. 모델 이름을 직접 입력하세요")
+        model_default = model_default_saved or (ids[0] if len(ids) == 1 else None)
+        model = wizard.choose("llm.model", f"LLM {title} 모델 (번호 또는 이름)", model_default, lambda raw: parse_model_choice(raw, ids))
+        if ids and model not in ids:
+            wizard.out(f"  주의: '{model}'은(는) /models 목록에 없습니다. 그대로 씁니다")
+        model_default_saved = model
+
+        profile = {"base_url": base_url, "model": model}
+        if ref:
+            profile["api_key_ref"] = ref
+        for k, v in current.items():
+            if k not in ("base_url", "model", "api_key_ref", "detected"):
+                profile[k] = copy.deepcopy(v)
+        wizard.out(f"  자동 탐지 중입니다 (추론 토글·JSON·비전·컨텍스트, 호출 {llm_detect.MAX_POSTS}회 이하)…")
+        try:
+            detected = llm_detect.detect(_llm_client(_llm_cfg(wizard, data, name, profile), name, key), name)
+        except core.PublicHostRefused:
+            raise
+        except core.KbError as exc:
+            text, _ = _llm_failure(exc)
+            if not wizard.interactive or attempt == MAX_TRIES:
+                raise
+            wizard.out(f"  탐지하지 못했습니다: {text}")
+            wizard.out("  주소·키·모델을 다시 입력하세요")
+            continue
+        _show_detected(wizard, name, detected)
+        profile["detected"] = detected
+        profiles[name] = profile
+        wizard.llm_keys[name] = (key, ref)
+        if key and ref == _keyring_ref(_key_store_name(name)):
+            wizard.pending_secrets[_key_store_name(name)] = key
+            if key != _resolve_key(ref, environment):
+                wizard.out(f"  키를 확인했습니다. 설정과 함께 자격 증명 저장소에 저장합니다 ({SERVICE}/{_key_store_name(name)})")
+        return
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _fallback_order(llm: dict, configured: list[str]) -> list[str]:
+    """main(과 설정한 보조 프로필)을 앞에, 기존 순서 중 아직 있는 프로필을 뒤에."""
+    profiles = llm.get("profiles") if isinstance(llm.get("profiles"), Mapping) else {}
+    old = llm.get("fallback_order")
+    if isinstance(old, str):
+        old = [x for x in re.split(r"[\s,]+", old) if x]
+    old_names = [str(x) for x in old] if isinstance(old, (list, tuple)) else []
+    order = list(configured)
+    if "fallback" in profiles and "fallback" not in order:
+        order.append("fallback")
+    order += [n for n in old_names if n in profiles and n not in order]
+    return order
+
+
+def _public_leftovers(wizard: Wizard, data: dict) -> None:
+    """회사 환경에 남은 공개 호스트 프로필. 대화형이면 지울지 묻고, 아니면 알리기만 한다."""
+    from lib import config
+
+    if _environment_of(data) != "company":
+        return
+    llm = data.get("llm")
+    profiles = llm.get("profiles") if isinstance(llm, Mapping) else None
+    if not isinstance(profiles, dict):
+        return
+    blocklist = config.CODE_BLOCKLIST | (wizard.cfg.blocklist if wizard.cfg is not None else frozenset())
+    for name in list(profiles):
+        profile = profiles[name]
+        url = profile.get("base_url") if isinstance(profile, Mapping) else None
+        if not (isinstance(url, str) and config.is_public_host(url, blocklist)):
+            continue
+        wizard.out(f"  LLM 프로필 '{name}'이(가) 공개 호스트를 가리킵니다. 남겨 두면 회사 환경에서 LLM 호출이 모두 거부됩니다(종료 5)")
+        if wizard.interactive and _confirm(wizard, f"프로필 '{name}'을(를) 지울까요? (y/n)", "y"):
+            del profiles[name]
+            order = llm.get("fallback_order")
+            if isinstance(order, list):
+                llm["fallback_order"] = [x for x in order if str(x) != name]
+            wizard.out(f"  프로필 '{name}'을(를) 지웠습니다")
+        elif not wizard.interactive:
+            wizard.out(f"  → config.local.yaml에서 프로필 '{name}'을(를) 지우거나 kb.py init --section llm으로 바꾸세요")
+
+
+def _llm_step(wizard: Wizard, data: dict, *, optional: bool) -> None:
+    wizard.out("\n[4] LLM" if optional else "\n[LLM]")
+    existing = data.get("llm") if isinstance(data.get("llm"), Mapping) else None
+    if optional:
+        if not wizard.interactive:
+            if not wizard._from_env("llm.url"):
+                wizard.out("  KB_INIT_LLM_URL이 없어 LLM 단계를 건너뜁니다" + (" (기존 설정 유지)" if existing else " (LLM 비활성)"))
+                return
+        elif not _confirm(wizard, "LLM을 설정할까요? (y/n, 탐지에 호출 10회 이하)", "n" if existing else "y"):
+            wizard.out("  기존 LLM 설정을 그대로 둡니다" if existing else "  지금은 설정하지 않습니다 (LLM 비활성)")
+            return
+    _configure_profile(wizard, data, "main")
+    configured = ["main"]
+    llm = _section(data, "llm", "config.local.yaml")
+    if wizard.interactive:
+        has_fallback = isinstance(llm.get("profiles"), Mapping) and "fallback" in llm["profiles"]
+        if _confirm(wizard, "보조(fallback) 프로필도 설정할까요? (y/n)", "y" if has_fallback else "n"):
+            _configure_profile(wizard, data, "fallback")
+            configured.append("fallback")
+    llm["enabled"] = True
+    _public_leftovers(wizard, data)
+    llm["fallback_order"] = _fallback_order(llm, configured)
+    wizard.out(f"  llm.enabled: true, fallback_order: {', '.join(llm['fallback_order'])}")
+
+
+def step_llm(wizard: Wizard, data: dict) -> None:
+    """전체 마법사의 LLM 단계(설정할지 먼저 묻는다)."""
+    _llm_step(wizard, data, optional=True)
+
+
+def step_llm_section(wizard: Wizard, data: dict) -> None:
+    """`--section llm`: 묻지 않고 바로 main을 설정한다."""
+    _llm_step(wizard, data, optional=False)
+
+
+def save_detected(config_dir: Path | str, name: str, detected: Any) -> None:
+    """config.local.yaml의 llm.profiles.<name>.detected만 바꿔 저장한다(doctor --redetect)."""
+    from lib import config
+
+    data = read_local(Path(config_dir))
+    llm = _section(data, "llm", config.LOCAL_NAME)
+    profiles = _section(llm, "profiles", config.LOCAL_NAME)
+    profile = _section(profiles, name, config.LOCAL_NAME)
+    profile["detected"] = detected
+    config.save_local(config_dir, data)
+
+
+FULL_STEPS = [step_environment, step_jira, step_confluence_later, step_llm]
+SECTION_STEPS = {"jira": [step_jira], "llm": [step_llm_section]}
 
 
 def read_local(config_dir: Path) -> dict:
@@ -615,6 +980,44 @@ def build_dev_config(environ: Mapping[str, str]) -> tuple[dict, dict[str, str]]:
     return data, to_store
 
 
+def _dev_detect_main(cfg: Any, data: dict) -> str:
+    """--dev: main의 키 참조가 풀리면 main을 탐지해 기록한다. 아니면(또는 실패하면) `detected: pending`.
+
+    탐지는 main 하나만 담은 설정의 LlmClient로 한다(회사 차단 검사 포함, --dev는 늘 home).
+    """
+    from lib import config, llm_detect
+
+    profiles = _section(_section(data, "llm"), "profiles")
+    main = profiles.get("main")
+    if not isinstance(main, dict):
+        return "main 프로필이 없어 건너뜀"
+    environment = _environment_of(data)
+    key = _resolve_key(main.get("api_key_ref"), environment)
+    if not key:
+        main["detected"] = DETECT_PENDING
+        return "키가 없어 미룹니다 (detected: pending). 키를 설정한 뒤 kb.py doctor --redetect"
+    base = copy.deepcopy(dict(cfg.data))
+    llm = base.get("llm") if isinstance(base.get("llm"), dict) else {}
+    base["llm"] = llm
+    llm["profiles"] = {"main": copy.deepcopy({k: v for k, v in main.items() if k != "detected"})}
+    llm["fallback_order"] = ["main"]
+    llm["enabled"] = True
+    base["environment"] = environment
+    dev_cfg = config.Config(root=cfg.root, data=base, environment=environment, local_exists=True, config_dir=cfg.config_dir)
+    print(f"LLM main 자동 탐지 중입니다 (호출 {llm_detect.MAX_POSTS}회 이하)…", flush=True)
+    try:
+        client = _llm_client(dev_cfg, "main", key)
+        detected = llm_detect.detect(client, "main")
+    except core.PublicHostRefused:
+        raise
+    except Exception as exc:  # 네트워크가 막혀도 --dev 설정은 쓴다
+        main["detected"] = DETECT_PENDING
+        text = _error_text(exc) if isinstance(exc, core.KbError) else core.redact(f"{type(exc).__name__}: {exc}")
+        return f"실패해 미룹니다 (detected: pending): {text} → kb.py doctor --redetect"
+    main["detected"] = detected
+    return summarize_detected(detected)
+
+
 def run_dev(root: str | Path | None, environ: Mapping[str, str] | None = None) -> int:
     from lib import config
     from lib import secrets as kb_secrets
@@ -631,6 +1034,7 @@ def run_dev(root: str | Path | None, environ: Mapping[str, str] | None = None) -
     data, to_store = build_dev_config(env)
     for name, value in to_store.items():
         kb_secrets.store(SERVICE, name, value)
+    detect_note = _dev_detect_main(cfg, data)
     existed = cfg.local_exists
     config.save_local(cfg.config_dir, data)
 
@@ -638,6 +1042,7 @@ def run_dev(root: str | Path | None, environ: Mapping[str, str] | None = None) -
     print(f"  설정 파일: {local_path}" + (" (덮어씀)" if existed else ""))
     stored = ", ".join(f"{SERVICE}/{name}" for name in to_store)
     print(f"  자격 증명 저장소: {stored} (jira·confluence는 모의 토큰)")
+    print(f"  LLM main 탐지: {detect_note}")
     print("점검을 시작합니다.\n", flush=True)
 
     import doctor
@@ -660,12 +1065,15 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--section", choices=("jira", "confluence", "llm"), help="한 구역만 다시 설정")
     parser.add_argument("--non-interactive", action="store_true", help="묻지 않고 진행 (--from-env와 함께)")
     parser.add_argument("--from-env", action="store_true", help="KB_INIT_* 환경변수에서 값을 읽음 (--non-interactive와 함께)")
-    parser.add_argument("--redetect", action="store_true", help="LLM 탐지만 다시 (Phase 4)")
+    parser.add_argument("--redetect", action="store_true", help="LLM 탐지만 다시 해서 저장 (doctor --redetect와 같음)")
     args = parser.parse_args(argv)
 
     if args.redetect:
-        print(REDETECT_PHASE_MESSAGE)
-        return 4
+        if args.dev or args.section or args.from_env or args.non_interactive:
+            raise core.ConfigError("--redetect는 --dev·--section·--from-env·--non-interactive와 함께 쓸 수 없습니다")
+        import doctor
+
+        return doctor.main([*(["--root", str(args.root)] if args.root else []), "--redetect"])
     if args.dev:
         if args.section or args.from_env or args.non_interactive:
             raise core.ConfigError("--dev는 --section·--from-env·--non-interactive와 함께 쓸 수 없습니다")
