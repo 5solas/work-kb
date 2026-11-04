@@ -37,7 +37,7 @@ def test_repo_config_yaml_loads(vault):
         task = cfg.llm_task(name)
         assert task["reasoning"] in ("on", "off")
         assert task["profile"] == "main"
-        assert "max_output_tokens" not in task
+        assert isinstance(task["max_output_tokens"], int) and task["max_output_tokens"] > 0  # Phase 4 (D41)
     assert cfg.llm_task("decisions")["reasoning"] == "on"
     assert cfg.llm_task("tag")["reasoning"] == "off"
     assert "updated >= '-30d'" in cfg.get("jira.jql_mine")
