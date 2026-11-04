@@ -1,0 +1,38 @@
+# work-kb 구조 설정 (커밋함). 연결 값(주소·토큰·참조)은 두지 않는다.
+# 환경별 값은 config.local.yaml(kb.py init이 만듦), 비밀값은 자격 증명 저장소에 둔다.
+# 환경변수 KB_<SECTION>_<KEY>로 한 값씩 덮을 수 있다. 예: KB_JIRA_MAX_RESULTS=50
+kb_root: .
+timezone: Asia/Seoul
+people_prefix: "@"
+normalize_keys: true
+
+jira:
+  api_version: 2
+  auth: pat
+  # 상대 시간은 따옴표로 감싼다(DECISIONS D49). ORDER BY는 쓰지 않는다.
+  jql_mine: "(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) AND updated >= '-30d'"
+  views:
+    today: "assignee = currentUser() AND statusCategory != Done AND (duedate <= endOfDay() OR sprint in openSprints())"
+    blocked: "assignee = currentUser() AND status = Blocked"
+    review: "reporter = currentUser() AND status = 'In Review'"
+  poll_minutes: 15
+  max_results: 500
+
+confluence:
+  title_prefix: "[KB] "
+  push_globs: ["wiki/projects/*.md", "wiki/topics/*.md", "wiki/decisions.md"]
+
+llm:
+  # reasoning은 따옴표 필수. 따옴표가 없으면 YAML이 on/off를 참·거짓으로 읽는다(D27).
+  tasks:
+    tag:            {profile: main, reasoning: "off", max_input_tokens: 2000}
+    decisions:      {profile: main, reasoning: "on",  max_input_tokens: 30000}
+    entity_summary: {profile: main, reasoning: "off", max_input_tokens: 20000}
+    topic_proposal: {profile: main, reasoning: "on",  max_input_tokens: 60000}
+    image_ingest:   {profile: main, reasoning: "off", max_input_tokens: 8000}
+    contradictions: {profile: main, reasoning: "on",  max_input_tokens: 60000}
+  temperature: 0
+  timeout_sec: 180
+  # 회사 환경에서 LLM 주소가 이 목록에 걸리면 실행을 거부한다.
+  # 코드에도 같은 목록이 있다. 여기에는 더할 수만 있고 뺄 수는 없다.
+  public_hosts_blocklist: [deepinfra.com, openai.com, together.xyz, openrouter.ai, anthropic.com, googleapis.com, groq.com, fireworks.ai, mistral.ai, baseten.co, nebius.com]

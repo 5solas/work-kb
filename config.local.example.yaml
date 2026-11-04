@@ -1,0 +1,65 @@
+# config.local.yaml 예시 두 가지. 이 파일을 그대로 쓰지 말고 `python scripts/kb.py init`을 실행하세요.
+# - home: 집 개발용. 모의 Jira·Confluence와 DeepInfra. `kb.py init --dev`가 이 블록을 읽습니다.
+# - company: 회사용 꼴. 주소는 자리표시(*.invalid)이고 init이 실제 값으로 채웁니다.
+# 각 블록 아래 내용이 config.local.yaml 한 파일의 전체 내용입니다(맨 위 키 home:/company: 없이).
+# 비밀값은 쓰지 않습니다. keyring:<서비스>/<이름> 또는 env:<이름> 참조만 씁니다.
+# 프로필의 detected(비전·JSON·추론 토글 탐지 결과)는 init이 실제 호출로 채웁니다. 손으로 쓰지 마세요.
+# 꼴만 참고하세요(예시):
+#   detected:
+#     vision: true
+#     json_mode: true
+#     reasoning_toggle: {method: "param", param_name: "reasoning_effort", on_value: "medium", off_value: "none"}
+#     context_tokens: 262144
+
+home:
+  environment: home
+  jira:
+    base_url: "http://127.0.0.1:8081"        # tests/mock_jira.py
+    project_keys: [KB, OPS]
+    pat_ref: "keyring:work-kb/jira"           # 모의 서버는 아무 값이나 받음
+  confluence:
+    enabled: true
+    base_url: "http://127.0.0.1:8082"        # tests/mock_confluence.py
+    space_key: "~honggildong"
+    parent_page_id: ""
+    pat_ref: "keyring:work-kb/confluence"
+  llm:
+    enabled: true
+    profiles:
+      main:
+        base_url: "https://api.deepinfra.com/v1/openai"
+        model: "nvidia/NVIDIA-Nemotron-3.5-Super-VL"
+        api_key_ref: "env:DEEPINFRA_API_KEY"  # 집에서만 허용되는 환경변수 참조
+      fallback:
+        base_url: "https://api.deepinfra.com/v1/openai"
+        model: "google/gemma-4-26B-A4B-it"
+        api_key_ref: "env:DEEPINFRA_API_KEY"
+      mock:
+        base_url: "http://127.0.0.1:8083/v1"  # tests/mock_llm.py
+        model: "mock"
+    fallback_order: [main, fallback]
+
+company:
+  environment: company                         # 공개 클라우드 LLM 주소는 코드가 막음
+  jira:
+    base_url: "https://jira.example.invalid"
+    project_keys: []                           # init이 프로젝트 목록에서 골라 채움
+    pat_ref: "keyring:work-kb/jira"
+  confluence:
+    enabled: true
+    base_url: "https://confluence.example.invalid"
+    space_key: ""                              # init이 개인 스페이스(~사용자명)를 찾아 채움
+    parent_page_id: ""                         # 비우면 스페이스 첫 페이지 아래
+    pat_ref: "keyring:work-kb/confluence"
+  llm:
+    enabled: true
+    profiles:
+      main:
+        base_url: "https://llm.example.invalid/v1"
+        model: "nemotron-3.5-super-vl"         # init이 /models 목록에서 고름
+        api_key_ref: "keyring:work-kb/llm"     # 키가 없는 서버면 이 줄을 지움
+      fallback:
+        base_url: "https://llm.example.invalid/v1"
+        model: "gemma-4-26b"                   # 사내 보조 모델(추론 없음)
+        api_key_ref: "keyring:work-kb/llm"
+    fallback_order: [main, fallback]
