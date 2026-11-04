@@ -50,6 +50,11 @@ class Command:
 COMMANDS: dict[str, Command] = {
     "init": Command("init", agent_ok=False, help="연결 설정 마법사 (--dev: 집 모의 환경)"),
     "doctor": Command("doctor", help="연결·환경 점검"),
+    # Phase 1
+    "today": Command("daily_prepare", "today_main", help="오늘 daily 준비(오늘·이월 구역) 후 경로 출력"),
+    "link": Command("link", help="A단계: Jira 키·@이름을 엔티티 페이지에 연결 (LLM 없음)"),
+    "status": Command("status", help="상태 요약"),
+    "search": Command("search", help='검색: kb.py search "질의"'),
 }
 
 ALIASES: dict[str, str] = {}
