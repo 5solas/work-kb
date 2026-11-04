@@ -19,6 +19,8 @@ jira:
   max_results: 500
   # 전체 동기화 주기(시간). 범위에서 빠진 일감(담당 변경·삭제·이동)을 정리한다.
   full_every_hours: 24
+  # `today --check-done`이 제안하는 완료 전환 이름(앞에서부터 시도). 자동 전환은 없다.
+  done_transition_names: [Done, 완료]
 
 confluence:
   title_prefix: "[KB] "

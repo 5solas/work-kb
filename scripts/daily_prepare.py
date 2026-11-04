@@ -1,6 +1,7 @@
 """오늘 daily 준비: 뼈대, `today` 구역(Jira 뷰), `carryover` 구역(개인 할 일 이월).
 
 사용법: python scripts/kb.py today [--date YYYY-MM-DD] [--no-carryover] [--print-path]
+        python scripts/kb.py today --check-done [--date YYYY-MM-DD] [--json]
 
 규칙(지시서 §5.1·§6.4, D17·D18·D19·D24·D26·D28):
 - 파일이 없으면 notes.daily_skeleton으로 만든다. 있는데 제목이 빠졌으면 기존 글 아래에 덧붙인다.
@@ -13,17 +14,24 @@
   `- [ ] 내용 (← YYYY-MM-DD)`로 옮기고, 원래 줄은 `- [>] 내용 (YYYY-MM-DD로 이월)`로 표시한다.
   `[>]` 줄은 다시 옮기지 않으므로 원장 없이 멱등이다. 이미 구역에 있는 항목(체크 여부 무관)은 더하지 않는다.
 - 쓰기는 잠금 안에서, daily는 expect_sha256로. 사람이 도중에 고친 파일은 건너뛰고 보고한다.
+
+`--check-done [--json]`(지시서 §5.1·§6.4, Phase 3): 그날 daily의 `## 오늘`에서 `- [x] [[KEY]]` 줄마다
+jira/KEY.md를 보고, 아직 완료(status_category done)가 아니면 전환 **제안**만 출력한다.
+Jira를 부르지 않고 아무 파일도 쓰지 않는다(잠금도 잡지 않는다). 자동 전환은 없다(§10).
+전환 이름은 `jira.done_transition_names`(기본 [Done, 완료])의 첫 이름이다. 캐시에 전환 목록이 없으므로
+후보 확인 명령(`act transitions KEY`)을 함께 안내한다.
 """
 from __future__ import annotations
 
 import datetime as dt
+import json
 import re
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Mapping
+from typing import Any, Mapping
 
-from lib import config, core, managed, notes
+from lib import config, core, frontmatter, managed, notes
 from lib.config import Config
 
 NOTE_NO_SYNC = "- (Jira 동기화 전)"
@@ -480,18 +488,246 @@ def prepare(cfg: Config, day: dt.date | str, *, carryover: bool = True) -> Path:
     return run(cfg, day, carryover=carryover).path
 
 
+# ---------------------------------------------------------------- --check-done (읽기 전용)
+
+DONE_TRANSITION_NAMES = ("Done", "완료")
+_MOVE_HOPS = 5
+KB_CMD = "python scripts/kb.py"
+
+
+@dataclass(frozen=True)
+class DoneItem:
+    """`[x]` 일감 하나의 완료 전환 제안(또는 안내).
+
+    kind: proposal(전환 제안), no_cache(캐시 없음·스텁·못 읽음 → 동기화 안내), out_of_scope(범위 밖).
+    """
+
+    key: str  # 제안 대상 키(옮겨졌으면 새 키)
+    line: int  # daily의 줄 번호(1부터)
+    title: str
+    status: str
+    status_category: str
+    kind: str
+    transition: str  # 제안 전환 이름(없으면 "")
+    command: str  # 실행할 명령(없으면 "")
+    hint: str  # 덧붙이는 안내(없으면 "")
+    moved_from: str = ""  # 옮겨진 일감이면 daily에 적힌 옛 키
+
+
+@dataclass
+class CheckDoneResult:
+    path: Path
+    exists: bool
+    items: list[DoneItem] = field(default_factory=list)
+    done: int = 0  # 이미 완료라 건너뛴 `[x]` 일감
+
+
+def done_transition_names(cfg: Config) -> list[str]:
+    """`jira.done_transition_names`(목록 또는 쉼표 구분 글자). 비었거나 없으면 기본값."""
+    raw = cfg.get("jira.done_transition_names")
+    if raw is None:
+        return list(DONE_TRANSITION_NAMES)
+    if isinstance(raw, str):
+        items: list[Any] = raw.split(",")
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        raise core.ConfigError("jira.done_transition_names: 전환 이름 목록이어야 합니다. 예: [Done, 완료]")
+    names: list[str] = []
+    for item in items:
+        if isinstance(item, bool) or not isinstance(item, (str, int, float)):
+            raise core.ConfigError(
+                f"jira.done_transition_names: {item!r}은(는) 전환 이름이 아닙니다. 따옴표로 감싼 글자로 쓰세요"
+            )
+        name = " ".join(str(item).split())
+        if name and name.casefold() not in {n.casefold() for n in names}:
+            names.append(name)
+    return names or list(DONE_TRANSITION_NAMES)
+
+
+def _quote(text: str) -> str:
+    return '"' + text.replace('"', '\\"') + '"'
+
+
+def _issue_meta(cfg: Config, key: str) -> dict[str, Any] | None:
+    """jira/KEY.md의 front matter. 없거나 못 읽으면 None."""
+    path = cfg.path("jira", f"{key}.md")
+    if not path.is_file():
+        return None
+    try:
+        meta = frontmatter.parse(path.read_bytes())
+    except (OSError, core.KbError):
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def _resolve_issue(cfg: Config, key: str) -> tuple[str, dict[str, Any] | None]:
+    """moved_to를 따라간 (키, front matter). 고리나 너무 긴 사슬이면 마지막으로 읽은 것에서 멈춘다."""
+    seen = {key}
+    meta = _issue_meta(cfg, key)
+    for _ in range(_MOVE_HOPS):
+        target = str((meta or {}).get("moved_to") or "").strip().upper()
+        if not target or not _JIRA_KEY.match(target) or target in seen:
+            break
+        target_meta = _issue_meta(cfg, target)
+        if target_meta is None:  # 새 키 캐시가 아직 없음 → 새 키로 동기화 안내
+            return target, None
+        seen.add(target)
+        key, meta = target, target_meta
+    return key, meta
+
+
+def _line_title(text: str) -> str:
+    """`- [x] [[KEY]] 제목 · 상태 · 마감 …`에서 제목."""
+    rest = text.split("]]", 1)[1] if "]]" in text else ""
+    return _clean(rest.split(" · ", 1)[0])
+
+
+def _truthy_false(value: Any) -> bool:
+    return value is False or (isinstance(value, str) and value.strip().lower() == "false")
+
+
+def _transition_choice(meta: Mapping[str, Any], names: list[str]) -> tuple[str, bool]:
+    """(전환 이름, 캐시의 전환 목록으로 확인했는가). 캐시에 목록이 있는데 맞는 이름이 없으면 ("", True)."""
+    raw = meta.get("transitions")
+    available: list[str] = []
+    if isinstance(raw, (list, tuple)):
+        for item in raw:
+            name = item.get("name") if isinstance(item, Mapping) else item
+            if isinstance(name, str) and name.strip():
+                available.append(" ".join(name.split()))
+    if not available:
+        return names[0], False
+    by_fold = {name.casefold(): name for name in available}
+    for wanted in names:
+        if wanted.casefold() in by_fold:
+            return by_fold[wanted.casefold()], True
+    return "", True
+
+
+def _check_item(cfg: Config, key: str, lineno: int, text: str, names: list[str]) -> DoneItem | None:
+    """완료가 아닌 `[x]` 일감의 제안. 이미 완료면 None."""
+    target, meta = _resolve_issue(cfg, key)
+    moved_from = key if target != key else ""
+    title = _line_title(text)
+    sync_hint = f"먼저 동기화: {KB_CMD} sync --key {target}"
+    if meta is None or str(meta.get("stub", "")).strip().lower() == "true" or not str(meta.get("status_category") or "").strip():
+        return DoneItem(target, lineno, title, "", "", "no_cache", "", "", sync_hint, moved_from)
+    title = _clean(str(meta.get("summary") or "")) or title
+    status = _clean(str(meta.get("status") or ""))
+    category = _clean(str(meta.get("status_category") or "")).lower()
+    if category == "done":
+        return None
+    if _truthy_false(meta.get("in_scope")):
+        hint = f"Jira에서 찾지 못했거나 범위 밖입니다. 확인: {KB_CMD} sync --key {target}"
+        return DoneItem(target, lineno, title, status, category, "out_of_scope", "", "", hint, moved_from)
+    name, checked = _transition_choice(meta, names)
+    candidates = f"{KB_CMD} act transitions {target}"
+    if not name:
+        hint = f"설정의 완료 전환({', '.join(names)})이 없습니다. 후보 확인: {candidates}"
+        return DoneItem(target, lineno, title, status, category, "proposal", "", "", hint, moved_from)
+    command = f"{KB_CMD} act transition {target} {_quote(name)}"
+    hint = "" if checked else f"전환 이름이 다르면 후보 확인: {candidates}"
+    return DoneItem(target, lineno, title, status, category, "proposal", name, command, hint, moved_from)
+
+
+def _checked_lines(rel: str, data: bytes) -> list[tuple[str, int, str]]:
+    """`## 오늘`(today 구역과 그 제목 아래 사람 줄)의 `- [x] [[KEY]]` 줄: [(키, 줄 번호, 줄)]. 키별 첫 줄만."""
+    span = notes.section_span(data, "오늘")
+    found: list[tuple[str, int, str]] = []
+    seen: set[str] = set()
+    for line in notes.iter_lines(rel, data):
+        if line.in_code:
+            continue
+        in_today = line.region == "today" or (
+            line.region is None and span is not None and span[0] <= line.offset < span[1]
+        )
+        if not in_today:
+            continue
+        match = _TODAY_LINE.match(line.text)
+        if not match or match.group(1) not in "xX" or match.group(2) in seen:
+            continue
+        seen.add(match.group(2))
+        found.append((match.group(2), line.lineno, line.text))
+    return found
+
+
+def check_done(cfg: Config, day: dt.date | str) -> CheckDoneResult:
+    """완료 전환 제안 목록. Jira를 부르지 않고 아무것도 쓰지 않는다."""
+    if isinstance(day, str):
+        day = _parse_day(day)
+    path = notes.daily_path(cfg, day)
+    result = CheckDoneResult(path=path, exists=path.is_file())
+    if not result.exists:
+        return result
+    names = done_transition_names(cfg)
+    rel = _rel(cfg, path)
+    data = _read_bytes(path)
+    _decode(data, rel)
+    for key, lineno, text in _checked_lines(rel, data):
+        item = _check_item(cfg, key, lineno, text, names)
+        if item is None:
+            result.done += 1
+        else:
+            result.items.append(item)
+    return result
+
+
+def format_done_item(item: DoneItem) -> list[str]:
+    head = f"{item.key} {item.title}".rstrip()
+    if item.moved_from:
+        head += f" (← {item.moved_from})"
+    if item.kind == "no_cache":
+        return [f"{head} · 캐시 없음 → {item.hint}"]
+    if item.kind == "out_of_scope":
+        return [f"{head} · 현재 {item.status or '?'} → {item.hint}"]
+    if not item.command:
+        return [f"{head} · 현재 {item.status or '?'} → 완료 전환 제안: {item.hint}"]
+    lines = [f"{head} · 현재 {item.status or '?'} → 완료 전환 제안: {item.command}"]
+    if item.hint:
+        lines.append(f"  ({item.hint})")
+    return lines
+
+
+def _check_done_main(cfg: Config, day: dt.date, as_json: bool) -> int:
+    result = check_done(cfg, day)
+    rel = _rel(cfg, result.path)
+    if as_json:
+        if not result.exists:
+            print(f"{rel}이(가) 없습니다", file=sys.stderr)
+        print(json.dumps([asdict(item) for item in result.items], ensure_ascii=False, indent=1))
+        return 0
+    if not result.exists:
+        print(f"{rel}이(가) 없습니다. 먼저 `{KB_CMD} today`로 오늘 파일을 만드세요.")
+        return 0
+    for item in result.items:
+        for line in format_done_item(item):
+            print(line)
+    if not result.items:
+        print(f"완료 전환 제안 없음 ({rel}, 이미 완료 {result.done}건)")
+    else:
+        proposals = sum(1 for item in result.items if item.command)
+        print(
+            f"전환 제안 {proposals}건, 확인 필요 {len(result.items) - proposals}건, 이미 완료 {result.done}건 ({rel}). "
+            "자동 전환은 하지 않습니다."
+        )
+    return 0
+
+
 def today_main(argv: list[str]) -> int:
     parser = core.make_parser("kb.py today", "오늘 daily를 준비(뼈대·오늘·이월 구역)하고 경로를 출력")
     parser.add_argument("--date", default=None, help="날짜 YYYY-MM-DD (기본: 오늘)")
     parser.add_argument("--no-carryover", action="store_true", help="이월 구역을 건드리지 않음")
     parser.add_argument("--print-path", action="store_true", help="파일 경로만 출력")
-    parser.add_argument("--check-done", action="store_true", help="완료 전환 제안 (Phase 3)")
+    parser.add_argument("--check-done", action="store_true", help="`[x]` 일감의 완료 전환 제안만 출력(읽기 전용, 자동 전환 없음)")
+    parser.add_argument("--json", action="store_true", help="--check-done 결과를 JSON 목록으로")
     args = parser.parse_args(argv)
-    if args.check_done:
-        print("완료 전환 제안(--check-done)은 Phase 3에서 추가됩니다.")
-        return 4
+    if args.json and not args.check_done:
+        raise core.ConfigError("--json은 --check-done과 함께만 쓸 수 있습니다")
     cfg = config.load(args.root)
     day = _parse_day(args.date) if args.date else core.now(cfg.tz).date()
+    if args.check_done:
+        return _check_done_main(cfg, day, args.json)
     result = run(cfg, day, carryover=not args.no_carryover)
     for item in result.skipped:
         print(f"건너뜀: {item}", file=sys.stderr)

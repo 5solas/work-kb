@@ -135,7 +135,34 @@ Opus 3명 독립 검토(지시서·Jira DC API 대조 / 데이터 안전 / 거�
 - **init PAT**: 입력한 PAT는 `/myself` 성공 전에는 저장하지 않고, 마지막 `config.local.yaml` 저장 직전에 함께 저장(같은 값이면 생략). 실패·취소는 자격 증명 저장소를 건드리지 않는다. stdin이 tty가 아니면 `getpass` 대신 한 줄을 읽고 EOF는 취소(Windows에서 `getpass`가 리다이렉트된 stdin을 무시하기 때문).
 - mock 모드 추가: `move()`, `remove()`, `repeat_page_boundary`. 클라이언트는 페이지 경계에서 중복 키를 건너뛴다.
 - 미처리(다음 Phase로): Emacs `o`가 `moved_to`를 따라가기; `sync --key`·`--jql --cache`로 받은 범위 밖 일감은 다음 전체 동기화 때 표시됨.
-- 사용자 확인 대기(D31): Obsidian에서 `jira/_views/일감.base`·`wiki/엔티티.base` 열어 표·정렬 확인(`sort` 키 문법 미확인). 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
+- 사용자 확인 대기(D31): Obsidian에서 `jira/_views/일감.base`·`wiki/엔티티.base` 열어 표·정렬 확인(`sort` 키 문법 미확인).
+
+### Phase 3 구축 결정 (2026-11-05)
+
+- **outbox 결과와 종료 코드** (`scripts/jira_act.py`, `scripts/lib/outbox.py`, §5.8 + `result`·`error_detail`·`payload` 필드):
+
+  | 경우 | 기록 | 종료 |
+  |---|---|---|
+  | 연결 거부 | pending, attempts+1, flush 중단 | 3 |
+  | 5xx | pending, attempts+1, flush 계속 | 3 |
+  | 5번째 실패 | failed | 1 |
+  | 전환 500 | 즉시 failed | 1 |
+  | 429(net 재시도 뒤에도) | pending, 시도 수 안 셈 | 3 |
+  | 읽기 타임아웃·전송 뒤 끊김 | pending, `last_error: uncertain`, 일반 flush는 건너뜀(`--retry-uncertain`) | 3 |
+  | 401/403 → `/myself` 200 | failed(권한 없음) | 1 |
+  | 401/403 → `/myself` 401 | pending, flush 중단 | 2 |
+  | 그 밖의 4xx | failed | 1 |
+  | project_keys 밖 프로젝트 | 보내지 않음 | 4 |
+  | 전환 후보 0개·2개 이상 | 후보 목록 출력 | 4 |
+  | 확인 거부·EOF | 큐에 넣지 않음 | 1 |
+
+  `flush --retry-failed`는 attempts를 0으로. 전환 이름 매칭: 이름(대소문자 무시) → id → 대상 상태 이름. 워크로그 기간은 `XhYm`·`Xh`·`Ym`만(일·주는 Jira마다 길이가 달라 거부). `act transitions KEY [--json]`은 읽기라 `KB_AGENT=1`에서도 허용(`list`와 함께).
+- **promote**: 일감 생성 뒤 원본 줄에 ` [[NEW]]`를 `expect_sha256`로 덧붙인다. 줄이 바뀌었으면 일감은 만들되 덧붙이지 않고 경고(`linked: false`). 위로 줄이 끼어들거나 `[>] … (이월)` 형태가 되어도 찾는다.
+- **알려진 한계**: 전송 성공 뒤 outbox 갱신에 실패하면(잠금 60초 초과 등) 기록이 pending으로 남아 다음 flush가 두 번 보낼 수 있다(경고 출력).
+- **mock**: `down` 모드는 소켓을 실제로 닫는다(`go_down()`/`come_up()`). 끊긴 연결은 "불확실"로 보이기 때문. 추가 모드 `write_500_times`, `slow_write_sec`, `transition_500`, `assign_denied`(401), `worklog_denied`(403), `on_write` 훅.
+- **`today --check-done`**: `## 오늘`의 `- [x] [[KEY]]`만 읽어 `jira/KEY.md` 상태가 done이 아니면 전환 제안 명령을 출력(`jira.done_transition_names`, 기본 `[Done, 완료]`). `moved_to`를 최대 5단계 따라간다. 캐시 없음·stub이면 동기화 안내. 쓰지 않고 Jira를 부르지 않으며 항상 종료 0. `--json` 지원.
+- **Emacs `j`**: transient에 v c t a w n p q S f d. 확인이 필요한 명령(create·transition·promote)은 `y-or-n-p` 뒤 `--yes`로 보낸다(`--argv-stdin`에서는 y/N 프롬프트가 EOF).
+- Phase 3 관문(mock): 댓글 즉시 전송 → done → `sync --key`로 캐시의 `## 댓글`에 반영; 다운 → pending(종료 3) → 복구 → flush. 970개 테스트 통과(양쪽 venv). 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 

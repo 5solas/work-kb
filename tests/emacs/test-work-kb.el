@@ -158,8 +158,8 @@
 
 (ert-deftest work-kb-test-later-phase-stubs ()
   (work-kb-test--capturing-messages msgs
-    (work-kb-jira) (work-kb-ingest) (work-kb-proposals)
-    (should (cl-some (lambda (m) (string-match-p "Phase 3" m)) msgs))
+    (work-kb-ingest) (work-kb-proposals)
+    (should-not (cl-some (lambda (m) (string-match-p "Phase 3" m)) msgs))
     (should (= 2 (cl-count-if (lambda (m) (string-match-p "Phase 4" m)) msgs)))))
 
 (ert-deftest work-kb-test-prefix-rebind ()
@@ -976,5 +976,382 @@
       (should (equal (reverse calls)
                      (list (list "link" "--root" (directory-file-name vault))
                            (list "status" "--root" (directory-file-name vault))))))))
+
+;;;; Jira 작업 (Phase 3, `j' transient)
+
+(defconst work-kb-test--jira-keys
+  '(("v" . work-kb-jira-view) ("c" . work-kb-jira-comment) ("t" . work-kb-jira-transition)
+    ("a" . work-kb-jira-assign) ("w" . work-kb-jira-worklog) ("n" . work-kb-jira-create)
+    ("p" . work-kb-jira-promote) ("q" . work-kb-jira-jql) ("S" . work-kb-jira-sync)
+    ("f" . work-kb-jira-flush) ("d" . work-kb-jira-check-done))
+  "§6.8 transient 키 (D53의 `a' 포함).")
+
+(defvar work-kb-test--prompts nil "가짜 입력 함수가 받은 프롬프트 (최근 것이 앞).")
+
+(defmacro work-kb-test--answering (reads chooses yes &rest body)
+  "BODY 동안 입력을 가짜로: `read-string'은 READS를 차례로(:initial이면 INITIAL-INPUT 그대로),
+`completing-read'는 CHOOSES를 차례로, `y-or-n-p'는 YES를 돌려준다 (:none이면 물으면 오류).
+더 물으면 오류. 프롬프트는 `work-kb-test--prompts'에 쌓는다 (completing-read는 (프롬프트 . 후보))."
+  (declare (indent 3))
+  `(let ((reads ,reads) (chooses ,chooses) (yes ,yes))
+     (setq work-kb-test--prompts nil)
+     (cl-letf (((symbol-function 'read-string)
+                (lambda (prompt &optional initial &rest _)
+                  (push prompt work-kb-test--prompts)
+                  (unless reads (error "read-string을 더 묻지 않아야 함: %s" prompt))
+                  (let ((answer (pop reads))) (if (eq answer :initial) (or initial "") answer))))
+               ((symbol-function 'completing-read)
+                (lambda (prompt collection &rest _)
+                  (push (cons prompt (all-completions "" collection)) work-kb-test--prompts)
+                  (unless chooses (error "completing-read를 더 묻지 않아야 함: %s" prompt))
+                  (pop chooses)))
+               ((symbol-function 'y-or-n-p)
+                (lambda (prompt)
+                  (push prompt work-kb-test--prompts)
+                  (when (eq yes :none) (error "확인을 묻지 않아야 함: %s" prompt))
+                  yes)))
+       ,@body)))
+
+(defun work-kb-test--emit (buffer text code)
+  "가짜 실행: BUFFER를 TEXT로 채우고 CODE를 돌려준다."
+  (with-current-buffer (get-buffer-create buffer)
+    (let ((inhibit-read-only t)) (erase-buffer) (insert text)))
+  code)
+
+(defconst work-kb-test--jira-daily
+  (concat "---\ndate: 2026-11-05\n---\n## 오늘\n<!-- kb:today:start -->\n"
+          "- [ ] [[KB-12]] 캐시 동기화\n<!-- kb:today:end -->\n\n## 기록\n"
+          "- 08:00 첫 기록\n"                          ; 10
+          "- 09:12 회의 [[KB-12]] 배포 일정 확정\n"     ; 11
+          "- [ ] 09:30 경비 정산\n")                    ; 12
+  "줄 번호: 10 첫 기록, 11 KB-12 회의, 12 키 없는 할 일.")
+
+(defun work-kb-test--visit-daily (vault needle &optional text)
+  "VAULT의 daily/2026-11-05.md를 (TEXT 또는 기본 내용으로) 쓰고 열어 NEEDLE 위에 커서를 둔다."
+  (let ((file (expand-file-name "daily/2026-11-05.md" vault)))
+    (work-kb-test--write-bytes file (or text work-kb-test--jira-daily))
+    (let ((buf (let ((coding-system-for-read 'utf-8)) (find-file-noselect file))))
+      (set-buffer buf)
+      (goto-char (point-min))
+      (search-forward needle)
+      (backward-char 1)
+      buf)))
+
+(defun work-kb-test--act (vault sub &rest args)
+  (append (list "act" sub "--root" (directory-file-name vault)) args))
+
+(ert-deftest work-kb-test-jira-transient-keys ()
+  "j는 transient `work-kb-jira'이고 §6.8의 모든 키가 제 명령에 묶여 있다."
+  (should (eq (keymap-lookup work-kb-command-map "j") 'work-kb-jira))
+  (should (commandp 'work-kb-jira))
+  (dolist (entry work-kb-test--jira-keys)
+    (let ((suffix (transient-get-suffix 'work-kb-jira (car entry))))
+      (should suffix)
+      (should (string-match-p (format ":command %s\\_>" (cdr entry)) (format "%S" suffix)))
+      (should (commandp (cdr entry))))))
+
+(ert-deftest work-kb-test-jira-key-at-point ()
+  "커서 위치 → 줄의 첫 키 → jira/KEY.md 파일 이름. 없으면 nil."
+  (with-temp-buffer
+    (insert "회의 [[KB-12]] 와 OPS-3 배포\n키 없는 줄 xKB-1\n")
+    (goto-char (point-min)) (search-forward "OPS-")
+    (should (equal (work-kb--key-at-point) "OPS-3"))
+    (goto-char (point-min)) (search-forward "배포")
+    (should (equal (work-kb--key-at-point) "KB-12"))
+    (forward-line 1)
+    (should-not (work-kb--key-at-point)))
+  (work-kb-test--with-vault vault
+    (let ((page (expand-file-name "jira/OPS-7.md" vault)))
+      (work-kb-test--write-bytes page "---\nkey: OPS-7\n---\n# 제목\n")
+      (with-current-buffer (let ((coding-system-for-read 'utf-8)) (find-file-noselect page))
+        (goto-char (point-max))
+        (should (equal (work-kb--key-at-point) "OPS-7"))))))
+
+(ert-deftest work-kb-test-jira-view ()
+  "v: 키가 있으면 묻지 않고 `o'와 같은 길로 연다. 없으면 묻고 대문자로 바꾼다."
+  (work-kb-test--with-vault vault
+    (let (opened)
+      (cl-letf (((symbol-function 'work-kb--open-key) (lambda (key) (push key opened))))
+        (with-temp-buffer
+          (insert "회의 KB-12")
+          (work-kb-test--answering nil nil :none (work-kb-jira-view))
+          (erase-buffer) (insert "키 없음")
+          (work-kb-test--answering '(" kb-7 ") nil :none (work-kb-jira-view))
+          (work-kb-test--answering '("아님") nil :none
+            (should-error (work-kb-jira-view) :type 'user-error))))
+      (should (equal opened '("KB-7" "KB-12"))))))
+
+(ert-deftest work-kb-test-jira-comment-from-daily-line ()
+  "c (daily, 본문 그대로): `--from-line daily/…:N'. 저장 안 된 수정은 먼저 저장한다."
+  (work-kb-test--with-vault vault
+    (let (calls)
+      (work-kb-test--fake-run calls (lambda (_) 0)
+        (save-current-buffer
+          (let ((buf (work-kb-test--visit-daily vault "배포")))
+            ;; 위 줄을 고쳐 두면(저장 안 함) 디스크와 줄 번호를 맞추려고 저장한다.
+            (save-excursion (goto-char (point-min)) (search-forward "첫 기록") (insert " 추가"))
+            (should (buffer-modified-p buf))
+            (work-kb-test--answering '(:initial) nil :none (work-kb-jira-comment))
+            (should-not (buffer-modified-p buf))
+            (should (string-match-p "첫 기록 추가"
+                                    (decode-coding-string (work-kb-test--bytes (buffer-file-name buf)) 'utf-8)))
+            (should (member "KB-12 댓글: " work-kb-test--prompts)))))
+      (should (equal calls (list (cons (work-kb-test--act vault "comment" "KB-12"
+                                                          "--from-line" "daily/2026-11-05.md:11")
+                                       "*work-kb-jira*")))))))
+
+(ert-deftest work-kb-test-jira-comment-body ()
+  "c: 본문을 고쳤거나 daily가 아니면 `--body'. 빈 본문은 보내지 않는다."
+  (work-kb-test--with-vault vault
+    (let (calls)
+      (work-kb-test--fake-run calls (lambda (_) 0)
+        (save-current-buffer
+          (work-kb-test--visit-daily vault "배포")
+          (work-kb-test--answering '("고친 댓글 😀") nil :none (work-kb-jira-comment))
+          (work-kb-test--answering '("  ") nil :none
+            (should-error (work-kb-jira-comment) :type 'user-error)))
+        (with-temp-buffer
+          (insert "OPS-3 배포 완료")
+          (work-kb-test--answering '(:initial) nil :none (work-kb-jira-comment))))
+      (should (equal (mapcar #'car (reverse calls))
+                     (list (work-kb-test--act vault "comment" "KB-12" "--body" "고친 댓글 😀")
+                           (work-kb-test--act vault "comment" "OPS-3" "--body" "OPS-3 배포 완료")))))))
+
+(ert-deftest work-kb-test-jira-transition-names ()
+  "전환 목록 JSON: 객체 배열·{transitions}·문자열 배열, 앞의 로그 줄, 깨진 출력."
+  (let ((parse (lambda (text) (work-kb--transition-names (work-kb--parse-json-output text)))))
+    (should (equal (funcall parse "[{\"id\":\"21\",\"name\":\"In Review\"},{\"id\":\"31\",\"name\":\"완료\"}]")
+                   '("In Review" "완료")))
+    (should (equal (funcall parse "jira_act: 경고 [무시]\n{\"key\":\"KB-1\",\"transitions\":[{\"id\":\"1\",\"name\":\"Done\"},{\"id\":\"2\",\"name\":\"Done\"}]}\n")
+                   '("Done")))
+    (should (equal (funcall parse "[\"Start\", \"Stop\"]") '("Start" "Stop")))
+    (should (equal (funcall parse "[]") nil))
+    (should (equal (funcall parse "오류: 연결 실패\n") nil))
+    (should (equal (funcall parse "[{\"id\": 1, \"name\": null}, {\"name\": \"\"}]") nil))
+    (let ((data (work-kb--parse-json-output
+                 "[{\"name\":\"Done\",\"to\":{\"name\":\"완료\"}},{\"name\":\"Go\",\"to\":\"진행 중\"}]")))
+      (should (equal (work-kb--transition-target data "Done") "완료"))
+      (should (equal (work-kb--transition-target data "Go") "진행 중"))
+      (should-not (work-kb--transition-target data "없음")))))
+
+(defconst work-kb-test--transitions-output
+  (concat "jira_act: KB-12 전환 후보\n"
+          "[{\"id\":\"21\",\"name\":\"In Review\",\"to\":{\"name\":\"검토\"}},"
+          "{\"id\":\"31\",\"name\":\"Done\",\"to\":\"완료\"}]\n"))
+
+(ert-deftest work-kb-test-jira-transition ()
+  "t: `act transitions KEY --json' → 고르기 → 확인 → `act transition KEY NAME --yes'."
+  (work-kb-test--with-vault vault
+    (let (calls)
+      (work-kb-test--fake-run calls
+          (lambda (args)
+            (if (equal (cadr args) "transitions")
+                (work-kb-test--emit "*work-kb-jira*" work-kb-test--transitions-output 0)
+              0))
+        (with-temp-buffer
+          (insert "회의 KB-12")
+          (work-kb-test--answering nil '("Done") t (work-kb-jira-transition))
+          (should (equal (cdr (cl-find-if #'consp work-kb-test--prompts)) '("In Review" "Done")))
+          (should (cl-some (lambda (p) (and (stringp p) (string-match-p "KB-12.*'Done'" p))) work-kb-test--prompts))))
+      (should (equal (mapcar #'car (reverse calls))
+                     (list (work-kb-test--act vault "transitions" "KB-12" "--json")
+                           (work-kb-test--act vault "transition" "KB-12" "Done" "--yes")))))))
+
+(ert-deftest work-kb-test-jira-transition-declined-or-failed ()
+  "t: 확인에서 n이면 전환을 보내지 않는다. 목록 조회가 실패하면 묻지도 않는다."
+  (work-kb-test--with-vault vault
+    (let (calls)
+      (work-kb-test--fake-run calls
+          (lambda (_) (work-kb-test--emit "*work-kb-jira*" work-kb-test--transitions-output 0))
+        (with-temp-buffer
+          (insert "KB-12")
+          (work-kb-test--answering nil '("In Review") nil (work-kb-jira-transition))))
+      (should (equal (mapcar #'car calls) (list (work-kb-test--act vault "transitions" "KB-12" "--json"))))
+      (setq calls nil)
+      (work-kb-test--fake-run calls
+          (lambda (_) (work-kb-test--emit "*work-kb-jira*" "jira_act: 연결 실패\n" 3))
+        (save-window-excursion
+          (with-temp-buffer
+            (insert "KB-12")
+            (work-kb-test--answering nil nil :none
+              (should-error (work-kb-jira-transition) :type 'user-error)))))
+      (should (= 1 (length calls)))
+      (setq calls nil)
+      (work-kb-test--fake-run calls (lambda (_) (work-kb-test--emit "*work-kb-jira*" "[]\n" 0))
+        (with-temp-buffer
+          (insert "KB-12")
+          (work-kb-test--answering nil nil :none
+            (should-error (work-kb-jira-transition) :type 'user-error))))
+      (should (= 1 (length calls))))))
+
+(ert-deftest work-kb-test-jira-assign-and-worklog ()
+  "a·w 인수. 잘못된 시간·빈 담당자는 보내지 않는다."
+  (work-kb-test--with-vault vault
+    (let (calls)
+      (work-kb-test--fake-run calls (lambda (_) 0)
+        (with-temp-buffer
+          (insert "KB-12 작업")
+          (work-kb-test--answering '("kim.cs") nil :none (work-kb-jira-assign))
+          (work-kb-test--answering '("1h 30M" "배포 준비 😀") nil :none (work-kb-jira-worklog))
+          (work-kb-test--answering '("45m" "") nil :none (work-kb-jira-worklog))
+          (work-kb-test--answering '("한 시간") nil :none
+            (should-error (work-kb-jira-worklog) :type 'user-error))
+          (work-kb-test--answering '(" ") nil :none
+            (should-error (work-kb-jira-assign) :type 'user-error))))
+      (should (equal (mapcar #'car (reverse calls))
+                     (list (work-kb-test--act vault "assign" "KB-12" "kim.cs")
+                           (work-kb-test--act vault "worklog" "KB-12" "1h30m" "--comment" "배포 준비 😀")
+                           (work-kb-test--act vault "worklog" "KB-12" "45m")))))))
+
+(ert-deftest work-kb-test-jira-project-keys ()
+  "status JSON 어디에 있든 project_keys를 찾는다."
+  (should (equal (work-kb--find-project-keys '((project_keys "KB" "OPS"))) '("KB" "OPS")))
+  (should (equal (work-kb--find-project-keys '((vault . "x") (jira (base_url . "u") (project_keys "KB"))))
+                 '("KB")))
+  (should-not (work-kb--find-project-keys '((vault . "x") (outbox (pending . 0)))))
+  (should-not (work-kb--find-project-keys nil)))
+
+(defconst work-kb-test--status-json
+  "{\n \"vault\": \"D:/한글 볼트\",\n \"project_keys\": [\"KB\", \"OPS\"],\n \"outbox\": {\"pending\": 0, \"failed\": 0}\n}\n")
+
+(ert-deftest work-kb-test-jira-create ()
+  "n: 프로젝트(status --json 후보)·요약·유형·설명 → 확인 → `act create … --yes'. n이면 보내지 않는다."
+  (work-kb-test--with-vault vault
+    (let (calls)
+      (work-kb-test--fake-run calls
+          (lambda (args)
+            (if (equal (car args) "status")
+                (work-kb-test--emit "*work-kb-status-json*" work-kb-test--status-json 0)
+              0))
+        (work-kb-test--answering '("새 대시보드" "") '("ops" "Bug") t (work-kb-jira-create))
+        (should (equal (cdr (car (last (cl-remove-if-not #'consp work-kb-test--prompts)))) '("KB" "OPS")))
+        (work-kb-test--answering '("요약" "설명 한 줄") '("KB" "Task") t (work-kb-jira-create))
+        (work-kb-test--answering '("취소할 일감" "") '("KB" "Task") nil (work-kb-jira-create)))
+      (let ((status (list "status" "--root" (directory-file-name vault) "--json")))
+        (should (equal (mapcar #'car (reverse calls))
+                       (list status
+                             (work-kb-test--act vault "create" "OPS" "--summary" "새 대시보드" "--type" "Bug" "--yes")
+                             status
+                             (work-kb-test--act vault "create" "KB" "--summary" "요약" "--type" "Task"
+                                                "--description" "설명 한 줄" "--yes")
+                             status)))))))
+
+(ert-deftest work-kb-test-jira-create-without-project-list ()
+  "status에 project_keys가 없으면 직접 입력. 키 꼴이 아니면 거부."
+  (work-kb-test--with-vault vault
+    (let (calls)
+      (work-kb-test--fake-run calls
+          (lambda (args) (if (equal (car args) "status")
+                             (work-kb-test--emit "*work-kb-status-json*" "{\"vault\": \"x\"}\n" 0)
+                           0))
+        (work-kb-test--answering nil '("한글") :none
+          (should-error (work-kb-jira-create) :type 'user-error))
+        (work-kb-test--answering '("요약" "") '("web" "Task") t (work-kb-jira-create)))
+      (should (equal (car (car calls))
+                     (work-kb-test--act vault "create" "WEB" "--summary" "요약" "--type" "Task" "--yes"))))))
+
+(ert-deftest work-kb-test-jira-promote ()
+  "p: 현재 daily 줄 → 확인 → `act promote --from daily/…:N PROJECT --yes'. 성공하면 버퍼를 다시 읽는다."
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "daily/2026-11-05.md" vault))
+          (create-lockfiles nil)
+          calls)
+      (work-kb-test--fake-run calls
+          (lambda (args)
+            (pcase (car args)
+              ("status" (work-kb-test--emit "*work-kb-status-json*" work-kb-test--status-json 0))
+              (_ (work-kb-test--rewrite-on-disk
+                  file (string-replace "경비 정산\n" "경비 정산 [[KB-100]]\n" work-kb-test--jira-daily))
+                 0)))
+        (save-current-buffer
+          (let ((buf (work-kb-test--visit-daily vault "경비")))
+            (work-kb-test--no-prompts
+              (work-kb-test--answering nil '("KB") t (work-kb-jira-promote)))
+            (should (string-match-p "경비 정산 \\[\\[KB-100\\]\\]" (with-current-buffer buf (buffer-string))))
+            (should-not (buffer-modified-p buf)))))
+      (should (equal (mapcar #'car (reverse calls))
+                     (list (list "status" "--root" (directory-file-name vault) "--json")
+                           (work-kb-test--act vault "promote" "--from" "daily/2026-11-05.md:12" "KB" "--yes")))))))
+
+(ert-deftest work-kb-test-jira-promote-declined-or-outside-daily ()
+  "p: 확인에서 n이면 promote를 보내지 않고 daily도 그대로. daily 밖이면 아무것도 실행하지 않는다."
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "daily/2026-11-05.md" vault))
+          calls)
+      (work-kb-test--fake-run calls
+          (lambda (args) (if (equal (car args) "status")
+                             (work-kb-test--emit "*work-kb-status-json*" work-kb-test--status-json 0)
+                           0))
+        (save-current-buffer
+          (work-kb-test--visit-daily vault "경비")
+          (work-kb-test--answering nil '("KB") nil (work-kb-jira-promote))
+          (goto-char (point-max))
+          (work-kb-test--answering nil nil :none
+            (should-error (work-kb-jira-promote) :type 'user-error)))
+        (with-temp-buffer
+          (insert "- [ ] 09:30 경비 정산")
+          (work-kb-test--answering nil nil :none
+            (should-error (work-kb-jira-promote) :type 'user-error))))
+      (should (equal (mapcar #'caar calls) '("status")))
+      (should (equal (work-kb-test--bytes file) (work-kb-test--utf8 work-kb-test--jira-daily))))))
+
+(ert-deftest work-kb-test-jira-query-sync-flush-check-done ()
+  "q·S·f·d 인수와 출력 버퍼. q·d 결과 버퍼는 읽기 전용 결과 모드."
+  (work-kb-test--with-vault vault
+    (let ((jql "project = KB AND summary ~ \"한글\"")
+          calls)
+      (work-kb-test--fake-run calls
+          (lambda (args)
+            (pcase (car args)
+              ("sync" (if (member "--jql" args)
+                          (work-kb-test--emit "*work-kb-jql*" "KB-12 캐시 동기화\n" 0)
+                        0))
+              ("today" (work-kb-test--emit "*work-kb-check-done*" "KB-12 제안\n" 0))
+              (_ 0)))
+        (save-window-excursion
+          (work-kb-test--answering (list jql) nil :none (call-interactively #'work-kb-jira-jql))
+          (work-kb-jira-sync)
+          (work-kb-jira-flush)
+          (work-kb-jira-check-done)
+          (should-error (work-kb-jira-jql "  ") :type 'user-error)))
+      (let ((root (directory-file-name vault)))
+        (should (equal (reverse calls)
+                       (list (cons (list "sync" "--root" root "--jql" jql) "*work-kb-jql*")
+                             (cons (list "sync" "--root" root) "*work-kb-sync*")
+                             (cons (work-kb-test--act vault "flush") "*work-kb-jira*")
+                             (cons (list "today" "--root" root "--check-done") "*work-kb-check-done*")))))
+      (dolist (name '("*work-kb-jql*" "*work-kb-check-done*"))
+        (with-current-buffer name
+          (should (derived-mode-p 'work-kb-results-mode))
+          (should buffer-read-only)
+          (should (eq (keymap-lookup (current-local-map) "RET") 'work-kb-open-at-point)))
+        (kill-buffer name)))))
+
+(ert-deftest work-kb-test-jira-act-exit-messages ()
+  "act 종료 코드: 0 완료, 3 outbox에 남김, 2 인증, 그 밖은 이유와 버퍼."
+  (work-kb-test--with-vault vault
+    (dolist (case '((0 . "완료") (3 . "outbox에 남겼습니다") (2 . "인증 실패") (4 . "종료 4: 설정")))
+      (let (calls)
+        (work-kb-test--capturing-messages msgs
+          (work-kb-test--fake-run calls (lambda (_) (work-kb-test--emit "*work-kb-jira*" "jira_act: 끝\n" (car case)))
+            (save-window-excursion (work-kb-jira-flush)))
+          (should (cl-some (lambda (m) (string-match-p (regexp-quote (cdr case)) m)) msgs)))))
+    (kill-buffer "*work-kb-jira*")))
+
+(ert-deftest work-kb-test-jira-run-output-real-process ()
+  "`work-kb--run-output'은 실제 비동기 프로세스가 끝날 때까지 기다려 (코드 . 출력)을 준다."
+  (work-kb-test--with-vault vault
+    (let* ((orig (symbol-function 'make-process))
+           (python (work-kb-test--python))
+           (code (concat "import sys, json; a = json.loads(sys.stdin.buffer.read().decode('utf-8')); "
+                         "sys.stdout.buffer.write(('log\\n' + json.dumps([{'name': a[-1]}], ensure_ascii=False) + '\\n').encode('utf-8')); "
+                         "sys.exit(0)")))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest plist)
+                   (apply orig (plist-put (copy-sequence plist) :command (append python (list "-c" code)))))))
+        (let ((out (work-kb--run-output (work-kb--act-args "transitions" "KB-1" "완료") "*work-kb-test-out*" 60)))
+          (should (eq (car out) 0))
+          (should (equal (work-kb--transition-names (work-kb--parse-json-output (cdr out))) '("완료")))))
+      (kill-buffer "*work-kb-test-out*"))))
 
 ;;; test-work-kb.el ends here

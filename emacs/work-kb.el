@@ -17,7 +17,11 @@
 ;; 키 (접두 키 다음):
 ;;   c 캡처        C 클립보드 이미지   F 이미지 파일   i inbox 메모
 ;;   t 오늘 daily  s 검색             o 커서 위치 열기  l link 실행
-;;   ? 상태        j Jira(Phase 3)    g 편찬(Phase 4)  a 제안(Phase 4)
+;;   ? 상태        j Jira 작업        g 편찬(Phase 4)  a 제안(Phase 4)
+;;
+;; j (Jira 작업 transient): v 보기 · c 댓글(기본 현재 줄) · t 전환(후보 선택) · a 담당 ·
+;;   w 워크로그 · n 새 일감 · p 현재 줄 승격 · q 라이브 JQL · S 동기화 · f outbox 다시 보내기 ·
+;;   d 완료 전환 제안. 쓰기는 `kb.py act'(outbox)로만 보내고, 전환·생성·승격은 y-or-n-p로 확인한다.
 ;;
 ;; Python 호출은 모두 `work-kb--run' 하나를 거친다(D10): 명령줄은 ASCII만
 ;; (`python -X utf8 scripts/kb.py --argv-stdin'), 실제 인수는 stdin의 UTF-8 JSON 배열.
@@ -995,12 +999,382 @@ Jira 키는 캐시가 없거나 stub이면 먼저 `kb.py sync --key'로 받아 �
                              (unless (eq code 0)
                                (message "work-kb status 실패 (종료 %s)" code))))))
 
-;;;; 다음 Phase
+;;;; Jira 작업 (Phase 3, `j' transient, §6.8)
 
-(defun work-kb-jira ()
-  "Jira 작업 메뉴 (transient). Phase 3에서 추가된다."
+;; 쓰기는 모두 `kb.py act <하위 명령>'(outbox 경유, D52)로 보낸다. Emacs는 Jira에 직접 붙지 않는다.
+;; 상태 전환은 사용자가 고르고 y-or-n-p로 확인한 뒤에만 `--yes'로 보낸다 (§5.1, §10: 자동 전환 없음).
+
+(require 'transient)
+
+(defcustom work-kb-jira-issue-types '("Task" "Bug" "Story")
+  "`n'(새 일감)에서 고를 일감 유형 후보. 목록에 없는 이름도 입력할 수 있다."
+  :type '(repeat string)
+  :group 'work-kb)
+
+(defconst work-kb-jira-buffer "*work-kb-jira*"
+  "`kb.py act' 출력 버퍼.")
+
+(defvar work-kb--jql-history nil)
+(defvar work-kb--assignee-history nil)
+
+(defun work-kb--act-args (sub &rest args)
+  "kb.py 인수 목록: act SUB --root <볼트> ARGS...
+하위 명령은 `act' 바로 뒤에 둔다 (kb.py가 argv[1]로 `act list'를 가른다)."
+  (append (list "act" sub "--root" (directory-file-name (work-kb--vault))) args))
+
+(defun work-kb--key-on-line ()
+  "현재 줄의 첫 Jira 키 (앞뒤가 키 글자에 붙어 있으면 키가 아니다). 없으면 nil."
+  (save-excursion
+    (let ((bol (line-beginning-position))
+          (eol (line-end-position))
+          (case-fold-search nil)
+          found)
+      (goto-char bol)
+      (while (and (not found) (re-search-forward work-kb--key-regexp eol t))
+        (let ((beg (match-beginning 0)) (end (match-end 0)))
+          (when (and (or (= beg bol) (not (string-match-p "[A-Za-z0-9_-]" (string (char-before beg)))))
+                     (or (= end eol) (not (string-match-p "[A-Za-z0-9_]" (string (char-after end))))))
+            (setq found (match-string-no-properties 0)))))
+      found)))
+
+(defun work-kb--key-at-point ()
+  "작업할 Jira 키: 커서 위치의 키 → 현재 줄의 첫 키 → 지금 연 jira/KEY.md의 키. 없으면 nil."
+  (or (pcase (work-kb--thing-at-point) (`(key . ,key) key))
+      (work-kb--key-on-line)
+      (let ((dir (or work-kb-vault work-kb-root)))
+        (and buffer-file-name (stringp dir)
+             (string-prefix-p (file-name-as-directory (expand-file-name "jira" dir))
+                              (expand-file-name buffer-file-name) t)
+             (let ((base (file-name-base buffer-file-name))
+                   (case-fold-search nil))
+               (and (string-match-p (concat "\\`" work-kb--key-regexp "\\'") base) base))))))
+
+(defun work-kb--jira-key ()
+  "커서 위치의 Jira 키. 없으면 묻는다 (소문자는 대문자로)."
+  (or (work-kb--key-at-point)
+      (let ((key (upcase (string-trim (read-string "Jira 키: "))))
+            (case-fold-search nil))
+        (unless (string-match-p (concat "\\`" work-kb--key-regexp "\\'") key)
+          (user-error "Jira 키가 아닙니다: %S (예: KB-12)" key))
+        key)))
+
+(defun work-kb--current-line-text ()
+  (string-trim (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+
+(defun work-kb--daily-relative (file)
+  "FILE이 볼트 daily/ 아래 .md면 `daily/<이름>.md', 아니면 nil."
+  (let ((dir (or work-kb-vault work-kb-root)))
+    (when (and (stringp file) (stringp dir)
+               (string-match-p "\\.[mM][dD]\\'" file))
+      (let ((daily (file-name-as-directory (expand-file-name "daily" dir)))
+            (full (expand-file-name file)))
+        (when (string-prefix-p daily full t)
+          (concat "daily/" (substring full (length daily))))))))
+
+(defun work-kb--daily-line-ref ()
+  "현재 버퍼가 볼트의 daily 파일이면 `daily/<이름>.md:<줄 번호>', 아니면 nil.
+Python은 디스크의 줄을 읽으므로 저장 안 된 수정이 있으면 먼저 저장한다 (캡처와 같은 규칙, D26).
+버퍼와 파일이 모두 바뀌었으면 사용자 오류."
+  (let ((rel (work-kb--daily-relative buffer-file-name)))
+    (when rel
+      (when (buffer-modified-p)
+        (when (and (file-exists-p buffer-file-name)
+                   (not (verify-visited-file-modtime (current-buffer))))
+          (user-error "%s: 버퍼와 파일이 모두 바뀌었습니다. 먼저 정리하세요" (buffer-name)))
+        (let ((before-save-hook nil)
+              (after-save-hook nil)
+              (require-final-newline nil)
+              (backup-inhibited t)
+              (save-silently t))
+          (save-buffer)))
+      (format "%s:%d" rel (line-number-at-pos nil t)))))
+
+(defun work-kb--parse-json-output (text)
+  "kb.py 출력 TEXT에서 JSON 값(배열·객체) 하나를 읽는다. 앞의 로그 줄은 건너뛴다.
+객체는 alist, 배열은 리스트. 못 읽으면 nil."
+  (with-temp-buffer
+    (insert (or text ""))
+    (goto-char (point-min))
+    (let (result)
+      (while (and (not result) (re-search-forward "^[ \t]*[[{]" nil t))
+        (let ((start (line-beginning-position)))
+          (goto-char (1- (match-end 0)))
+          (setq result (condition-case nil
+                           (list (json-parse-buffer :object-type 'alist :array-type 'list
+                                                    :null-object nil :false-object nil))
+                         (error (goto-char start) (forward-line 1) nil)))))
+      (car result))))
+
+(defun work-kb--alist-p (data)
+  "DATA가 JSON 객체(alist)인가."
+  (and (consp data) (consp (car data)) (symbolp (caar data))))
+
+(defun work-kb--transition-names (data)
+  "`act transitions KEY --json' 결과에서 전환 이름 목록 (순서 유지, 같은 이름은 한 번).
+배열(객체 {\"name\"…} 또는 문자열)이나 {\"transitions\": 배열} 둘 다 받는다."
+  (let ((items (if (work-kb--alist-p data) (alist-get 'transitions data) data)))
+    (delete-dups
+     (delq nil (mapcar (lambda (item)
+                         (cond ((stringp item) item)
+                               ((work-kb--alist-p item)
+                                (let ((name (alist-get 'name item)))
+                                  (and (stringp name) (not (string-empty-p name)) name)))))
+                       (and (listp items) items))))))
+
+(defun work-kb--transition-target (data name)
+  "전환 NAME의 도착 상태 이름 (`to'가 문자열이거나 {\"name\"…}일 때). 없으면 nil."
+  (let ((items (if (work-kb--alist-p data) (alist-get 'transitions data) data)))
+    (cl-loop for item in (and (listp items) items)
+             when (and (work-kb--alist-p item) (equal (alist-get 'name item) name))
+             return (let ((to (alist-get 'to item)))
+                      (cond ((stringp to) to)
+                            ((work-kb--alist-p to) (let ((n (alist-get 'name to))) (and (stringp n) n))))))))
+
+(defun work-kb--find-project-keys (data &optional depth)
+  "status JSON DATA 어디든 있는 `project_keys' 목록 (문자열만). 없으면 nil."
+  (let ((depth (or depth 0)))
+    (when (and (work-kb--alist-p data) (< depth 4))
+      (let ((direct (alist-get 'project_keys data)))
+        (if (and (listp direct) direct (cl-every #'stringp direct))
+            direct
+          (cl-loop for (_k . v) in data
+                   thereis (work-kb--find-project-keys v (1+ depth))))))))
+
+(defun work-kb--run-output (args buffer &optional timeout)
+  "ARGS로 kb.py를 실행하고 끝날 때까지 기다린다. (종료코드 . BUFFER 내용).
+센티널에서 사용자에게 묻지 않으려고(C-g가 먹도록) 목록 조회는 이것으로 기다린다."
+  (let* ((code 'pending)
+         (proc (work-kb--run args :buffer buffer :on-exit (lambda (_proc c) (setq code c))))
+         (deadline (+ (float-time) (or timeout work-kb-process-timeout))))
+    (while (and (eq code 'pending) (< (float-time) deadline))
+      (accept-process-output (and (processp proc) (process-live-p proc) proc) 0.05))
+    (when (eq code 'pending)
+      (when (and (processp proc) (process-live-p proc)) (delete-process proc))
+      (user-error "work-kb: %s 응답이 없습니다 (%s초)" (car args) (or timeout work-kb-process-timeout)))
+    (cons code (with-current-buffer (get-buffer-create buffer)
+                 (buffer-substring-no-properties (point-min) (point-max))))))
+
+(defun work-kb--act-message (what code)
+  "act WHAT이 CODE로 끝난 뒤 알린다. 실패면 출력 버퍼를 보인다."
+  (let* ((buf (get-buffer work-kb-jira-buffer))
+         (last (work-kb--last-line buf)))
+    (unless (eq code 0)
+      (when (buffer-live-p buf) (display-buffer buf)))
+    (pcase code
+      (0 (message "work-kb: %s 완료%s" what (if last (concat " — " last) "")))
+      (3 (message "work-kb: %s — 네트워크 오류로 outbox에 남겼습니다. 나중에 f(flush)로 보냅니다" what))
+      (2 (message "work-kb: %s — 인증 실패 (outbox에 남김). 토큰을 확인하세요: kb.py init" what))
+      (_ (message "work-kb: %s 실패 (%s). %s 버퍼를 보세요" what (work-kb--exit-reason code) work-kb-jira-buffer)))))
+
+(defun work-kb--act-run (what args &optional after)
+  "ARGS(`kb.py act …')를 비동기로 보내고 끝나면 WHAT으로 알린다. AFTER가 있으면 (AFTER 종료코드)."
+  (work-kb--run args
+                :buffer work-kb-jira-buffer
+                :on-exit (lambda (_proc code)
+                           (work-kb--act-message what code)
+                           (when after (funcall after code)))))
+
+(defun work-kb--read-project ()
+  "프로젝트 키를 고른다. 후보는 `kb.py status --json'의 project_keys (없으면 직접 입력)."
+  (let* ((out (work-kb--run-output (work-kb--kb-args "status" "--json") "*work-kb-status-json*"))
+         (keys (and (eq (car out) 0) (work-kb--find-project-keys (work-kb--parse-json-output (cdr out)))))
+         (project (upcase (string-trim (completing-read (format-prompt "프로젝트" (car keys))
+                                                        keys nil nil nil nil (car keys)))))
+         (case-fold-search nil))
+    (unless (string-match-p "\\`[A-Z][A-Z0-9_]+\\'" project)
+      (user-error "프로젝트 키가 아닙니다: %S (예: KB)" project))
+    project))
+
+(defun work-kb--read-nonempty (prompt &optional initial)
+  (let ((text (string-trim (read-string prompt initial))))
+    (when (string-empty-p text) (user-error "비어 있어 취소했습니다"))
+    text))
+
+(defun work-kb-jira-view ()
+  "v: 커서 위치(또는 입력한) 키의 jira/KEY.md를 연다. 없거나 stub이면 `o'와 같이 먼저 동기화."
   (interactive)
-  (message "work-kb: j(Jira 작업)는 Phase 3에서 추가됩니다"))
+  (work-kb--open-key (work-kb--jira-key)))
+
+(defun work-kb-jira-comment ()
+  "c: 댓글. 기본 본문은 현재 줄. daily에서 본문을 그대로 두면 `--from-line daily/…:N'(출처 기록),
+고쳤거나 daily가 아니면 `--body'로 보낸다."
+  (interactive)
+  (let* ((key (work-kb--jira-key))
+         (line (work-kb--current-line-text))
+         (daily (work-kb--daily-relative buffer-file-name))
+         (body (string-trim (read-string (format "%s 댓글: " key) line))))
+    (when (string-empty-p body) (user-error "빈 댓글은 보내지 않습니다"))
+    (work-kb--act-run (format "%s 댓글" key)
+                      (if (and daily (equal body line))
+                          (work-kb--act-args "comment" key "--from-line" (work-kb--daily-line-ref))
+                        (work-kb--act-args "comment" key "--body" body)))))
+
+(defun work-kb-jira-transition ()
+  "t: 전환. `act transitions KEY --json'으로 후보를 받아 고르고, 확인하면 `--yes'로 보낸다."
+  (interactive)
+  (let* ((key (work-kb--jira-key))
+         (out (work-kb--run-output (work-kb--act-args "transitions" key "--json") work-kb-jira-buffer)))
+    (unless (eq (car out) 0)
+      (display-buffer work-kb-jira-buffer)
+      (user-error "work-kb: %s 전환 목록을 받지 못했습니다 (%s)" key (work-kb--exit-reason (car out))))
+    (let* ((data (work-kb--parse-json-output (cdr out)))
+           (names (work-kb--transition-names data)))
+      (unless names (user-error "work-kb: %s에서 할 수 있는 전환이 없습니다" key))
+      (let* ((completion-extra-properties
+              (list :annotation-function
+                    (lambda (name)
+                      (let ((to (work-kb--transition-target data name)))
+                        (and to (not (equal to name)) (format "  → %s" to))))))
+             (name (completing-read (format "%s 전환: " key) names nil t)))
+        (when (string-empty-p name) (user-error "전환을 고르지 않았습니다"))
+        (if (y-or-n-p (format "%s을(를) '%s'(으)로 전환할까요? " key name))
+            (work-kb--act-run (format "%s 전환(%s)" key name)
+                              (work-kb--act-args "transition" key name "--yes"))
+          (message "work-kb: 전환을 취소했습니다")
+          nil)))))
+
+(defun work-kb-jira-assign ()
+  "a: 담당자 지정 (Jira 사용자명)."
+  (interactive)
+  (let* ((key (work-kb--jira-key))
+         (user (string-trim (read-string (format "%s 담당자 (Jira 사용자명): " key)
+                                         nil 'work-kb--assignee-history))))
+    (when (string-empty-p user) (user-error "담당자가 비었습니다"))
+    (work-kb--act-run (format "%s 담당 %s" key user) (work-kb--act-args "assign" key user))))
+
+(defconst work-kb--duration-regexp "\\`\\(?:[0-9]+[wdhm]\\)+\\'"
+  "워크로그 시간 (예: 1h30m, 45m, 1d).")
+
+(defun work-kb-jira-worklog ()
+  "w: 워크로그. 시간(예: 1h30m)과 설명(선택)."
+  (interactive)
+  (let* ((key (work-kb--jira-key))
+         (spent (downcase (replace-regexp-in-string
+                           "[ \t]+" "" (read-string (format "%s 작업 시간 (예: 1h30m): " key)) t t))))
+    (unless (string-match-p work-kb--duration-regexp spent)
+      (user-error "시간 형식이 아닙니다: %S (예: 1h30m, 45m, 1d)" spent))
+    (let ((comment (string-trim (read-string (format "%s 워크로그 설명 (선택): " key)))))
+      (work-kb--act-run (format "%s 워크로그 %s" key spent)
+                        (apply #'work-kb--act-args "worklog" key spent
+                               (unless (string-empty-p comment) (list "--comment" comment)))))))
+
+(defun work-kb-jira-create ()
+  "n: 새 일감. 프로젝트·요약·유형·설명을 받고 확인하면 `--yes'로 보낸다."
+  (interactive)
+  (let* ((project (work-kb--read-project))
+         (summary (work-kb--read-nonempty (format "%s 새 일감 요약: " project)))
+         (type (string-trim (completing-read (format-prompt "유형" (car work-kb-jira-issue-types))
+                                             work-kb-jira-issue-types nil nil nil nil
+                                             (car work-kb-jira-issue-types))))
+         (description (string-trim (read-string "설명 (선택): "))))
+    (when (string-empty-p type) (user-error "유형이 비었습니다"))
+    (if (y-or-n-p (format "%s에 %s 일감 '%s'을(를) 만들까요? " project type summary))
+        (work-kb--act-run (format "%s 새 일감" project)
+                          (apply #'work-kb--act-args "create" project "--summary" summary "--type" type
+                                 (append (unless (string-empty-p description) (list "--description" description))
+                                         (list "--yes"))))
+      (message "work-kb: 새 일감을 취소했습니다")
+      nil)))
+
+(defun work-kb--revert-if-stale (buffer)
+  "BUFFER가 수정 없이 디스크보다 낡았으면 묻지 않고 다시 읽는다."
+  (when (and (buffer-live-p buffer)
+             (buffer-file-name buffer)
+             (not (buffer-modified-p buffer))
+             (not (verify-visited-file-modtime buffer)))
+    (with-current-buffer buffer
+      (let ((coding-system-for-read 'utf-8)) (revert-buffer t t t)))))
+
+(defun work-kb-jira-promote ()
+  "p: 현재 daily 줄을 새 일감으로 승격 (`act promote --from daily/…:N PROJECT --yes').
+성공하면 kb.py가 그 줄 끝에 ` [[NEW-1]]'을 붙인다 (D53). 줄이 바뀌었으면 kb.py가 거부한다."
+  (interactive)
+  (unless (work-kb--daily-relative buffer-file-name)
+    (user-error "승격은 daily 파일의 줄에서만 됩니다"))
+  (let ((line (work-kb--current-line-text))
+        (buffer (current-buffer)))
+    (when (string-empty-p line) (user-error "빈 줄은 승격할 수 없습니다"))
+    (let ((project (work-kb--read-project)))
+      (if (y-or-n-p (format "이 줄을 %s 일감으로 만들까요? %s " project line))
+          (work-kb--act-run (format "%s 승격" project)
+                            (work-kb--act-args "promote" "--from" (work-kb--daily-line-ref) project "--yes")
+                            (lambda (code) (when (eq code 0) (work-kb--revert-if-stale buffer))))
+        (message "work-kb: 승격을 취소했습니다")
+        nil))))
+
+(defvar work-kb-results-mode-map
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "RET" #'work-kb-open-at-point)
+    map))
+
+(define-derived-mode work-kb-results-mode special-mode "work-kb 결과"
+  "kb.py 결과 버퍼 (읽기 전용). RET: 커서 위치의 키 열기.")
+
+(defun work-kb--show-results (buffer what code)
+  (let ((buf (get-buffer buffer)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (work-kb-results-mode)
+        (goto-char (point-min)))
+      (display-buffer buf))
+    (if (eq code 0)
+        (message "work-kb: %s 완료" what)
+      (message "work-kb: %s 실패 (%s)" what (work-kb--exit-reason code)))))
+
+(defun work-kb-jira-jql (jql)
+  "q: 라이브 JQL (`kb.py sync --jql', 캐시에 쓰지 않음) 결과를 *work-kb-jql* 버퍼에 보인다."
+  (interactive (list (read-string "JQL: " nil 'work-kb--jql-history)))
+  (let ((jql (string-trim (or jql ""))))
+    (when (string-empty-p jql) (user-error "JQL이 비었습니다"))
+    (work-kb--run (work-kb--kb-args "sync" "--jql" jql)
+                  :buffer "*work-kb-jql*"
+                  :on-exit (lambda (_proc code) (work-kb--show-results "*work-kb-jql*" "라이브 JQL" code)))))
+
+(defun work-kb-jira-sync ()
+  "S: 동기화 (`kb.py sync')."
+  (interactive)
+  (message "work-kb: 동기화 중…")
+  (work-kb--run (work-kb--kb-args "sync")
+                :buffer "*work-kb-sync*"
+                :on-exit (lambda (_proc code)
+                           (let ((buf (get-buffer "*work-kb-sync*")))
+                             (if (eq code 0)
+                                 (message "work-kb: 동기화 완료%s"
+                                          (let ((last (work-kb--last-line buf))) (if last (concat " — " last) "")))
+                               (when (buffer-live-p buf) (display-buffer buf))
+                               (message "work-kb: 동기화 실패 (%s). *work-kb-sync* 버퍼를 보세요"
+                                        (work-kb--exit-reason code)))))))
+
+(defun work-kb-jira-flush ()
+  "f: outbox의 대기 항목을 다시 보낸다 (`kb.py act flush')."
+  (interactive)
+  (work-kb--act-run "outbox 다시 보내기" (work-kb--act-args "flush")))
+
+(defun work-kb-jira-check-done ()
+  "d: 완료 전환 제안 (`kb.py today --check-done'). 제안만 보이고 아무것도 바꾸지 않는다."
+  (interactive)
+  (work-kb--run (work-kb--kb-args "today" "--check-done")
+                :buffer "*work-kb-check-done*"
+                :on-exit (lambda (_proc code) (work-kb--show-results "*work-kb-check-done*" "완료 전환 제안" code))))
+
+(transient-define-prefix work-kb-jira ()
+  "Jira 작업 메뉴 (§6.8). 쓰기는 모두 `kb.py act'(outbox 경유)로 보낸다."
+  [["일감"
+    ("v" "보기" work-kb-jira-view)
+    ("c" "댓글" work-kb-jira-comment)
+    ("t" "전환" work-kb-jira-transition)
+    ("a" "담당" work-kb-jira-assign)
+    ("w" "워크로그" work-kb-jira-worklog)]
+   ["만들기"
+    ("n" "새 일감" work-kb-jira-create)
+    ("p" "현재 줄 승격" work-kb-jira-promote)]
+   ["조회·동기화"
+    ("q" "라이브 JQL" work-kb-jira-jql)
+    ("S" "동기화" work-kb-jira-sync)
+    ("f" "outbox 다시 보내기" work-kb-jira-flush)
+    ("d" "완료 전환 제안" work-kb-jira-check-done)]])
+
+;;;; 다음 Phase
 
 (defun work-kb-ingest ()
   "이미지 추출과 편찬(ingest + compile). Phase 4에서 추가된다."

@@ -1,4 +1,4 @@
-"""Jira Data Center REST v2 모의 서버 (Phase 0 골격 + Phase 2 읽기).
+"""Jira Data Center REST v2 모의 서버 (Phase 0 골격 + Phase 2 읽기 + Phase 3 쓰기).
 
 표준 라이브러리만 쓴다. 127.0.0.1에만 바인딩한다. 가상 데이터만 담는다(tests/fixtures/jira/).
 
@@ -30,8 +30,32 @@
 새 이슈가 나온다(Jira처럼). `mock.remove("KB-12")`는 이슈를 지운다(조회 404, JQL `key = KB-12`는 400).
 `mock.count("search")`는 받은 검색 요청 수(429·500 포함).
 
+쓰기 경로(Phase 3, Jira DC 9.17 문서의 모양):
+- POST /rest/api/2/issue/{key}/comment {"body"} → 201 댓글(id·author·created). 이슈 댓글에 더하고 updated를 새로.
+- GET  /rest/api/2/issue/{key}/transitions → {"transitions": [{id, name, to}]} 지금 상태별(`TRANSITIONS`).
+  In Review에는 이름이 같은 'Done' 두 개(→ Done, → Closed)가 있다(후보 여럿 시험용).
+- POST /rest/api/2/issue/{key}/transitions {"transition": {"id"}} → 204. id가 없으면 400, 지금 상태에서
+  못 하는 id면 500(DC 문서대로).
+- PUT  /rest/api/2/issue/{key}/assignee {"name"} → 204. 모르는 사용자는 400.
+- POST /rest/api/2/issue/{key}/worklog {"timeSpentSeconds", "started", "comment"} → 201. started는
+  `yyyy-MM-dd'T'HH:mm:ss.SSSZ`가 아니면 400. `mock.worklogs[KEY]`에 쌓인다.
+- POST /rest/api/2/issue {"fields": {project, summary, issuetype, …}} → 201 {id, key, self}. 빠진 필드는
+  400 {"errors": {필드: 문장}}. 새 키는 그 프로젝트의 가장 큰 번호 + 1.
+
+쓰기 모드:
+- `down=True`: 시작하자마자 듣기 소켓을 닫는다(같은 포트에 연결 거부). 실행 중에는 `mock.go_down()`·
+  `mock.come_up()`으로 끄고 켠다(포트 유지, 데이터·로그 유지).
+- `write_500_times=N`: 처음 N번의 쓰기는 500(반영하지 않음).
+- `slow_write_sec=S`: 쓰기를 반영한 뒤 S초 기다렸다 응답한다(클라이언트 읽기 시간 초과 → '불확실').
+- `transition_500=True`: 전환 POST는 늘 500.
+- `assign_denied=True`: 담당 PUT은 토큰이 맞아도 401(DC 문서: 권한 없음도 401).
+- `worklog_denied=True`: 워크로그 POST는 403.
+- `on_write=callable(req)`: 쓰기 요청을 처리하기 전에 부른다(테스트 훅). (상태, 본문[, 헤더])를
+  돌려주면 그것으로 응답하고 반영하지 않는다(예: 429).
+실행 중에 `mock.modes[...]`를 바꾸면 다음 요청부터 따른다. `mock.count("write")`는 받은 쓰기 수.
+
 라우팅은 `ROUTES` 표(메서드, 경로 정규식, 처리 함수)로 한다. 처리 함수는 (상태, 본문) 또는
-(상태, 본문, 추가 헤더)를 돌려준다.
+(상태, 본문, 추가 헤더)를 돌려준다. 본문이 None이면 빈 본문(204).
 """
 from __future__ import annotations
 
@@ -60,6 +84,14 @@ KNOWN_MODES = {
     "search_comment_limit",
     "updates",
     "repeat_page_boundary",
+    # Phase 3 쓰기
+    "down",
+    "write_500_times",
+    "slow_write_sec",
+    "transition_500",
+    "assign_denied",
+    "worklog_denied",
+    "on_write",
 }
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "jira"
@@ -127,6 +159,7 @@ class RunningMock:
     def __init__(self, server: "_Server", modes: dict):
         self._server = server
         self._thread: threading.Thread | None = None
+        self._verbose = bool(server.verbose)
         self.port: int = server.server_address[1]
         self.base_url = f"http://127.0.0.1:{self.port}"
         self.log: list[dict] = []
@@ -136,6 +169,7 @@ class RunningMock:
         self._flags: set[str] = set()
         self.issues: dict[str, dict] = {item["key"]: item for item in load_fixture("issues")}
         self.moved: dict[str, str] = {}  # 옛 키 → 새 키
+        self.worklogs: dict[str, list[dict]] = {}
         for key, changes in (modes.get("updates") or {}).items():
             self.issues[key]["fields"].update(copy.deepcopy(changes))
 
@@ -146,6 +180,39 @@ class RunningMock:
         self._server.shutdown()
         self._server.server_close()
         thread.join(timeout=10)
+
+    # ------------------------------------------------------------ Phase 3: 끄고 켜기
+
+    def _serve(self) -> None:
+        thread = threading.Thread(
+            target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, name=f"{__name__}:{self.port}", daemon=True
+        )
+        self._thread = thread
+        thread.start()
+
+    def go_down(self) -> None:
+        """듣기 소켓을 닫는다. 같은 포트로 오는 연결은 거부된다. 데이터·로그는 그대로."""
+        self.stop()
+        self.modes["down"] = True
+
+    def come_up(self, wait: float = 5.0) -> None:
+        """같은 포트에서 다시 듣는다. 포트를 잠깐 못 잡으면 wait초까지 다시 시도한다."""
+        if self._thread is not None:
+            return
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                server = _Server(("127.0.0.1", self.port), _Handler)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+        server.verbose = self._verbose
+        server.mock = self
+        self._server = server
+        self.modes["down"] = False
+        self._serve()
 
     def __enter__(self):
         return self
@@ -266,14 +333,19 @@ class _Handler(BaseHTTPRequestHandler):
         result = handle(req)
         status, payload = result[0], result[1]
         extra = result[2] if len(result) > 2 else {}
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        data = b"" if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        slow = float(mock.modes.get("slow_write_sec") or 0) if req.method in WRITE_METHODS else 0.0
+        if slow > 0:
+            time.sleep(slow)  # 반영은 끝났고 응답만 늦다 → 클라이언트는 결과를 모른다
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        if payload is not None:
+            self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         for name, value in extra.items():
             self.send_header(name, value)
         self.end_headers()
-        self.wfile.write(data)
+        if data:
+            self.wfile.write(data)
 
     do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = _dispatch
 
@@ -294,9 +366,9 @@ def _start(port: int, modes: dict, verbose: bool) -> RunningMock:
         server.server_close()
         raise
     server.mock = mock
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, name=f"{__name__}:{mock.port}", daemon=True)
-    mock._thread = thread
-    thread.start()
+    mock._serve()
+    if modes.get("down"):
+        mock.go_down()
     return mock
 
 
@@ -979,6 +1051,254 @@ def _comments(req: Request):
     return 200, {"startAt": start, "maxResults": max_results, "total": len(items), "comments": items[start : start + max_results]}
 
 
+# ---------------------------------------------------------------- Phase 3 쓰기
+
+WRITE_METHODS = frozenset({"POST", "PUT"})
+STARTED_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{4}$")
+CATEGORIES = {
+    "new": {"id": 2, "key": "new", "colorName": "blue-gray", "name": "To Do"},
+    "indeterminate": {"id": 4, "key": "indeterminate", "colorName": "yellow", "name": "In Progress"},
+    "done": {"id": 3, "key": "done", "colorName": "green", "name": "Done"},
+}
+STATUS_OBJECTS = {
+    "To Do": ("10000", "new"),
+    "In Progress": ("3", "indeterminate"),
+    "In Review": ("10101", "indeterminate"),
+    "Blocked": ("10102", "indeterminate"),
+    "Done": ("10001", "done"),
+    "Closed": ("6", "done"),
+}
+# 지금 상태(소문자) → [(전환 id, 전환 이름, 도착 상태)]. In Review의 'Done' 두 개는 후보 여럿 시험용.
+TRANSITIONS: dict[str, list[tuple[str, str, str]]] = {
+    "to do": [("11", "In Progress", "In Progress"), ("12", "Blocked", "Blocked")],
+    "open": [("11", "In Progress", "In Progress")],
+    "in progress": [("21", "In Review", "In Review"), ("22", "Blocked", "Blocked"), ("31", "Done", "Done")],
+    "in review": [("41", "Done", "Done"), ("42", "Done", "Closed"), ("43", "In Progress", "In Progress")],
+    "blocked": [("51", "In Progress", "In Progress")],
+    "done": [("61", "Reopen", "To Do")],
+    "closed": [("61", "Reopen", "To Do")],
+}
+ISSUE_TYPES = {"Task": "10002", "Story": "10001", "Bug": "10004"}
+
+
+def status_object(name: str) -> dict:
+    sid, category = STATUS_OBJECTS[name]
+    return {"id": sid, "name": name, "statusCategory": dict(CATEGORIES[category])}
+
+
+def _user(name: str) -> dict:
+    user = USERS[name]
+    return {**user, "emailAddress": f"{name}@example.invalid", "active": True}
+
+
+def _write_gate(req: Request):
+    """모든 쓰기 경로의 앞단: 훅, 횟수, write_500_times. 막으면 응답을, 통과면 None."""
+    mock = req.mock
+    hook = mock.modes.get("on_write")
+    calls = mock.bump("write")
+    if callable(hook):
+        answer = hook(req)
+        if answer is not None:  # 훅이 (상태, 본문[, 헤더])를 주면 그것으로 응답한다
+            return answer
+    if calls <= int(mock.modes.get("write_500_times") or 0):
+        return _error(500, "내부 서버 오류 (모의 쓰기)")
+    return None
+
+
+def _current_key(req: Request) -> str | None:
+    """경로의 키(옮겨졌으면 새 키)가 가리키는 이슈의 지금 키. 없으면 None."""
+    raw = req.params["key"]
+    with req.mock._lock:
+        if raw.isdigit():
+            return next((k for k, v in req.mock.issues.items() if v["id"] == raw), None)
+    wanted = req.mock.resolve(raw)
+    with req.mock._lock:
+        return wanted if wanted in req.mock.issues else None
+
+
+def _no_issue():
+    return _error(404, "이슈가 존재하지 않거나 볼 권한이 없습니다.")
+
+
+def _add_comment(req: Request):
+    blocked = _write_gate(req)
+    if blocked:
+        return blocked
+    key = _current_key(req)
+    if key is None:
+        return _no_issue()
+    body = req.json.get("body") if isinstance(req.json, dict) else None
+    if not isinstance(body, str) or not body.strip():
+        return 400, {"errorMessages": [], "errors": {"comment": "Comment body can not be empty!"}}
+    mock = req.mock
+    stamp = mock.touch(key)
+    number = 90000 + mock.bump("comment_id")
+    with mock._lock:
+        comment_field = mock.issues[key]["fields"]["comment"]
+        comment = {
+            "self": f"{mock.base_url}/rest/api/2/issue/{mock.issues[key]['id']}/comment/{number}",
+            "id": str(number),
+            "author": _user(CURRENT_USER),
+            "body": body,
+            "updateAuthor": _user(CURRENT_USER),
+            "created": stamp,
+            "updated": stamp,
+        }
+        comment_field["comments"].append(copy.deepcopy(comment))
+        comment_field["total"] = len(comment_field["comments"])
+        comment_field["maxResults"] = len(comment_field["comments"])
+    return 201, comment
+
+
+def _available(issue: dict) -> list[tuple[str, str, str]]:
+    return TRANSITIONS.get(issue["fields"]["status"]["name"].lower(), [])
+
+
+def _transitions(req: Request):
+    key = _current_key(req)
+    if key is None:
+        return _no_issue()
+    with req.mock._lock:
+        options = _available(req.mock.issues[key])
+    items = [
+        {"id": tid, "name": name, "opsbarSequence": 10 * (i + 1), "to": status_object(target),
+         "hasScreen": False, "isGlobal": False, "isInitial": False, "isConditional": False}
+        for i, (tid, name, target) in enumerate(options)
+    ]  # fmt: skip
+    return 200, {"expand": "transitions", "transitions": items}
+
+
+def _do_transition(req: Request):
+    blocked = _write_gate(req)
+    if blocked:
+        return blocked
+    key = _current_key(req)
+    if key is None:
+        return _no_issue()
+    if req.mock.modes.get("transition_500"):
+        return _error(500, "내부 서버 오류 (모의 전환)")
+    transition = req.json.get("transition") if isinstance(req.json, dict) else None
+    tid = transition.get("id") if isinstance(transition, dict) else None
+    if not tid:
+        return _error(400, "Transition id or name must be specified.")
+    with req.mock._lock:
+        options = _available(req.mock.issues[key])
+    target = next((to for i, _name, to in options if i == str(tid)), None)
+    if target is None:
+        return _error(500, f"java.lang.NullPointerException (전환 {tid}은(는) 지금 상태에서 할 수 없음)")
+    req.mock.touch(key, status=status_object(target))
+    return 204, None
+
+
+def _assign(req: Request):
+    blocked = _write_gate(req)
+    if blocked:
+        return blocked
+    key = _current_key(req)
+    if key is None:
+        return _no_issue()
+    if req.mock.modes.get("assign_denied"):
+        return 401, {"errorMessages": ["You do not have permission to assign issues."], "errors": {}}
+    name = req.json.get("name") if isinstance(req.json, dict) else None
+    if not isinstance(name, str) or name not in USERS:
+        return 400, {"errorMessages": [], "errors": {"assignee": f"User '{name}' does not exist."}}
+    req.mock.touch(key, assignee=_user(name))
+    return 204, None
+
+
+def _worklog(req: Request):
+    blocked = _write_gate(req)
+    if blocked:
+        return blocked
+    key = _current_key(req)
+    if key is None:
+        return _no_issue()
+    if req.mock.modes.get("worklog_denied"):
+        return 403, {"errorMessages": ["You do not have the permission to associate a worklog to this issue."], "errors": {}}
+    body = req.json if isinstance(req.json, dict) else {}
+    seconds = body.get("timeSpentSeconds")
+    started = body.get("started")
+    errors = {}
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds <= 0:
+        errors["timeLogged"] = "You must indicate the time spent working."
+    if not isinstance(started, str) or not STARTED_RE.match(started):
+        errors["started"] = "You must specify a valid date (yyyy-MM-dd'T'HH:mm:ss.SSSZ)."
+    if errors:
+        return 400, {"errorMessages": [], "errors": errors}
+    mock = req.mock
+    mock.touch(key)
+    number = 70000 + mock.bump("worklog_id")
+    with mock._lock:
+        item = {
+            "id": str(number),
+            "issueId": mock.issues[key]["id"],
+            "author": _user(CURRENT_USER),
+            "comment": body.get("comment") or "",
+            "started": started,
+            "timeSpentSeconds": seconds,
+            "timeSpent": f"{seconds // 3600}h {seconds % 3600 // 60}m",
+        }
+        mock.worklogs.setdefault(key, []).append(copy.deepcopy(item))
+    return 201, item
+
+
+def _create_issue(req: Request):
+    blocked = _write_gate(req)
+    if blocked:
+        return blocked
+    fields = req.json.get("fields") if isinstance(req.json, dict) else None
+    if not isinstance(fields, dict):
+        return _error(400, "fields가 필요합니다.")
+    errors: dict[str, str] = {}
+    project_ref = fields.get("project") if isinstance(fields.get("project"), dict) else {}
+    project = next((p for p in PROJECTS if p["key"] == project_ref.get("key") or p["id"] == project_ref.get("id")), None)
+    if project is None:
+        errors["project"] = "project is required"
+    summary = fields.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        errors["summary"] = "You must specify a summary of the issue."
+    type_ref = fields.get("issuetype") if isinstance(fields.get("issuetype"), dict) else {}
+    type_name = next((n for n, i in ISSUE_TYPES.items() if n == type_ref.get("name") or i == type_ref.get("id")), None)
+    if type_name is None:
+        errors["issuetype"] = "issue type is required" if not type_ref else "The issue type selected is invalid."
+    if errors:
+        return 400, {"errorMessages": [], "errors": errors}
+    mock = req.mock
+    stamp = format_time(mock.now() + dt.timedelta(minutes=1))
+    assignee = fields.get("assignee") if isinstance(fields.get("assignee"), dict) else None
+    with mock._lock:
+        taken = [int(k.split("-", 1)[1]) for k in [*mock.issues, *mock.moved] if k.split("-", 1)[0] == project["key"]]
+        key = f"{project['key']}-{max(taken, default=0) + 1}"
+        new_id = str(max(int(v["id"]) for v in mock.issues.values()) + 1)
+        issue = {
+            "id": new_id,
+            "key": key,
+            "fields": {
+                "summary": summary.strip(),
+                "issuetype": {"id": ISSUE_TYPES[type_name], "name": type_name, "subtask": False},
+                "project": dict(project),
+                "status": status_object("To Do"),
+                "priority": {"id": "3", "name": "Medium"},
+                "assignee": _user(assignee["name"]) if assignee and assignee.get("name") in USERS else None,
+                "reporter": _user(CURRENT_USER),
+                "creator": _user(CURRENT_USER),
+                "labels": list(fields.get("labels") or []),
+                "components": [],
+                "created": stamp,
+                "updated": stamp,
+                "duedate": fields.get("duedate"),
+                "resolution": None,
+                "resolutiondate": None,
+                "description": fields.get("description"),
+                SPRINT_FIELD: None,
+                "watches": {"watchCount": 1, "isWatching": True},
+                "comment": {"comments": [], "maxResults": 0, "total": 0, "startAt": 0},
+            },
+        }
+        mock.issues[key] = issue
+    return 201, {"id": new_id, "key": key, "self": f"{mock.base_url}/rest/api/2/issue/{new_id}"}
+
+
 ROUTES = [
     ("GET", r"/rest/api/2/myself", _myself),
     ("GET", r"/rest/api/2/project", _projects),
@@ -986,7 +1306,14 @@ ROUTES = [
     ("GET", r"/rest/api/2/field", _fields),
     ("GET", r"/rest/api/2/search", _search),
     ("GET", r"/rest/api/2/issue/(?P<key>[^/]+)/comment", _comments),
+    ("GET", r"/rest/api/2/issue/(?P<key>[^/]+)/transitions", _transitions),
     ("GET", r"/rest/api/2/issue/(?P<key>[^/]+)", _issue),
+    # Phase 3 쓰기
+    ("POST", r"/rest/api/2/issue/(?P<key>[^/]+)/comment", _add_comment),
+    ("POST", r"/rest/api/2/issue/(?P<key>[^/]+)/transitions", _do_transition),
+    ("PUT", r"/rest/api/2/issue/(?P<key>[^/]+)/assignee", _assign),
+    ("POST", r"/rest/api/2/issue/(?P<key>[^/]+)/worklog", _worklog),
+    ("POST", r"/rest/api/2/issue", _create_issue),
 ]
 
 

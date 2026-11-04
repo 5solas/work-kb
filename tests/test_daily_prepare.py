@@ -557,8 +557,8 @@ def test_cli_summary_date_and_errors(cfg, vault, run_kb):
     proc = run_kb("today", "--date", "2026-13-01")
     assert proc.returncode == 4 and "YYYY-MM-DD" in proc.stderr
 
-    proc = run_kb("today", "--check-done")
-    assert proc.returncode == 4 and "Phase 3" in proc.stdout
+    proc = run_kb("today", "--check-done")  # Phase 3: 읽기 전용 제안, daily가 없어도 종료 0 (test_check_done.py)
+    assert proc.returncode == 0
 
 
 def test_cli_without_project_keys_exit_4(vault, run_kb):

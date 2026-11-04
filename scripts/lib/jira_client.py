@@ -7,7 +7,13 @@
   `ORDER BY key ASC`를 붙여 페이지 사이 순서를 고정한다(`split_order_by`).
 - 스프린트 필드 id는 `/rest/api/2/field`에서 schema.custom으로 찾는다(인스턴스마다 다르다).
 
-Jira 쓰기(댓글·전환·생성)는 Phase 3에서 더한다.
+쓰기(Phase 3, D52): `add_comment`·`do_transition`·`assign`·`add_worklog`·`create_issue`.
+- 쓰기는 멱등이 아니므로 5xx에도 다시 보내지 않는다. 판단은 호출자(jira_act·outbox)가 한다.
+- 401/403은 net이 AuthError로 바꾸지 않게(`auth_raises=False`) 받아 `WriteDenied`(AuthError)로 낸다.
+  호출자는 `/myself`로 토큰이 살아 있는지 다시 확인해 '권한 없음'과 '토큰 문제'를 가른다.
+- 그 밖의 4xx는 `WriteRejected`, 5xx는 `WriteServerError`(NetworkError), 429가 계속되면 `RateLimited`.
+  모두 `status`와 Jira 문장 목록 `messages`를 단다. 연결 실패는 net의 NetworkError(after_send 포함).
+- 워크로그 `started`는 `yyyy-MM-dd'T'HH:mm:ss.SSSZ`(`format_started`).
 """
 from __future__ import annotations
 
@@ -65,6 +71,49 @@ class NotFoundError(core.KbError):
     """이슈가 없거나 볼 권한이 없다(404)."""
 
     status = 404
+
+
+class _WriteFailure:
+    """쓰기 오류 공통 속성: HTTP 상태와 Jira가 준 문장들."""
+
+    status: int
+    messages: list[str]
+
+
+class WriteDenied(core.AuthError, _WriteFailure):
+    """쓰기가 401/403으로 거부됐다. 토큰 문제인지 권한 문제인지는 `/myself`로 가린다(D52)."""
+
+    def __init__(self, message: str, *, status: int, messages: Iterable[str] = ()) -> None:
+        super().__init__(message)
+        self.status = status
+        self.messages = list(messages)
+
+
+class WriteRejected(core.KbError, _WriteFailure):
+    """Jira가 쓰기를 받아들이지 않았다(401·403·429를 뺀 4xx). 다시 보내도 같다."""
+
+    def __init__(self, message: str, *, status: int, messages: Iterable[str] = ()) -> None:
+        super().__init__(message)
+        self.status = status
+        self.messages = list(messages)
+
+
+class WriteServerError(core.NetworkError, _WriteFailure):
+    """쓰기에 5xx가 왔다. 서버에 닿았지만 처리 여부는 상태 코드로만 안다."""
+
+    def __init__(self, message: str, *, status: int, messages: Iterable[str] = ()) -> None:
+        super().__init__(message, after_send=True)
+        self.status = status
+        self.messages = list(messages)
+
+
+class RateLimited(core.NetworkError, _WriteFailure):
+    """429가 net의 재시도 뒤에도 계속됐다. 처리되지 않았으므로 시도로 세지 않는다(D52)."""
+
+    def __init__(self, message: str, *, status: int = 429, messages: Iterable[str] = ()) -> None:
+        super().__init__(message, after_send=False)
+        self.status = status
+        self.messages = list(messages)
 
 
 # ---------------------------------------------------------------- JQL 도움 함수
@@ -184,6 +233,17 @@ def parse_datetime(value: Any) -> dt.datetime | None:
     return parsed if parsed.tzinfo is not None else None
 
 
+def format_started(value: dt.datetime) -> str:
+    """워크로그 `started` 형식 `yyyy-MM-dd'T'HH:mm:ss.SSSZ`(예: 2026-11-05T16:05:00.000+0900, D52).
+
+    시간대 없는 값은 받지 않는다(어느 시각인지 모호하다).
+    """
+    if not isinstance(value, dt.datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise core.ConfigError("워크로그 시작 시각에는 시간대가 있어야 합니다")
+    millis = value.microsecond // 1000
+    return value.strftime("%Y-%m-%dT%H:%M:%S") + f".{millis:03d}" + value.strftime("%z")
+
+
 # ---------------------------------------------------------------- 응답 해석
 
 
@@ -232,7 +292,7 @@ def _short_jql(jql: str, limit: int = 200) -> str:
 
 
 class JiraClient:
-    """Jira DC REST v2 읽기 전용 클라이언트. `with JiraClient(...) as client:`로 쓸 수 있다."""
+    """Jira DC REST v2 클라이언트(읽기 + Phase 3의 작은 쓰기). `with JiraClient(...) as client:`로 쓸 수 있다."""
 
     def __init__(self, base_url: str, pat: str, *, conn: Mapping | None = None, page_size: int = 500) -> None:
         if not isinstance(base_url, str) or not base_url.strip():
@@ -487,3 +547,102 @@ class JiraClient:
             if not isinstance(total, int) or total <= len(listed):
                 return listed
         return self.comments(str(issue.get("key")))
+
+    # ------------------------------------------------------------ 쓰기 (Phase 3)
+
+    def _send(self, method: str, path: str, body: Mapping[str, Any]) -> Any:
+        """쓰기 요청 하나. 2xx면 JSON(본문이 없거나 JSON이 아니면 None). 다시 보내지 않는다."""
+        url = self._url(path)
+        what = f"{method} {API}{path}"
+        resp = net.request(
+            self._session, method, url, json=dict(body), timeout=self.timeout, auth_raises=False, root=self._log_root
+        )
+        status = resp.status_code
+        with resp:
+            if 200 <= status < 300:
+                if status == 204 or not resp.content:
+                    return None
+                try:
+                    return resp.json()
+                except ValueError:
+                    return None
+            messages = _jira_messages(resp)
+        detail = "; ".join(messages)
+        suffix = f": {detail}" if detail else ""
+        if status in (401, 403):
+            label = "인증 거부" if status == 401 else "권한 거부"
+            raise WriteDenied(f"Jira가 쓰기를 거부했습니다 ({label} {status}, {what}){suffix}", status=status, messages=messages)
+        if status == 429:
+            raise RateLimited(f"Jira 요청 제한(429)이 계속됩니다 ({what}). 잠시 뒤 다시 시도하세요", messages=messages)
+        if status >= 500:
+            raise WriteServerError(f"Jira 서버 오류입니다 ({status}, {what}){suffix}", status=status, messages=messages)
+        raise WriteRejected(f"Jira가 요청을 받아들이지 않았습니다 ({status}, {what}){suffix}", status=status, messages=messages)
+
+    def add_comment(self, key: str, body: str) -> dict:
+        """댓글 추가: POST /issue/{key}/comment {"body"} → 201 댓글."""
+        key = self._check_key(key)
+        if not isinstance(body, str) or not body.strip():
+            raise core.ConfigError("댓글 내용이 비어 있습니다")
+        data = self._send("POST", f"/issue/{quote(key)}/comment", {"body": body})
+        return data if isinstance(data, dict) else {}
+
+    def transitions(self, key: str) -> list[dict]:
+        """지금 상태에서 가능한 전환 목록: GET /issue/{key}/transitions → [{id, name, to:{name, statusCategory}}]."""
+        key = self._check_key(key)
+        data = self._get_json(f"/issue/{quote(key)}/transitions")
+        items = data.get("transitions") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise core.KbError(f"Jira 전환 목록 응답 형식이 아닙니다 ({key})")
+        return [item for item in items if isinstance(item, dict)]
+
+    def do_transition(self, key: str, transition_id: str) -> None:
+        """전환: POST /issue/{key}/transitions {"transition": {"id"}} → 204. 틀린 id는 Jira가 500을 준다."""
+        key = self._check_key(key)
+        tid = str(transition_id or "").strip()
+        if not tid:
+            raise core.ConfigError("전환 id가 비어 있습니다")
+        self._send("POST", f"/issue/{quote(key)}/transitions", {"transition": {"id": tid}})
+
+    def assign(self, key: str, username: str) -> None:
+        """담당자 지정: PUT /issue/{key}/assignee {"name"} → 204 (DC는 accountId가 아니라 name)."""
+        key = self._check_key(key)
+        name = str(username or "").strip()
+        if not name:
+            raise core.ConfigError("담당자 사용자 이름이 비어 있습니다")
+        self._send("PUT", f"/issue/{quote(key)}/assignee", {"name": name})
+
+    def add_worklog(self, key: str, seconds: int, comment: str, started: dt.datetime) -> dict:
+        """워크로그: POST /issue/{key}/worklog {"timeSpentSeconds", "started", "comment"} → 201."""
+        key = self._check_key(key)
+        if isinstance(seconds, bool) or not isinstance(seconds, int) or seconds < 60:
+            raise core.ConfigError(f"작업 시간은 1분 이상이어야 합니다 (지금 값: {seconds!r}초)")
+        body: dict[str, Any] = {"timeSpentSeconds": seconds, "started": format_started(started)}
+        if comment:
+            body["comment"] = comment
+        data = self._send("POST", f"/issue/{quote(key)}/worklog", body)
+        return data if isinstance(data, dict) else {}
+
+    def create_issue(self, project_key: str, summary: str, issuetype: str, **fields: Any) -> dict:
+        """일감 생성: POST /issue {"fields": {project:{key}, summary, issuetype:{name}, …}} → 201 {id, key, self}.
+
+        나머지 필드(description 등)는 그대로 fields에 싣는다. 응답에 key가 없으면 KbError.
+        """
+        project = str(project_key or "").strip().upper()
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]+", project):
+            raise core.ConfigError(f"프로젝트 키 형식이 아닙니다: {project_key!r}. 예: KB")
+        if not isinstance(summary, str) or not summary.strip():
+            raise core.ConfigError("일감 제목이 비어 있습니다")
+        if not isinstance(issuetype, str) or not issuetype.strip():
+            raise core.ConfigError("일감 유형이 비어 있습니다. 예: Task")
+        body_fields: dict[str, Any] = {
+            "project": {"key": project},
+            "summary": summary.strip(),
+            "issuetype": {"name": issuetype.strip()},
+        }
+        for name, value in fields.items():
+            if value is not None:
+                body_fields[name] = value
+        data = self._send("POST", "/issue", {"fields": body_fields})
+        if not isinstance(data, dict) or not isinstance(data.get("key"), str) or not _KEY_RE.match(data["key"]):
+            raise core.KbError("Jira 일감 생성 응답에 키가 없습니다. Jira에서 만들어졌는지 확인하세요")
+        return data
