@@ -156,12 +156,6 @@
   (should (eq (keymap-lookup global-map "C-c k c") 'work-kb-capture))
   (should (eq (keymap-lookup global-map "C-c k ?") 'work-kb-status)))
 
-(ert-deftest work-kb-test-later-phase-stubs ()
-  (work-kb-test--capturing-messages msgs
-    (work-kb-ingest) (work-kb-proposals)
-    (should-not (cl-some (lambda (m) (string-match-p "Phase 3" m)) msgs))
-    (should (= 2 (cl-count-if (lambda (m) (string-match-p "Phase 4" m)) msgs)))))
-
 (ert-deftest work-kb-test-prefix-rebind ()
   (unwind-protect
       (progn
@@ -1384,5 +1378,181 @@ KB-9의 Done 둘(41 → Done, 42 → Closed)은 따로 보이고, 고른 쪽의 
           (should (eq (car out) 0))
           (should (equal (work-kb--transition-choices (work-kb--parse-json-output (cdr out))) '(("완료" . "완료"))))))
       (kill-buffer "*work-kb-test-out*"))))
+
+;;;; 편찬·주제 제안 (Phase 4, `g'·`a')
+
+(defmacro work-kb-test--fresh-compile (&rest body)
+  "BODY 동안 `g' 진행 표시를 새로 묶는다 (다른 시험에 새지 않게)."
+  (declare (indent 0))
+  `(let ((work-kb--compile-running nil)) ,@body))
+
+(ert-deftest work-kb-test-ingest-then-compile ()
+  "g: `ingest --root V' 뒤 `compile --root V'를 같은 *work-kb* 버퍼로 차례로 돌린다. 묻지 않는다."
+  (work-kb-test--with-vault vault
+    (work-kb-test--fresh-compile
+      (let ((root (directory-file-name vault))
+            calls)
+        (work-kb-test--capturing-messages msgs
+          (work-kb-test--fake-run calls
+              (lambda (args) (work-kb-test--emit "*work-kb*" (format "%s: 끝\n" (car args)) 0))
+            (save-window-excursion
+              (work-kb-test--answering nil nil :none (call-interactively #'work-kb-ingest))))
+          (should (cl-some (lambda (m) (string-match-p "work-kb: 편찬 완료 — compile: 끝" m)) msgs)))
+        (should (equal (reverse calls)
+                       (list (cons (list "ingest" "--root" root) "*work-kb*")
+                             (cons (list "compile" "--root" root) "*work-kb*"))))
+        (should-not work-kb--compile-running)))))
+
+(ert-deftest work-kb-test-ingest-dry-run ()
+  "C-u g: 두 단계 모두 `--dry-run'."
+  (work-kb-test--with-vault vault
+    (work-kb-test--fresh-compile
+      (let ((root (directory-file-name vault))
+            calls)
+        (work-kb-test--capturing-messages msgs
+          (work-kb-test--fake-run calls (lambda (_) 0)
+            (save-window-excursion
+              (let ((current-prefix-arg '(4)))
+                (call-interactively #'work-kb-ingest))))
+          (should (cl-some (lambda (m) (string-match-p "편찬 미리 보기 완료" m)) msgs)))
+        (should (equal (mapcar #'car (reverse calls))
+                       (list (list "ingest" "--root" root "--dry-run")
+                             (list "compile" "--root" root "--dry-run"))))))))
+
+(ert-deftest work-kb-test-ingest-failures ()
+  "ingest 실패(종료 1)여도 compile은 돈다. 공개 호스트 거부(종료 5)면 compile을 건너뛴다.
+compile 실패는 이유와 함께 알린다. 어느 경우든 진행 표시는 풀린다."
+  (work-kb-test--with-vault vault
+    (dolist (case '(((1 . 0) ("ingest" "compile") "ingest 실패(종료 1: 오류), compile 완료")
+                    ((5 . 0) ("ingest") "중단 — ingest 실패(종료 5: 공개 호스트 거부). compile은 돌리지 않았습니다")
+                    ((0 . 3) ("ingest" "compile") "ingest 완료, compile 실패(종료 3: 네트워크)")))
+      (work-kb-test--fresh-compile
+        (let ((codes (car case))
+              calls)
+          (work-kb-test--capturing-messages msgs
+            (work-kb-test--fake-run calls
+                (lambda (args) (if (equal (car args) "ingest") (car codes) (cdr codes)))
+              (save-window-excursion (work-kb-ingest)))
+            (should (cl-some (lambda (m) (string-match-p (regexp-quote (nth 2 case)) m)) msgs)))
+          (should (equal (mapcar #'caar (reverse calls)) (nth 1 case)))
+          (should-not work-kb--compile-running))))))
+
+(ert-deftest work-kb-test-ingest-in-flight ()
+  "g가 도는 중에 다시 g를 누르면 또 돌리지 않는다. 시작이 실패하면 진행 표시를 푼다."
+  (work-kb-test--with-vault vault
+    (work-kb-test--fresh-compile
+      (let (calls)
+        (cl-letf (((symbol-function 'work-kb--run)
+                   (lambda (args &rest _) (push args calls) 'fake-proc)))
+          (work-kb-test--capturing-messages msgs
+            (should (eq (work-kb-ingest) 'fake-proc))
+            (should-not (work-kb-ingest))
+            (should (cl-some (lambda (m) (string-match-p "이미 진행 중" m)) msgs))))
+        (should (equal (mapcar #'car calls) '("ingest")))
+        (should work-kb--compile-running)))
+    (work-kb-test--fresh-compile
+      (cl-letf (((symbol-function 'work-kb--run)
+                 (lambda (&rest _) (user-error "Python을 찾지 못했습니다"))))
+        (should-error (work-kb-ingest) :type 'user-error))
+      (should-not work-kb--compile-running))))
+
+(ert-deftest work-kb-test-ingest-real-async ()
+  "실제 비동기 프로세스 둘: ingest의 센티널이 compile을 시작하고, 두 출력이 한 버퍼에 차례로 남는다."
+  (work-kb-test--with-vault vault
+    (work-kb-test--fresh-compile
+      (let* ((orig (symbol-function 'make-process))
+             (python (work-kb-test--python))
+             (code (concat "import sys, json; a = json.loads(sys.stdin.buffer.read().decode('utf-8')); "
+                           "sys.stdout.buffer.write(('\\ub2e8\\uacc4 ' + a[0] + ' ' + a[a.index('--root') + 1]"
+                           " + '\\n').encode('utf-8'))"))
+             (deadline (+ (float-time) 60))
+             commands)
+        (when (get-buffer work-kb-output-buffer)
+          (with-current-buffer work-kb-output-buffer (erase-buffer) (insert "이전 출력\n")))
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest plist)
+                     (push (plist-get plist :command) commands)
+                     (apply orig (plist-put (copy-sequence plist) :command (append python (list "-c" code)))))))
+          (save-window-excursion
+            (should (processp (work-kb-ingest)))
+            (should work-kb--compile-running)
+            (while (and work-kb--compile-running (< (float-time) deadline))
+              (accept-process-output nil 0.05))))
+        (should-not work-kb--compile-running)
+        (should (= 2 (length commands)))
+        (dolist (command commands)
+          (should (equal (last command 4) '("-X" "utf8" "scripts/kb.py" "--argv-stdin"))))
+        (let ((root (directory-file-name vault)))
+          (should (equal (with-current-buffer work-kb-output-buffer (buffer-string))
+                         (concat "== ingest ==\n단계 ingest " root "\n\n== compile ==\n단계 compile " root "\n"))))))))
+
+(defconst work-kb-test--proposals
+  (concat "# 주제 제안\n\n<!-- kb:proposals:start -->\n"
+          "1. 배포 자동화 — 대기\n2. 캐시 설계 — 대기\n3. 장애 대응 — 대기\n"
+          "<!-- kb:proposals:end -->\n")
+  "compile이 쓴 것 같은 _proposals.md (형식은 시험에 중요하지 않다).")
+
+(ert-deftest work-kb-test-proposals-accept ()
+  "a: _proposals.md를 열고 번호를 받아 확인하면 `proposals accept --root V <n>'(--yes 없음).
+끝나면 제안 버퍼를 묻지 않고 다시 읽는다. `all'·`#2'도 받는다."
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "wiki/_proposals.md" vault))
+          (root (directory-file-name vault))
+          (create-lockfiles nil)
+          calls)
+      (work-kb-test--write-bytes file work-kb-test--proposals)
+      (work-kb-test--capturing-messages msgs
+        (work-kb-test--fake-run calls
+            (lambda (args)
+              (work-kb-test--rewrite-on-disk
+               file (string-replace "3. 장애 대응 — 대기" "3. 장애 대응 — 승인" work-kb-test--proposals))
+              (work-kb-test--emit "*work-kb*" (format "proposals: %s 승인\n" (car (last args))) 0))
+          (save-window-excursion
+            (work-kb-test--no-prompts
+              (work-kb-test--answering '(" 3 ") nil t (work-kb-proposals)))
+            (let ((buf (window-buffer (selected-window))))
+              (should (file-equal-p (buffer-file-name buf) file))
+              (with-current-buffer buf
+                (should-not (buffer-modified-p))
+                (should (string-match-p "장애 대응 — 승인" (buffer-string)))))
+            (should (cl-some (lambda (p) (string-match-p "제안 3을(를) 승인할까요" p)) work-kb-test--prompts))
+            (work-kb-test--answering '("ALL") nil t (work-kb-proposals))
+            (should (cl-some (lambda (p) (string-match-p "모든 제안을(를) 승인할까요" p)) work-kb-test--prompts))
+            (work-kb-test--answering '("#2") nil t (work-kb-proposals))))
+        (should (cl-some (lambda (m) (string-match-p "제안 3 승인 완료 — proposals: 3 승인" m)) msgs)))
+      (should (equal (reverse calls)
+                     (list (cons (list "proposals" "accept" "--root" root "3") "*work-kb*")
+                           (cons (list "proposals" "accept" "--root" root "all") "*work-kb*")
+                           (cons (list "proposals" "accept" "--root" root "2") "*work-kb*")))))))
+
+(ert-deftest work-kb-test-proposals-declined-empty-invalid ()
+  "a: 비우면 열기만, n이면 보내지 않음, 번호가 아니면 사용자 오류, 실패는 이유와 함께 알린다.
+파일이 없으면 묻지도 열지도 않는다."
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "wiki/_proposals.md" vault))
+          calls)
+      (work-kb-test--fake-run calls (lambda (_) (error "보내면 안 됨"))
+        (work-kb-test--capturing-messages msgs
+          (save-window-excursion
+            (work-kb-test--answering nil nil :none (should-not (work-kb-proposals))))
+          (should (cl-some (lambda (m) (string-match-p "_proposals.md이 아직 없습니다" m)) msgs)))
+        (should-not (find-buffer-visiting file))
+        (work-kb-test--write-bytes file work-kb-test--proposals)
+        (save-window-excursion
+          (work-kb-test--answering '("  ") nil :none (should-not (work-kb-proposals)))
+          (should (file-equal-p (buffer-file-name (window-buffer (selected-window))) file))
+          (work-kb-test--answering '("3") nil nil (should-not (work-kb-proposals)))
+          (dolist (bad '("abc" "3,4" "-1"))
+            (work-kb-test--answering (list bad) nil :none
+              (should-error (work-kb-proposals) :type 'user-error)))))
+      (should-not calls)
+      (work-kb-test--capturing-messages msgs
+        (work-kb-test--fake-run calls
+            (lambda (_) (work-kb-test--emit "*work-kb*" "kb: KB_AGENT=1 세션에서는 거부\n" 7))
+          (save-window-excursion
+            (work-kb-test--answering '("1") nil t (work-kb-proposals))))
+        (should (cl-some (lambda (m) (string-match-p "제안 1 승인 실패 (종료 7: 정책 거부)" m)) msgs)))
+      (should (= 1 (length calls)))
+      (should (equal (work-kb-test--bytes file) (work-kb-test--utf8 work-kb-test--proposals))))))
 
 ;;; test-work-kb.el ends here

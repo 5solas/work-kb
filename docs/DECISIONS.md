@@ -198,7 +198,17 @@ Opus 3명 독립 검토 → 16건 → 전부 수정. 추가 결정(위 표를 �
 | 본문에 토큰 | 큐에 넣지 않음(이미 큐에 있으면 failed) | 4(1) |
 | project_keys 밖 | 보내지 않음 | 4 |
 | 전환 후보 0·2+ | 후보 목록 | 4 |
-| 확인 거부·EOF | 큐에 넣지 않음 | 1 | 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
+| 확인 거부·EOF | 큐에 넣지 않음 | 1 |
+
+### Phase 4 구축 결정 (2026-11-05)
+
+- **mock_llm**: 토글 후보별 `accept|reject|ignore` 모드, `trace_field`(reasoning | reasoning_content | think_tag | orphan_think | none), `content_null_when_thinking`, `json_mode`·`vision` 3상태(비전은 표준 라이브러리 PNG 디코더로 주된 색을 답함), `always_reasoning_truncate`, 일회성 장애(`connection_drop_once`, `http_500_once`, `broken_json_once`), `context_length`, `canned`(시스템 메시지 첫 줄 `KB-TASK: <작업>`으로 작업별 응답 선택), `echo_request`. 추론 흔적은 "생각 " 80회(60토큰)로 토큰 비율 2배를 만든다.
+- **llm_client**: 회사 가드는 `__init__`에서 모든 프로필을 검사하고 요청 직전에도 다시 검사하며 리다이렉트를 따르지 않는다. 시스템 메시지는 `KB-TASK:` 줄 → AGENTS.md 절(역할·금지·태그·작업 스키마·답변 규칙) → `prompts/<작업>.md`; `system_prefix` 방식의 `/think`·`/no_think`는 둘째 줄. D38(추론 켜짐 + `response_format` 400/빈 응답 → 프롬프트 강제 JSON으로 1회 재시도)은 그 뒤 해당 프로필의 추론 켜짐 호출에서 `response_format`을 끈다. `connected_profiles()`는 `/models` 2xx·404를 연결로 본다. JSON 파싱은 코드 펜스·앞뒤 글을 허용. `split_by_date`는 날짜 단위로 욕심껏 묶고 큰 날은 줄 단위로 나눈다. 요청마다 로그 한 줄(내용 없음).
+- **llm_detect**: POST 예산 10 = 토글 8(기준선 포함) + JSON 1 + 비전 1(항상 둘 다 검사). 최악의 경우(모든 후보가 뒤집히되 확인 실패) 후보 4의 확인 호출을 보내지 못해 `method: none` + `budget_exhausted`. 기준선 실패는 `DetectError`(종료 3). `detected`에 `reasoning_toggle.source`, `notes`(json_in_reasoning 등), `warnings`, `probes`(이미지 없음, 답 80자 이하) 기록. 비전은 빨강·빨간·빨갛·`red`(단어 경계) 중 하나. 흔적을 남기지 않는 추론은 감지하지 못한다.
+- **compile**: T1은 묶음 요청(`max_output_tokens` 64는 줄당 값, 40줄 묶음). 기본 범위는 오늘 포함 최근 7일, `--since 0`은 전체. T4는 처음·7일 경과·`--task topic_proposal`·`--force`에 실행. 입력이 바뀌지 않은 단위는 다시 부르지 않으며(HTTP 0회), 같은 입력에서 3회 건너뛰면 `gave_up`. T2 중복 표식 `<!-- src:HASH -->`(rel+줄 해시). `[>]` 줄은 입력에서 제외. `related`의 키는 project_keys 밖이면 제거, 사람은 입력에 `@이름`이 있을 때만. T3 출처는 입력 id·현재 요약·입력의 Jira 키만.
+- **ingest**: 자산 이름은 `YYYY-MM-DD-HHMM-<link_safe 원래이름>.<ext>`(인제스트 시각). daily가 가리키는 inbox 이미지는 옮기지 않는다(링크 보존). inbox 중복은 `_trash/`(LLM 호출 없음), 임베드 중복은 `duplicate_of` 사이드카. 원장 `.state/images.json`은 사이드카에서 재구성 가능. 사람은 이미지 글이나 힌트 줄에 있는 이름만. `extracted` 구역의 읽은 글은 줄마다 `- ` 접두(마커·제목·펜스로 오인 방지). 허구 이미지 3장은 `tests/fixtures/make_images.py`(pillow, 맑은 고딕)로 생성.
+- **init/doctor**: 마법사 4단계 LLM(처음엔 기본 y, 기존 설정 있으면 n). 회사 가드는 키 입력 전에 실행하고, 탐지는 설정 중인 프로필 하나만 담은 설정으로 한다(남아 있는 공개 프로필이 사내 프로필 설정을 막지 않게). `--dev`는 main 키가 풀리면 탐지하고 아니면 `detected: pending`. `init --redetect` = `doctor --redetect`(KB_AGENT=1 거부). 기본 doctor는 저장하지 않고 프로필당 ≤3회(토글 끔+JSON → 켬 → 비전)로 기록된 탐지를 재검증(D48).
+- **Emacs**: `g`는 ingest 뒤 compile(ingest 실패해도 compile, 단 종료 5면 건너뜀), `C-u g`는 둘 다 `--dry-run`; `a`는 `_proposals.md`를 열고 번호/`all` 입력 후 `y-or-n-p` → `proposals accept`. `work-kb--run`의 process mark 버그(버퍼 인수 누락) 수정. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 
