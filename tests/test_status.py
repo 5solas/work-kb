@@ -22,9 +22,23 @@ JSON_KEYS = {
     "outbox",
     "proposals",
     "images",
+    "compile_gave_up",
     "llm",
     "lock",
     "problems",
+}
+
+
+# 편찬 원장: gave_up 2개(tag 1, decisions 1). `_proposals`의 항목은 작업 단위가 아니라 세지 않는다
+COMPILE_LEDGER = {
+    "tag": {
+        "daily/2026-11-04.md#aaaa": {"status": "ok", "tag": "결정"},
+        "daily/2026-11-04.md#bbbb": {"status": "gave_up", "skips": 3},
+        "daily/2026-11-04.md#cccc": {"status": "skipped", "skips": 1},
+    },
+    "decisions": {"daily/2026-11-03.md": {"status": "gave_up", "skips": 3}},
+    "entity_summary": {"wiki/projects/KB.md": {"status": "ok"}},
+    "_proposals": {"next_id": 2, "items": {"1": {"name": "캐시", "status": "gave_up"}}},
 }
 
 
@@ -63,6 +77,7 @@ def sample(tmp_path):
     _write_local(root, local)
     (root / ".state").mkdir()
     (root / ".state" / "sync.json").write_text(json.dumps({"last_sync": "2026-11-05T08:45:00+09:00"}), encoding="utf-8")
+    (root / ".state" / "compile.json").write_text(json.dumps(COMPILE_LEDGER, ensure_ascii=False), encoding="utf-8")
     (root / "jira").mkdir()
     outbox = [
         {"id": "1", "action": "comment", "key": "KB-12", "status": "pending"},
@@ -102,6 +117,7 @@ def test_empty_vault(vault, fake_now, capsys):
         "outbox: 대기 0개, 전송 중 0개, 실패 0개",
         "미처리 제안: 0개",
         "미처리 이미지: 0개",
+        "포기한 편찬 단위: 0개",
         "LLM: 꺼짐",
         "LLM 프로필: 없음",
         "잠금: 없음",
@@ -119,7 +135,7 @@ def test_empty_vault_json(vault, fake_now, capsys):
     assert info["today"] == {"date": "2026-11-05", "path": "daily/2026-11-05.md", "exists": False}
     assert info["last_sync"] is None and info["lock"] is None
     assert info["outbox"] == {"pending": 0, "sending": 0, "failed": 0}
-    assert info["proposals"] == 0 and info["images"] == 0
+    assert info["proposals"] == 0 and info["images"] == 0 and info["compile_gave_up"] == 0
     assert info["llm"] == {"enabled": False, "fallback_order": ["main", "fallback"], "profiles": {}}
     assert info["problems"] == []
 
@@ -130,7 +146,7 @@ def test_sample_vault_text(sample, fake_now, run_kb):
     result = run_kb("status", root=sample)
     assert result.returncode == 0, result.stderr
     out = result.stdout.splitlines()
-    assert out[:9] == [
+    assert out[:10] == [
         "환경: home",
         "config.local.yaml: 있음",
         f"볼트: {sample.resolve()}",
@@ -138,7 +154,8 @@ def test_sample_vault_text(sample, fake_now, run_kb):
         "마지막 동기화: 2026-11-05T08:45:00+09:00",
         "outbox: 대기 2개, 전송 중 1개, 실패 1개",
         "미처리 제안: 2개",
-        "미처리 이미지: 2개",
+        "미처리 이미지: 4개",  # 픽스처 2개 + 샘플 볼트의 inbox 드롭 1개·daily 임베드 raw/assets 1개
+        "포기한 편찬 단위: 2개 → 입력이 바뀌면 다시 시도, 지금 다시 하려면 kb.py compile --force",
         "LLM: 켜짐 (순서: main → fallback)",
     ]
     assert "LLM main: 가짜-비전-모델 @ 127.0.0.1 · 탐지: 비전 예, JSON 모드 아니오, 추론 토글 param, 컨텍스트 262,144" in out
@@ -157,7 +174,8 @@ def test_sample_vault_json_keys(sample, fake_now, run_kb):
     assert set(info) == JSON_KEYS
     assert info["today"]["exists"] is True and info["today"]["date"] == "2026-11-04"
     assert info["outbox"] == {"pending": 2, "sending": 1, "failed": 1}
-    assert info["images"] == 2 and info["proposals"] == 2
+    assert info["images"] == 4 and info["proposals"] == 2
+    assert info["compile_gave_up"] == 2
     main = info["llm"]["profiles"]["main"]
     assert set(main) == {"model", "host", "public_host", "detected", "detected_summary"}
     assert main["detected"]["context_tokens"] == 262144
@@ -234,9 +252,39 @@ def test_unprocessed_images_include_embedded_raw_assets_without_sidecar(vault):
     assert status.unprocessed_images(config.load(vault)) == 3
 
 
+def test_detected_pending_shows_waiting(sample, capsys):
+    """init --dev가 키 없이 미뤄 둔 `detected: pending`은 '탐지 대기'(W4.6)."""
+    local = yaml.safe_load((sample / "config.local.yaml").read_text(encoding="utf-8"))
+    local["llm"]["profiles"]["main"]["detected"] = "pending"
+    _write_local(sample, local)
+    assert status.main(["--root", str(sample)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "LLM main: 가짜-비전-모델 @ 127.0.0.1 · 탐지: 탐지 대기" in out
+    assert "LLM fallback: 작은-모델 @ llm.example.invalid · 탐지: 탐지 안 됨" in out
+    info = status.collect(config.load(sample))
+    assert info["llm"]["profiles"]["main"]["detected"] == "pending"
+    assert info["llm"]["profiles"]["fallback"]["detected"] is None
+
+
+def test_compile_gave_up_counts_and_broken_ledger(vault, capsys):
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    assert status.compile_gave_up(cfg, []) == 0  # 원장 없음
+    (vault / ".state" / "compile.json").write_text(json.dumps(COMPILE_LEDGER, ensure_ascii=False), encoding="utf-8")
+    assert status.compile_gave_up(cfg, []) == 2
+    (vault / ".state" / "compile.json").write_text("{깨짐", encoding="utf-8")
+    problems: list[str] = []
+    assert status.compile_gave_up(cfg, problems) == 0
+    assert len(problems) == 1 and problems[0].startswith(".state/compile.json을 읽지 못했습니다")
+    assert status.main(["--root", str(vault)]) == 0  # 깨진 원장도 치명적이지 않다
+    assert "포기한 편찬 단위: 0개" in capsys.readouterr().out.splitlines()
+
+
 def test_summarize_detected():
     assert status.summarize_detected(None) == "탐지 안 됨"
     assert status.summarize_detected({}) == "탐지 안 됨"
+    assert status.summarize_detected("pending") == "탐지 대기"
+    assert status.summarize_detected("이상한 값") == "탐지 안 됨"
     assert status.summarize_detected({"vision": False, "reasoning_toggle": {"method": "none"}}) == "비전 아니오, 추론 토글 none"
     assert status.summarize_detected({"evidence": "x"}) == "기록됨"
 

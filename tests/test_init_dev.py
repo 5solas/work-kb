@@ -60,8 +60,11 @@ def test_writes_home_config_from_example(run_kb, vault, tmp_path, dev_env, mock_
     assert data["llm"]["profiles"]["mock"]["base_url"] == f"{mock_llm.base_url}/v1"
     assert data["jira"]["pat_ref"] == "keyring:work-kb/jira"
     assert data["confluence"]["pat_ref"] == "keyring:work-kb/confluence"
-    # main은 예시 그대로(D45)
-    assert data["llm"]["profiles"]["main"] == home["llm"]["profiles"]["main"]
+    # main은 예시 그대로(D45). 키(DEEPINFRA_API_KEY)가 없어 탐지는 미뤄 둔다: detected: pending(W4.6)
+    main = dict(data["llm"]["profiles"]["main"])
+    assert main.pop("detected") == "pending"
+    assert main == home["llm"]["profiles"]["main"]
+    assert "detected" not in data["llm"]["profiles"]["mock"]  # --dev는 main만 탐지
     assert data["jira"]["project_keys"] == home["jira"]["project_keys"]
 
     assert "mock-token" not in text
@@ -146,10 +149,15 @@ def test_from_env_without_values_fails_without_writing(run_kb, vault):
     assert not _local(vault).exists()
 
 
-def test_redetect_is_phase_message(run_kb):
+def test_redetect_runs_doctor_redetect(run_kb, vault):
+    # Phase 4(D48): init --redetect는 doctor --redetect와 같다. 에이전트 세션은 거부(7)
+    agent = run_kb("init", "--redetect", env={"KB_AGENT": "1"})
+    assert agent.returncode == 7
+    # config.local.yaml이 없으면 doctor의 그 점검이 ✗라 종료 1. 파일은 만들지 않는다
     result = run_kb("init", "--redetect")
-    assert result.returncode == 4
-    assert "Phase 4" in result.stdout
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert ("✗", "config.local.yaml") in [(s, n) for s, n, _ in _lines(result.stdout)]
+    assert not _local(vault).exists()
 
 
 def test_no_deepinfra_secret_in_file(run_kb, vault, dev_env):

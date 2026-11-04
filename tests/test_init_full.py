@@ -67,15 +67,16 @@ def _doctor_lines(stdout: str) -> dict[str, tuple[str, str]]:
 
 
 def test_home_path_end_to_end(vault, tmp_path, mock_jira, capsys):
-    script = Script(["home", mock_jira.base_url + "/", "1, 2"], [TOKEN])
+    script = Script(["home", mock_jira.base_url + "/", "1, 2", "n"], [TOKEN])  # 마지막: LLM 설정 안 함
     out: list[str] = []
     code = init.run_wizard(vault, ask=script.ask, ask_secret=script.ask_secret, out=out.append)
     stdout = capsys.readouterr().out
     assert code == 0, "\n".join(out) + stdout
 
-    # 묻는 순서: 환경 → 주소 → PAT(가림) → 프로젝트. 첫 실행이라 환경 기본값은 안전 쪽(company)
-    assert [p.split(" ")[0] for p, _ in script.asked] == ["환경", "Jira", "동기화할"]
+    # 묻는 순서: 환경 → 주소 → PAT(가림) → 프로젝트 → LLM 여부. 첫 실행이라 환경 기본값은 안전 쪽(company)
+    assert [p.split(" ")[0] for p, _ in script.asked] == ["환경", "Jira", "동기화할", "LLM을"]
     assert script.asked[0][1] == "company"
+    assert script.asked[3][1] == "y"  # llm 구역이 없으면 기본값은 설정하기
     assert script.asked[1][1] is None
     assert len(script.secret_prompts) == 1 and "PAT" in script.secret_prompts[0]
 
@@ -107,14 +108,14 @@ def test_home_path_end_to_end(vault, tmp_path, mock_jira, capsys):
 
 
 def test_rerun_shows_existing_values_as_defaults(vault, tmp_path, mock_jira):
-    first = Script(["home", mock_jira.base_url, "OPS"], [TOKEN])
+    first = Script(["home", mock_jira.base_url, "OPS", "n"], [TOKEN])
     assert init.run_wizard(vault, ask=first.ask, ask_secret=first.ask_secret, out=lambda _: None, run_doctor=False) == 0
     saved = _local(vault).read_bytes()
 
-    again = Script(["", "", ""], [""])  # 모두 Enter
+    again = Script(["", "", "", "n"], [""])  # 모두 Enter, LLM은 설정 안 함(llm 구역이 없어 기본값이 y)
     out: list[str] = []
     assert init.run_wizard(vault, ask=again.ask, ask_secret=again.ask_secret, out=out.append, run_doctor=False) == 0
-    assert [d for _, d in again.asked] == ["home", mock_jira.base_url, "OPS"]
+    assert [d for _, d in again.asked] == ["home", mock_jira.base_url, "OPS", "y"]
     assert "비우면 저장된 값 유지" in again.secret_prompts[0]
     assert any("기존 설정을 기본값으로" in line for line in out)
     assert any("저장된 PAT" in line for line in out)
@@ -129,9 +130,10 @@ def test_rerun_keeps_other_sections(vault, mock_jira):
         "llm": {"enabled": False, "profiles": {"mock": {"base_url": "http://127.0.0.1:9/v1", "model": "mock"}}},
     }
     config.save_local(vault, existing)
-    script = Script(["", "", "KB"], [TOKEN])
+    script = Script(["", "", "KB", ""], [TOKEN])  # LLM 질문도 Enter: llm 구역이 있으니 기본값 n
     out: list[str] = []
     assert init.run_wizard(vault, ask=script.ask, ask_secret=script.ask_secret, out=out.append, run_doctor=False) == 0
+    assert script.asked[-1][1] == "n"
     data = yaml.safe_load(_local(vault).read_text(encoding="utf-8"))
     assert data["confluence"] == existing["confluence"]
     assert data["llm"] == existing["llm"]
@@ -142,7 +144,7 @@ def test_company_path_warns_about_public_hosts(vault, mock_jira):
     example = init.load_example_block("home")  # 집에서 쓰던 공개 LLM 프로필이 남아 있는 경우
     example["jira"]["base_url"] = mock_jira.base_url
     config.save_local(vault, example)
-    script = Script(["company", "", "KB"], [TOKEN])
+    script = Script(["company", "", "KB", "n"], [TOKEN])
     out: list[str] = []
     assert init.run_wizard(vault, ask=script.ask, ask_secret=script.ask_secret, out=out.append, run_doctor=False) == 0
     assert script.asked[0] == ("환경 (home=집 개발용, company=회사)", "home")

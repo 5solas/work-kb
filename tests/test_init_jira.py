@@ -108,8 +108,9 @@ def test_from_env_writes_config_and_doctor_passes(run_kb, vault, tmp_path, mock_
     assert TOKEN not in text
     assert TOKEN not in result.stdout + result.stderr
     assert _keyring(tmp_path)["work-kb\njira"] == TOKEN
-    # Confluence·LLM 단계는 Phase 안내만
-    assert "Phase 5" in result.stdout and "Phase 4" in result.stdout
+    # Confluence는 Phase 안내만, LLM은 KB_INIT_LLM_URL이 없어 건너뛴다(llm 구역을 만들지 않음)
+    assert "Phase 5" in result.stdout
+    assert "KB_INIT_LLM_URL이 없어 LLM 단계를 건너뜁니다" in result.stdout
     # 이어서 doctor: Jira, 서버 버전, sprint 필드, JQL 4개
     lines = _lines(result.stdout)
     assert lines["Jira"][0] == "✓" and "홍길동" in lines["Jira"][1]
@@ -172,7 +173,7 @@ def test_rerun_same_pat_does_not_rewrite_keyring(vault, tmp_path, mock_jira, mon
     writes: list[tuple] = []
     real_store = kb_secrets.store
     monkeypatch.setattr(kb_secrets, "store", lambda *a: (writes.append(a), real_store(*a)))
-    script = Script(["home", mock_jira.base_url, "KB"], [TOKEN])  # 저장된 것과 같은 PAT를 다시 입력
+    script = Script(["home", mock_jira.base_url, "KB", "n"], [TOKEN])  # 저장된 것과 같은 PAT를 다시 입력, LLM은 안 함
     out: list[str] = []
     assert _wizard(vault, script, out) == 0
     assert writes == []
@@ -180,7 +181,7 @@ def test_rerun_same_pat_does_not_rewrite_keyring(vault, tmp_path, mock_jira, mon
 
 
 def test_saved_message_comes_before_config_saved(vault, tmp_path, mock_jira):
-    script = Script(["home", mock_jira.base_url, "KB"], [TOKEN])
+    script = Script(["home", mock_jira.base_url, "KB", "n"], [TOKEN])
     out: list[str] = []
     assert _wizard(vault, script, out) == 0
     stored = next(i for i, line in enumerate(out) if line.startswith("자격 증명 저장소에 저장했습니다"))
@@ -227,7 +228,7 @@ def test_flag_combinations_refused(run_kb, vault, mock_jira, flags):
     assert not _local(vault).exists()
 
 
-@pytest.mark.parametrize("section, phase", [("confluence", "Phase 5"), ("llm", "Phase 4")])
+@pytest.mark.parametrize("section, phase", [("confluence", "Phase 5")])  # llm 구역은 Phase 4부터 실제 단계(test_init_llm.py)
 def test_later_sections_print_phase_message(run_kb, vault, section, phase):
     result = run_kb("init", "--section", section)
     assert result.returncode == 4
@@ -261,7 +262,7 @@ def test_piped_eof_at_pat_prompt_cancels(run_kb, vault, tmp_path, mock_jira):
 
 
 def test_piped_pat_line_succeeds(run_kb, vault, tmp_path, mock_jira):
-    result = run_kb("init", stdin=f"home\n{mock_jira.base_url}\n{TOKEN}\n2\n", timeout=60)
+    result = run_kb("init", stdin=f"home\n{mock_jira.base_url}\n{TOKEN}\n2\nn\n", timeout=60)  # 마지막 n: LLM 설정 안 함
     assert result.returncode == 0, result.stdout + result.stderr
     assert TOKEN not in result.stdout + result.stderr
     assert _data(vault)["jira"]["project_keys"] == ["OPS"]
@@ -318,7 +319,7 @@ def test_section_jira_needs_existing_config(run_kb, vault, mock_jira):
 
 
 def test_interactive_retries_bad_pat_then_saves(vault, tmp_path, mock_jira):
-    script = Script(["home", mock_jira.base_url, "", "2"], ["wrong-pat-0000", TOKEN])
+    script = Script(["home", mock_jira.base_url, "", "2", "n"], ["wrong-pat-0000", TOKEN])
     out: list[str] = []
     assert _wizard(vault, script, out) == 0
     text = "\n".join(out)
@@ -332,7 +333,7 @@ def test_interactive_retries_bad_pat_then_saves(vault, tmp_path, mock_jira):
 
 
 def test_interactive_project_choice_reasks(vault, mock_jira):
-    script = Script(["home", mock_jira.base_url, "9", "ops, 1, OPS"], [TOKEN])
+    script = Script(["home", mock_jira.base_url, "9", "ops, 1, OPS", "n"], [TOKEN])
     out: list[str] = []
     assert _wizard(vault, script, out) == 0
     text = "\n".join(out)

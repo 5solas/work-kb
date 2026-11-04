@@ -391,10 +391,15 @@ def test_korean_vault_path_without_mojibake(run_kb, vault):
     assert not list((vault / ".state").glob(".doctor-*"))
 
 
-def test_redetect_is_phase_4_and_refused_for_agent(run_kb):
-    assert run_kb("doctor", "--redetect").returncode == 4
+def test_redetect_refused_for_agent_and_needs_local_config(run_kb, vault):
+    # Phase 4(D48): --redetect는 탐지를 다시 해서 config.local.yaml에 쓴다. 에이전트 세션은 거부(7)
     result = run_kb("doctor", "--redetect", env={"KB_AGENT": "1"})
     assert result.returncode == 7
+    # config.local.yaml이 없으면 그 점검이 ✗라 종료 1이고, 파일을 만들지 않는다
+    plain = run_kb("doctor", "--redetect")
+    assert plain.returncode == 1, plain.stdout + plain.stderr
+    assert _state(plain.stdout, "config.local.yaml")[0] == "✗"
+    assert not (vault / "config.local.yaml").exists()
     assert run_kb("doctor", "--json", env={"KB_AGENT": "1"}).returncode == 1  # 그냥 doctor는 허용
 
 

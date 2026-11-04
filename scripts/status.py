@@ -3,7 +3,8 @@
 한 줄에 한 항목, 한국어. 네트워크·비밀값 저장소는 쓰지 않고 파일만 읽는다. 아무것도 쓰지 않는다.
 항목: 환경, config.local.yaml, 오늘 daily, 마지막 동기화(.state/sync.json), outbox 대기·실패,
 미처리 제안(wiki/_proposals.md), 미처리 이미지(사이드카 없는 inbox 이미지와 daily에 임베드된
-raw/assets 이미지), LLM 프로필과 탐지 결과,
+raw/assets 이미지), 포기한 편찬 단위(.state/compile.json의 gave_up), LLM 프로필과 탐지 결과
+(`detected: pending`은 '탐지 대기'),
 잠금 소유자(.state/kb.lock), KB_AGENT.
 `--json`이면 같은 내용을 JSON 객체로 낸다(키는 collect() 참고).
 """
@@ -20,6 +21,9 @@ from lib.config import Config
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 NOT_DETECTED = "탐지 안 됨"
+PENDING_VALUE = "pending"  # init.DETECT_PENDING과 같은 값(init을 가져오지 않으려고 따로 둔다)
+DETECT_PENDING = "탐지 대기"  # detected: "pending"(init --dev가 키 없이 미뤄 둔 경우) → kb.py doctor --redetect
+COMPILE_LEDGER = "compile"  # .state/compile.json
 _LIST_ITEM = re.compile(r"^(?:[-*+] |\d+[.)] )")
 
 
@@ -147,8 +151,27 @@ def _yes(value: Any) -> str:
     return str(value)
 
 
+def compile_gave_up(cfg: Config, problems: list[str]) -> int:
+    """`.state/compile.json`에서 status가 gave_up인 편찬 단위 수. `_`로 시작하는 키(예: `_proposals`)는 작업이 아니다."""
+    try:
+        ledger = core.load_state(cfg.root, COMPILE_LEDGER)
+    except (core.KbError, OSError) as exc:
+        problems.append(f".state/compile.json을 읽지 못했습니다 ({exc})")
+        return 0
+    if not isinstance(ledger, Mapping):
+        return 0
+    count = 0
+    for task, units in ledger.items():
+        if str(task).startswith("_") or not isinstance(units, Mapping):
+            continue
+        count += sum(1 for record in units.values() if isinstance(record, Mapping) and record.get("status") == "gave_up")
+    return count
+
+
 def summarize_detected(detected: Any) -> str:
-    """`detected` 블록 한 줄 요약. 없으면 '탐지 안 됨'."""
+    """`detected` 블록 한 줄 요약. 없으면 '탐지 안 됨', `pending`이면 '탐지 대기'."""
+    if isinstance(detected, str) and detected.strip().lower() == PENDING_VALUE:
+        return DETECT_PENDING
     if not isinstance(detected, Mapping) or not detected:
         return NOT_DETECTED
     parts: list[str] = []
@@ -163,6 +186,15 @@ def summarize_detected(detected: Any) -> str:
     if isinstance(tokens, int) and not isinstance(tokens, bool):
         parts.append(f"컨텍스트 {tokens:,}")
     return ", ".join(parts) or "기록됨"
+
+
+def _detected_json(detected: Any) -> dict | str | None:
+    """--json의 detected: 블록이면 사본, `pending`이면 문자열 "pending", 그 밖은 None(탐지 안 됨)."""
+    if isinstance(detected, Mapping) and detected:
+        return dict(detected)
+    if summarize_detected(detected) == DETECT_PENDING:
+        return PENDING_VALUE
+    return None
 
 
 def llm_info(cfg: Config, problems: list[str]) -> dict[str, Any]:
@@ -185,7 +217,7 @@ def llm_info(cfg: Config, problems: list[str]) -> dict[str, Any]:
             "model": str(profile["model"]) if profile.get("model") else None,
             "host": config.checked_host(url) if url else None,
             "public_host": bool(url) and config.is_public_host(url, cfg.blocklist),
-            "detected": dict(detected) if isinstance(detected, Mapping) and detected else None,
+            "detected": _detected_json(detected),
             "detected_summary": summarize_detected(detected),
         }
     return info
@@ -217,7 +249,7 @@ def lock_holder(root: Path) -> str | None:
 
 def collect(cfg: Config) -> dict[str, Any]:
     """상태 사전. 키: environment, local_config, vault, agent, today, last_sync, outbox,
-    proposals, images, llm, lock, problems."""
+    proposals, images, compile_gave_up, llm, lock, problems."""
     problems: list[str] = []
     day = core.now(cfg.tz).date()
     daily = notes.daily_path(cfg, day)
@@ -231,6 +263,7 @@ def collect(cfg: Config) -> dict[str, Any]:
         "outbox": outbox_counts(cfg, problems),
         "proposals": pending_proposals(cfg, problems),
         "images": unprocessed_images(cfg),
+        "compile_gave_up": compile_gave_up(cfg, problems),
         "llm": llm_info(cfg, problems),
         "lock": lock_holder(cfg.root),
         "problems": problems,
@@ -254,6 +287,8 @@ def render(info: Mapping[str, Any]) -> list[str]:
     lines.append(f"outbox: 대기 {outbox['pending']}개, 전송 중 {outbox.get('sending', 0)}개, 실패 {outbox['failed']}개")
     lines.append(f"미처리 제안: {info['proposals']}개")
     lines.append(f"미처리 이미지: {info['images']}개")
+    gave_up = info.get("compile_gave_up", 0)
+    lines.append(f"포기한 편찬 단위: {gave_up}개" + (" → 입력이 바뀌면 다시 시도, 지금 다시 하려면 kb.py compile --force" if gave_up else ""))
     llm = info["llm"]
     if llm["enabled"]:
         order = " → ".join(llm["fallback_order"]) or "없음"

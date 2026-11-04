@@ -208,7 +208,21 @@ Opus 3명 독립 검토 → 16건 → 전부 수정. 추가 결정(위 표를 �
 - **compile**: T1은 묶음 요청(`max_output_tokens` 64는 줄당 값, 40줄 묶음). 기본 범위는 오늘 포함 최근 7일, `--since 0`은 전체. T4는 처음·7일 경과·`--task topic_proposal`·`--force`에 실행. 입력이 바뀌지 않은 단위는 다시 부르지 않으며(HTTP 0회), 같은 입력에서 3회 건너뛰면 `gave_up`. T2 중복 표식 `<!-- src:HASH -->`(rel+줄 해시). `[>]` 줄은 입력에서 제외. `related`의 키는 project_keys 밖이면 제거, 사람은 입력에 `@이름`이 있을 때만. T3 출처는 입력 id·현재 요약·입력의 Jira 키만.
 - **ingest**: 자산 이름은 `YYYY-MM-DD-HHMM-<link_safe 원래이름>.<ext>`(인제스트 시각). daily가 가리키는 inbox 이미지는 옮기지 않는다(링크 보존). inbox 중복은 `_trash/`(LLM 호출 없음), 임베드 중복은 `duplicate_of` 사이드카. 원장 `.state/images.json`은 사이드카에서 재구성 가능. 사람은 이미지 글이나 힌트 줄에 있는 이름만. `extracted` 구역의 읽은 글은 줄마다 `- ` 접두(마커·제목·펜스로 오인 방지). 허구 이미지 3장은 `tests/fixtures/make_images.py`(pillow, 맑은 고딕)로 생성.
 - **init/doctor**: 마법사 4단계 LLM(처음엔 기본 y, 기존 설정 있으면 n). 회사 가드는 키 입력 전에 실행하고, 탐지는 설정 중인 프로필 하나만 담은 설정으로 한다(남아 있는 공개 프로필이 사내 프로필 설정을 막지 않게). `--dev`는 main 키가 풀리면 탐지하고 아니면 `detected: pending`. `init --redetect` = `doctor --redetect`(KB_AGENT=1 거부). 기본 doctor는 저장하지 않고 프로필당 ≤3회(토글 끔+JSON → 켬 → 비전)로 기록된 탐지를 재검증(D48).
-- **Emacs**: `g`는 ingest 뒤 compile(ingest 실패해도 compile, 단 종료 5면 건너뜀), `C-u g`는 둘 다 `--dry-run`; `a`는 `_proposals.md`를 열고 번호/`all` 입력 후 `y-or-n-p` → `proposals accept`. `work-kb--run`의 process mark 버그(버퍼 인수 누락) 수정. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
+- **Emacs**: `g`는 ingest 뒤 compile(ingest 실패해도 compile, 단 종료 5면 건너뜀), `C-u g`는 둘 다 `--dry-run`; `a`는 `_proposals.md`를 열고 번호/`all` 입력 후 `y-or-n-p` → `proposals accept`. `work-kb--run`의 process mark 버그(버퍼 인수 누락) 수정.
+- **통합**: LLM 호출 모듈은 `lib.net`을 import조차 하지 않는다(가드 테스트; `llm_detect`는 자체 `_error_text`). status: `detected: pending` → "탐지 대기", `포기한 편찬 단위 N개`(`compile.json`의 `gave_up`, `_` 키 제외). link 색인에 `### 태그` 절(원장의 ok 태그 수, 많은 순; 원장이 그대로면 쓰기 0). 샘플 볼트에 이미지 2장(inbox 드롭 1, daily 임베드 1).
+
+### Phase 4 실 모델 검증 (2026-11-05, DeepInfra, 허구 fixture만, `tests/test_live.py`, 상세 `docs/LIVE.md`)
+
+5개 통과(.venv·.venv313 각 1회), 채팅 POST 10회 + GET 6회(상한 20).
+
+- **추론 토글(Nemotron 3.5 Super VL)**: `method: param`, `param_name: reasoning_effort`, 켜기 `medium` / 끄기 `none`. §6.11 후보 1에서 양방향 흔적으로 확정. 탐지 POST 5회(기준선 1 + 토글 2 + JSON 1 + 비전 1), 약 6초.
+- **생각 필드**: `message.reasoning_content`(content 안 `<think>` 없음). `usage.completion_tokens_details.reasoning_tokens`도 옴(켜짐 86, 꺼짐 0). 기준선(토글 없음)은 생각 켜짐.
+- **JSON 모드**: `response_format: json_object` 동작. `reasoning_effort: medium` + `response_format`도 400 없이 content에 JSON → D38 재시도는 DeepInfra에서 발동하지 않음.
+- **비전**: 빨강 PNG → "빨강". T6 화이트보드(허구)에서 `KB-12`·`김철수` 읽음(kind photo).
+- **컨텍스트**: `/models` `metadata.context_length` = 262144(`context_source: models`).
+- **대체 프로필**: 없는 모델 id는 **404** `model_not_found`(400 아님) → `run_task`가 fallback(Gemma)으로 넘어가 ok. Gemma는 탐지 블록 없이 프롬프트 강제 JSON으로 보냈고 생각 필드 없이 JSON을 줌.
+- **출력 예산**: T1 묶음 28/2560 토큰, T2 1340(생각 1233)/8192, T6 153~175/2048. 충분.
+- 미확인: 429·5xx 처리(발생 안 함), Gemma 탐지(안 돌림), 시간에 따른 API 변동. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 

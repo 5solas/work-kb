@@ -3,7 +3,8 @@
 - 원천: `daily/*.md`, `inbox/*.md`(이미지 사이드카 포함). 코드 블록·인라인 코드·URL·front matter와
   관리 구역은 건너뛴다. 단 `extracted` 구역(이미지 추출 텍스트)은 매칭한다(정규화는 하지 않음).
 - 대상: `jira/KEY.md`(없으면 `stub: true` 최소 페이지), `wiki/projects/<프로젝트>.md`,
-  `wiki/people/<이름>.md`의 `mentions` 구역. `wiki/index.md`의 `index` 구역.
+  `wiki/people/<이름>.md`의 `mentions` 구역. `wiki/index.md`의 `index` 구역(compile 원장
+  `.state/compile.json`에 ok인 태그가 있으면 `### 태그` 절에 태그별 줄 수, D22).
 - 각 구역은 모든 원천의 순수 함수다(D20). 원장 `.state/links.json`({원천: {줄 해시: [대상]}})과
   `.state/links_cache.json`(파일 sha256별 추출 결과)은 다시 만들 수 있는 캐시일 뿐이고,
   구역 내용은 캐시 이력에 기대지 않는다. 크기·수정 시각이 캐시와 같은 원천은 열지 않고(웜 실행 예산),
@@ -24,6 +25,7 @@ import re
 import stat
 import sys
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -34,6 +36,7 @@ from lib.config import Config
 CACHE_VERSION = 1
 LEDGER = "links"  # .state/links.json
 CACHE = "links_cache"  # .state/links_cache.json
+COMPILE_LEDGER = "compile"  # .state/compile.json (compile이 쓰고 link는 태그 개수만 읽는다, D22)
 MAX_TEXT = 120
 MANAGED_DIRS = (("jira",), ("wiki", "projects"), ("wiki", "people"))
 STUB_KEY = re.compile(r"^([A-Z][A-Z0-9_]+)-(\d+)$")
@@ -507,7 +510,30 @@ def _index_body(ctx: _Ctx, sources: list[Source], pages: dict[str, list[Entry]],
         lines.append("- (없음)")
     lines += ["", "### 주제"]
     lines += [f"- [[topics/{t}|{t}]]" for t in topics] or ["- (없음)"]
+    tags = tag_counts(ctx.cfg.root)
+    if tags:  # D22: 태그는 compile 원장에만 있고, 있을 때만 개수를 그린다
+        lines += ["", "### 태그"]
+        lines += [f"- {tag} · {n}줄" for tag, n in tags]
     return "\n".join(lines)
+
+
+def tag_counts(root: Path) -> list[tuple[str, int]]:
+    """`.state/compile.json`의 `tag` 단위 중 status ok인 것의 태그별 줄 수. 많은 순, 같으면 이름순.
+
+    원장이 없거나 손상되었으면 빈 목록(색인에 태그 절을 그리지 않는다). link는 원장을 읽기만 한다.
+    """
+    units = _load_json_state(root, COMPILE_LEDGER).get("tag")
+    if not isinstance(units, dict):
+        return []
+    counts: dict[str, int] = {}
+    for record in units.values():
+        if not isinstance(record, dict) or record.get("status") != "ok":
+            continue
+        tag = record.get("tag")
+        if isinstance(tag, str) and tag.strip():
+            tag = unicodedata.normalize("NFC", tag.strip())
+            counts[tag] = counts.get(tag, 0) + 1
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
 def _read_source(

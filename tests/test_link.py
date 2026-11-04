@@ -222,6 +222,59 @@ def test_index_region_counts_and_date_range(basic, vault):
     assert "- [[people/이영희|이영희]] · 언급 1" in lines
 
 
+def _compile_ledger(vault: Path, tag_units: dict) -> None:
+    ledger = {
+        "tag": tag_units,
+        "decisions": {"daily/2026-11-04.md": {"status": "ok", "tag": "무시"}},  # tag 작업이 아님
+        "_proposals": {"next_id": 1, "items": {}},
+    }
+    (vault / ".state" / "compile.json").write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+
+
+def test_index_tag_counts_from_compile_ledger(basic, vault):
+    """D22: 태그는 compile 원장에만 있고, link가 index에 태그별 개수를 그린다. 원장이 그대로면 쓰지 않는다."""
+    link.run(basic)
+    assert "### 태그" not in _region(vault / "wiki" / "index.md", "index")  # 원장 없음 → 절 없음
+    _compile_ledger(
+        vault,
+        {
+            "daily/2026-11-04.md#a1": {"status": "ok", "tag": "결정"},
+            "daily/2026-11-04.md#a2": {"status": "ok", "tag": "회의"},
+            "daily/2026-11-05.md#a3": {"status": "ok", "tag": "결정"},
+            "daily/2026-11-05.md#a4": {"status": "ok", "tag": "이슈"},
+            "daily/2026-11-05.md#a5": {"status": "skipped", "tag": "회의"},  # ok만 센다
+            "daily/2026-11-05.md#a6": {"status": "gave_up", "skips": 3},
+            "daily/2026-11-05.md#a7": {"status": "ok"},  # 태그 없음
+        },
+    )
+    summary = link.run(basic)
+    assert summary["written"] == ["wiki/index.md", ".state/links_cache.json"]
+    lines = _region(vault / "wiki" / "index.md", "index")
+    at = lines.index("### 태그")
+    assert lines[at - 1] == "" and lines[at + 1:] == ["- 결정 · 2줄", "- 이슈 · 1줄", "- 회의 · 1줄"]
+    assert "무시" not in "\n".join(lines)
+
+    # 원장이 그대로면 바이트·수정 시각까지 그대로(쓰지 않음)
+    before = _snapshot(vault)
+    again = link.run(basic)
+    assert again["written"] == [] and again["pages_updated"] == 0
+    assert _snapshot(vault) == before
+
+    # 원장이 바뀌면 index만 다시 쓴다
+    _compile_ledger(vault, {"daily/2026-11-04.md#a1": {"status": "ok", "tag": "회의"}})
+    third = link.run(basic)
+    assert "wiki/index.md" in third["written"] and third["pages_updated"] == 1
+    lines = _region(vault / "wiki" / "index.md", "index")
+    assert lines[lines.index("### 태그") + 1:] == ["- 회의 · 1줄"]
+
+
+def test_index_ignores_broken_compile_ledger(basic, vault):
+    (vault / ".state" / "compile.json").write_text("{깨짐", encoding="utf-8")
+    link.run(basic)
+    assert "### 태그" not in _region(vault / "wiki" / "index.md", "index")
+    assert (vault / ".state" / "compile.json").read_text(encoding="utf-8") == "{깨짐"  # link는 원장을 쓰지 않는다
+
+
 def test_entry_text_truncation_embed_and_missing_time(vault, fake_now):
     fake_now(NOW)
     cfg = _setup(vault)
