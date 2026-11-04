@@ -1,0 +1,32 @@
+# 지시서 §4
+config.local.yaml
+.state/
+jira/.cache.sqlite*
+.env
+_trash/
+wheels/
+
+# 도구
+.venv*/
+__pycache__/
+.pytest_cache/
+.obsidian/
+
+# 앱이 생성하는 볼트 내용 (코드 저장소와 분리, docs/DECISIONS.md 참고)
+/daily/*.md
+/inbox/*
+/raw/assets/*
+/jira/*.md
+/jira/_views/*.md
+/jira/outbox.jsonl
+/wiki/index.md
+/wiki/decisions.md
+/wiki/actions.md
+/wiki/_proposals.md
+/wiki/_lint.md
+/wiki/projects/*.md
+/wiki/people/*.md
+/wiki/topics/*.md
+
+# 빈 폴더 유지
+!**/.gitkeep
