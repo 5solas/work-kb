@@ -138,6 +138,38 @@ def test_paging_survives_server_cap(sleeps):
     assert [c["startAt"] for c in search_log(server)] == ["0", "3", "6", "9", "12"]
 
 
+def test_paging_skips_key_repeated_across_pages(sleeps):
+    # 페이지를 넘기는 사이 이슈가 앞으로 옮겨져 앞 페이지의 마지막 이슈가 다시 온다
+    with mock_jira.start(repeat_page_boundary=True) as server:
+        client = JiraClient(server.base_url, "t", conn={"trust_env": False}, page_size=4)
+        found = list(client.search("project in (KB, OPS)", fields=["summary"]))
+        pages = [c["startAt"] for c in search_log(server)]
+    assert keys(found) == ALL_KEYS_ASC  # 키마다 한 번, 빠짐없이
+    assert pages == ["0", "4", "8", "12"]
+
+
+def test_mock_repeat_page_boundary_overlaps():
+    # 시험이 의미 있는지: 이 모드에서 두 번째 페이지는 첫 페이지의 마지막 이슈로 시작한다
+    with mock_jira.start(repeat_page_boundary=True) as server:
+        client = JiraClient(server.base_url, "t", conn={"trust_env": False}, page_size=4)
+        first = client._search_page("project = KB ORDER BY key ASC", 0, 4, "summary")
+        second = client._search_page("project = KB ORDER BY key ASC", 4, 4, "summary")
+    assert keys(second["issues"])[0] == keys(first["issues"])[-1] == "KB-9"
+
+
+def test_mock_move_and_remove(jira):
+    client = client_for(jira)
+    jira.move("KB-12", "OPS-40")
+    jira.remove("KB-3")
+    moved = client.issue("KB-12")  # 옛 키 → 새 이슈(Jira처럼)
+    assert moved["key"] == "OPS-40" and moved["fields"]["project"]["key"] == "OPS"
+    assert keys(client.search("key in (KB-12, KB-5)", fields=["summary"])) == ["KB-5", "OPS-40"]
+    with pytest.raises(NotFoundError):
+        client.issue("KB-3")
+    with pytest.raises(JqlError):
+        client.search("key in (KB-3, KB-5)", fields=["summary"])
+
+
 def test_search_first_page_errors_raise_at_call(jira):
     client = client_for(jira)
     with pytest.raises(JqlError):
@@ -242,6 +274,12 @@ def test_parse_sprint_string_form():
     assert parse_sprint([comma]) == "OPS 스프린트 3, 야간"
     assert parse_sprint(f"{SP}@1[id=1,state=ACTIVE,name=<null>]") is None
     assert parse_sprint(None) is None and parse_sprint([]) is None and parse_sprint(42) is None
+    # goal(자유 글)에 든 `,name=`·`,state=`가 앞의 진짜 값을 덮지 못한다(첫 값이 이긴다)
+    hostile = f"{SP}@5c1d2e[id=5,rapidViewId=2,state=ACTIVE,name=KB 스프린트 7,startDate=<null>,goal=릴리스 준비,name=X,state=CLOSED,synced=false]"
+    assert parse_sprint([hostile]) == "KB 스프린트 7"
+    closed = f"{SP}@1[id=4,state=CLOSED,name=KB 스프린트 6,goal=a,state=ACTIVE,name=가짜]"
+    assert parse_sprint([closed, hostile]) == "KB 스프린트 7"  # 가짜 ACTIVE로 뽑히지 않는다
+    assert parse_sprint([closed]) == "KB 스프린트 6"
 
 
 def test_parse_sprint_object_form():

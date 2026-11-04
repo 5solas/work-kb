@@ -164,6 +164,7 @@ ISSUE_FILES = {
     "jira/KB-13.md": ({"key": "KB-13", "project": "KB", "status": "To Do", "status_category": "new"}, True),
     "jira/OPS-3.md": ({"key": "OPS-3", "project": "OPS", "status": "Blocked", "status_category": "indeterminate"}, True),
     "jira/KB-1.md": ({"key": "KB-1", "project": "KB", "status": "Done", "status_category": "done"}, False),
+    "jira/KB-20.md": ({"key": "KB-20", "project": "KB", "status": "In Progress", "status_category": "indeterminate", "in_scope": False}, False),
     "jira/KB-99.md": ({"key": "KB-99", "stub": True}, False),
     "jira/_views/today.md": ({"view": "today", "jql": "x", "status_category": "new"}, False),
     "jira/_views/일감.base": ({}, False),

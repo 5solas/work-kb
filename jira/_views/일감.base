@@ -1,6 +1,7 @@
 # Obsidian Bases: Jira 일감 캐시 (jira/KEY.md, jira_sync가 생성)
 # 문법: obsidian-help commit 578f73cc (2026-10-23), Obsidian 1.15.0 기준. D64, 지시서 §6.9.
 # 미완료만: status_category가 있는 파일(스텁 제외) 중 done이 아닌 것. _views 표는 제외.
+# in_scope 속성이 있는 파일(동기화 범위에서 빠지거나 옮겨진 일감, jira_sync가 in_scope: false로 표시)도 제외.
 # 키 열은 file.name(= jira/KEY.md의 KEY, front matter key와 같음)이라 눌러서 연다.
 # sort는 문서에 없는 뷰 상태 키다(앱이 정렬을 저장하는 형식). 앱에서 열어 확인한다.
 filters:
@@ -10,6 +11,7 @@ filters:
         - file.inFolder("jira/_views")
     - file.hasProperty("status_category")
     - 'status_category != "done"'
+    - '!file.hasProperty("in_scope")'
 properties:
   file.name:
     displayName: 키

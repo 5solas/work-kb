@@ -1,8 +1,13 @@
 """Jira 읽기 동기화 (`kb.py sync`, 별칭 `jira_sync`). Phase 2, 지시서 §6.2, D23·D49·D50·D51·D63.
 
 - 범위: `project in ("KB","OPS") AND (<jql_mine>)`(D49). 증분은 `AND updated >= '-Nm'`,
-  N = 마지막 동기화(실행 시작 시각) 뒤 지난 분 + 5(D50). 마지막 동기화가 없거나 25일보다 오래됐거나
-  검색 캐시가 없으면 전체. `--full`은 언제나 전체.
+  N = 마지막 동기화(실행 시작 시각) 뒤 지난 분 + 5(D50). 다음이면 전체: `--full`, 검색 캐시 없음,
+  범위(project_keys·jql_mine)가 지난 동기화와 다름, 마지막 동기화가 없거나 25일보다 오래됐거나 미래(시계가
+  뒤로 감), 마지막 전체 동기화가 `jira.full_every_hours`(기본 24)시간보다 오래됨.
+- 전체 동기화는 범위가 돌려주지 않은 로컬 일감(동기화됨·stub 아님·완료 아님)을 `key in (…)`(범위로 감싸지
+  않음, 50개씩)으로 다시 받아 고친 뒤 front matter `in_scope: false`를 단다. Jira에 없으면(404) 기존 파일에
+  `in_scope: false`만, 다른 키로 옮겨졌으면 `moved_to: 새 키`도 달고 새 키 파일을 쓴다. `in_scope: false`인
+  일감은 프로젝트 표와 검색 캐시에서 빠진다. `--key KB-12`가 OPS-40을 받으면 KB-12.md에 같은 표시를 한다.
 - 이슈마다 `jira/KEY.md`(§5.3)를 통째로 다시 만든다. `mentions` 구역만 바이트 그대로 둔다(D23).
   내용이 그대로면 쓰지 않는다(`synced_at`만 바뀌는 쓰기를 하지 않음).
 - `jira.views` → `jira/_views/<이름>.md` 표(notes.VIEW_COLUMNS 형식). 뷰 JQL이 400이면 Jira의
@@ -10,8 +15,8 @@
 - 프로젝트 페이지(`wiki/projects/KEY.md`)의 `issues` 구역: 열린 일감(상태 범주 done 제외)을
   갱신 시각 내림차순으로. 구역이 바뀐 때만 front matter `updated`를 오늘로.
 - 검색 캐시 `jira/.cache.sqlite`(lib/fts.py).
-- `.state/sync.json`: {last_sync, last_full, counts}. 쓰지 못한 이슈 파일이 있으면 last_sync를
-  옮기지 않는다(다음 증분이 같은 구간을 다시 받는다).
+- `.state/sync.json`: {last_sync, last_full, last_run, scope, counts}. `scope`는 범위의 해시. 쓰지 못한
+  이슈 파일이 있으면 last_sync·scope를 옮기지 않는다(다음 증분이 같은 구간을 다시 받는다).
 
 네트워크는 잠금 밖에서 모두 끝내고, 쓰기만 `core.kb_lock` 안에서 한다(D26). daily·inbox·raw는
 건드리지 않는다. 종료 코드: 0 / 2 인증 / 3 네트워크 / 4 설정·JQL·없는 키 / 6 잠금.
@@ -19,6 +24,8 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import math
 import re
 import sys
@@ -33,6 +40,8 @@ from lib.jira_client import JiraClient, JqlError, NotFoundError, parse_datetime,
 STATE = "sync"
 LOCK_OWNER = "jira_sync"
 FULL_AFTER = dt.timedelta(days=25)
+FULL_EVERY_HOURS = 24  # jira.full_every_hours 기본값: 마지막 전체 동기화가 이보다 오래면 전체
+OUT_OF_SCOPE_BATCH = 50  # 범위 밖 일감을 다시 받을 때 `key in (…)` 하나에 넣는 키 수
 MARGIN_MINUTES = 5
 COMMENT_CHARS = 200
 BOM = b"\xef\xbb\xbf"
@@ -70,6 +79,7 @@ class IssueDoc:
     description: str  # 마크다운(변환 실패 시 원문 울타리)
     comment_lines: list[str]
     comment_text: str  # 검색 캐시용 댓글 전문
+    in_scope: bool = True  # False면 front matter `in_scope: false`(프로젝트 표·캐시에서 빠짐)
 
     def record(self) -> dict[str, str]:
         """표·캐시에 쓰는 요약."""
@@ -211,23 +221,27 @@ def build_doc(
         body = str(comment.get("body") or "").strip()
         if body:
             texts.append(f"{_person(comment.get('author'))}: {body}")
+    # front matter의 글자 값은 모두 한 줄로(NEL·U+2028·U+2029·CR·LF → 공백). YAML이 줄바꿈 문자를 접어
+    # 다시 읽은 값이 Jira 값과 달라지지 않게.
+    labels = (_one_line(x) for x in fields.get("labels") or [])
+    components = (_one_line(_named(c)) for c in fields.get("components") or [])
     return IssueDoc(
         key=key,
-        project=_text(project.get("key")) or key.split("-", 1)[0],
-        project_name=_text(project.get("name")),
+        project=_one_line(_text(project.get("key"))) or key.split("-", 1)[0],
+        project_name=_one_line(_text(project.get("name"))),
         summary=_one_line(fields.get("summary")),
-        status=_named(status),
-        status_category=_text(category.get("key")),
-        issuetype=_named(fields.get("issuetype")),
-        priority=_named(fields.get("priority")),
-        assignee=_person(fields.get("assignee")),
-        reporter=_person(fields.get("reporter")),
-        sprint=(parse_sprint(fields.get(sprint_field)) or "") if sprint_field else "",
-        labels=[str(x) for x in fields.get("labels") or [] if str(x).strip()],
-        components=[name for name in (_named(c) for c in fields.get("components") or []) if name],
-        created=_iso(fields.get("created")),
-        updated=_iso(fields.get("updated")),
-        due=_text(fields.get("duedate")),
+        status=_one_line(_named(status)),
+        status_category=_one_line(_text(category.get("key"))),
+        issuetype=_one_line(_named(fields.get("issuetype"))),
+        priority=_one_line(_named(fields.get("priority"))),
+        assignee=_one_line(_person(fields.get("assignee"))),
+        reporter=_one_line(_person(fields.get("reporter"))),
+        sprint=_one_line(parse_sprint(fields.get(sprint_field))) if sprint_field else "",
+        labels=[x for x in labels if x],
+        components=[x for x in components if x],
+        created=_one_line(_iso(fields.get("created"))),
+        updated=_one_line(_iso(fields.get("updated"))),
+        due=_one_line(_text(fields.get("duedate"))),
         url=f"{base_url.rstrip('/')}/browse/{key}",
         description=description.strip("\n"),
         comment_lines=[_comment_line(c, tz) for c in comments],
@@ -254,6 +268,7 @@ def render_doc(doc: IssueDoc, stamp: dt.datetime) -> str:
         "updated": doc.updated,
         "due": doc.due,
         "url": doc.url,
+        "in_scope": None if doc.in_scope else False,  # 범위 안이면 쓰지 않는다(기존 파일 그대로)
         "synced_at": stamp.isoformat(timespec="seconds"),
     }
     head = frontmatter.render(fields).decode("utf-8")
@@ -382,11 +397,37 @@ def write_issues(cfg: Config, docs: Iterable[IssueDoc], stamp: dt.datetime, *, d
     return report
 
 
-def update_cache(cfg: Config, docs: Iterable[IssueDoc]) -> int:
-    rows = [doc.cache_row() for doc in docs]
-    if not rows:
+def mark_files(cfg: Config, marks: Mapping[str, Mapping[str, Any]], *, dry_run: bool = False) -> Report:
+    """기존 jira/KEY.md의 front matter에 표시(`in_scope: false`, `moved_to`)만 단다. 파일이 없으면 넘어간다."""
+    report = Report()
+    for key in sorted(marks):
+        rel = f"jira/{key}.md"
+        path = cfg.path("jira", f"{key}.md")
+        try:
+            old = _read(path)
+            if old is None:
+                continue
+            new = frontmatter.set_fields(old, marks[key])
+        except OSError as exc:
+            report.skipped.append((rel, f"읽지 못함: {exc}"))
+            continue
+        except core.KbError as exc:
+            report.skipped.append((rel, f"front matter 오류라 고치지 않음: {exc}"))
+            continue
+        _write(path, rel, None if new == old else new, old, report, dry_run=dry_run)
+    return report
+
+
+def update_cache(cfg: Config, docs: Iterable[IssueDoc], *, drop: Iterable[str] = ()) -> int:
+    """범위 안 문서는 넣거나 바꾸고, 범위 밖 문서와 drop 키는 지운다."""
+    docs = list(docs)
+    rows = [doc.cache_row() for doc in docs if doc.in_scope]
+    gone = sorted({doc.key for doc in docs if not doc.in_scope} | set(drop))
+    if not rows and not gone:
         return 0
     with fts.open_cache(cfg) as cache:
+        if gone:
+            cache.delete(gone)
         return cache.upsert(rows)
 
 
@@ -484,8 +525,12 @@ def write_views(cfg: Config, views: Iterable[ViewResult], stamp: dt.datetime, *,
     return report
 
 
+def _out_of_scope(meta: Mapping[str, Any]) -> bool:
+    return str(meta.get("in_scope", "")).strip().lower() == "false"
+
+
 def _disk_records(cfg: Config) -> dict[str, dict[str, str]]:
-    """jira/*.md front matter의 요약(동기화된 것만, stub 제외)."""
+    """jira/*.md front matter의 요약(동기화된 것만, stub·`in_scope: false` 제외)."""
     out: dict[str, dict[str, str]] = {}
     base = cfg.path("jira")
     if not base.is_dir():
@@ -497,7 +542,7 @@ def _disk_records(cfg: Config) -> dict[str, dict[str, str]]:
             meta = frontmatter.parse(path.read_bytes())
         except (OSError, core.KbError):
             continue
-        if str(meta.get("stub", "")).strip().lower() == "true" or not meta.get("status_category"):
+        if str(meta.get("stub", "")).strip().lower() == "true" or not meta.get("status_category") or _out_of_scope(meta):
             continue
         out[path.stem] = {name: str(meta.get(name) or "") for name in ("key", "project", "summary", "status", "status_category", "assignee", "updated", "due")}
         out[path.stem]["key"] = path.stem
@@ -515,8 +560,12 @@ def _sort_stamp(value: str) -> float:
 
 
 def project_rows(records: Mapping[str, Mapping[str, str]], project: str) -> list[Mapping[str, str]]:
-    """열린(상태 범주 done 아님) 일감, 갱신 내림차순(같으면 키 순)."""
-    rows = [r for r in records.values() if r.get("project") == project and r.get("status_category") != "done"]
+    """열린(상태 범주 done 아님, 범위 안) 일감, 갱신 내림차순(같으면 키 순)."""
+    rows = [
+        r
+        for r in records.values()
+        if r.get("project") == project and r.get("status_category") != "done" and not _out_of_scope(r)
+    ]
     rows.sort(key=lambda r: r["key"])
     rows.sort(key=lambda r: _sort_stamp(r.get("updated", "")), reverse=True)
     return rows
@@ -527,14 +576,23 @@ def update_projects(
     projects: Iterable[str],
     docs: Iterable[IssueDoc],
     *,
+    exclude: Iterable[str] = (),
     dry_run: bool = False,
 ) -> Report:
-    """프로젝트 페이지의 `issues` 구역. 없으면 notes.ensure_page로 만든다(시험 실행이면 만들지 않음)."""
+    """프로젝트 페이지의 `issues` 구역. 없으면 notes.ensure_page로 만든다(시험 실행이면 만들지 않음).
+
+    범위 밖 문서(in_scope False)와 exclude 키(없어짐·옮겨짐 표시를 단 파일)는 표에서 뺀다.
+    """
     report = Report()
     docs = list(docs)
     records = _disk_records(cfg)
     for doc in docs:
-        records[doc.key] = doc.record()
+        if doc.in_scope:
+            records[doc.key] = doc.record()
+        else:
+            records.pop(doc.key, None)
+    for key in exclude:
+        records.pop(key, None)
     names = {doc.project: doc.project_name for doc in docs if doc.project_name}
     today = core.now(cfg.tz).date().isoformat()
     for project in projects:
@@ -579,15 +637,48 @@ def scope_jql(cfg: Config) -> str:
     return f"project in ({','.join(quote_jql(k) for k in keys)}) AND ({mine.strip()})"
 
 
+def scope_hash(cfg: Config) -> str:
+    """범위(정렬한 project_keys, jql_mine)의 해시. 바뀌면 다음 동기화는 전체."""
+    mine = cfg.get("jira.jql_mine")
+    data = json.dumps([sorted(cfg.project_keys), mine.strip() if isinstance(mine, str) else ""], ensure_ascii=False)
+    return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def full_every(cfg: Config) -> dt.timedelta:
+    """`jira.full_every_hours`(기본 24): 마지막 전체 동기화가 이보다 오래면 전체."""
+    raw = cfg.get("jira.full_every_hours")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        raw = FULL_EVERY_HOURS
+    try:
+        hours = float(raw) if not isinstance(raw, bool) else math.nan
+    except (TypeError, ValueError):
+        hours = math.nan
+    if not math.isfinite(hours) or hours <= 0:
+        raise core.ConfigError(f"jira.full_every_hours: 0보다 큰 시간(숫자)이어야 합니다 (지금 값: {raw!r})")
+    return dt.timedelta(hours=hours)
+
+
+def _state_time(state: Mapping[str, Any], name: str, tz: dt.tzinfo) -> dt.datetime | None:
+    value = state.get(name)
+    return _local(value, tz) if isinstance(value, str) else None
+
+
 def plan_scope(cfg: Config, state: Mapping[str, Any], start: dt.datetime, *, full: bool) -> tuple[str, str]:
     """(종류 'full'|'incremental', JQL). D50."""
     base = scope_jql(cfg)
+    every = full_every(cfg)
     if full:
         return "full", base
     if not fts.cache_path(cfg).exists():
         return "full", base
-    last = _local(state.get("last_sync"), cfg.tz) if isinstance(state.get("last_sync"), str) else None
-    if last is None or start - last > FULL_AFTER:
+    if state.get("scope") != scope_hash(cfg):  # 프로젝트·jql_mine이 바뀜(또는 기록 없음) → 새 범위를 다 받는다
+        return "full", base
+    last = _state_time(state, "last_sync", cfg.tz)
+    # 미래의 last_sync(시계가 뒤로 감·다른 기계의 상태)는 믿지 않는다
+    if last is None or last > start or start - last > FULL_AFTER:
+        return "full", base
+    last_full = _state_time(state, "last_full", cfg.tz)
+    if last_full is None or last_full > start or start - last_full > every:
         return "full", base
     minutes = max(0, math.ceil((start - last).total_seconds() / 60)) + MARGIN_MINUTES
     return "incremental", f"{base} AND updated >= '-{minutes}m'"
@@ -612,25 +703,97 @@ def fetch_doc(cfg: Config, client: JiraClient, key: str) -> IssueDoc:
     return _docs_for(cfg, client, [issue])[0]
 
 
-def _write_docs(cfg: Config, docs: list[IssueDoc], stamp: dt.datetime, projects: Iterable[str]) -> Report:
-    """잠금 안에서 이슈 파일 → 캐시 → 프로젝트 페이지."""
+def _moved_mark(new_key: str) -> dict[str, Any]:
+    return {"in_scope": False, "moved_to": new_key}
+
+
+def fetch_out_of_scope(
+    cfg: Config, client: JiraClient, returned: Iterable[str]
+) -> tuple[list[IssueDoc], dict[str, dict[str, Any]]]:
+    """전체 동기화가 돌려주지 않은 로컬 일감(동기화됨·stub 아님·완료 아님)을 다시 받는다(잠금 밖, 네트워크만).
+
+    `key in (…)`로 묻는다(범위·jql_mine으로 감싸지 않음, OUT_OF_SCOPE_BATCH개씩). 없어진 키가 섞이면
+    Jira가 400을 주므로 그 묶음은 키마다 issue()로 묻는다. 돌려주는 것:
+    - 다시 받은 문서(in_scope False). 옮겨진 일감의 새 키 문서도(새 키가 범위 안이면 빼고).
+    - 표시: {옛 키: {in_scope: False}} (404) 또는 {옛 키: {in_scope: False, moved_to: 새 키}}.
+    """
+    returned = {key.upper() for key in returned}
+    records = _disk_records(cfg)
+    candidates = sorted(k for k, r in records.items() if r.get("status_category") != "done" and k not in returned)
+    found: dict[str, Mapping[str, Any]] = {}
+    marks: dict[str, dict[str, Any]] = {}
+    if not candidates:
+        return [], marks
+    fields = client.sync_fields()
+    for i in range(0, len(candidates), OUT_OF_SCOPE_BATCH):
+        chunk = candidates[i : i + OUT_OF_SCOPE_BATCH]
+        try:
+            issues = list(client.search(f"key in ({', '.join(chunk)})", fields=fields))
+        except JqlError:
+            issues = []  # 없어진 키가 있다 → 아래에서 하나씩
+        got = {_text(issue.get("key")).upper(): issue for issue in issues if isinstance(issue, Mapping)}
+        for key in chunk:
+            if key in got:
+                found[key] = got[key]
+                continue
+            try:
+                issue = client.issue(key, fields=fields)
+            except NotFoundError:
+                marks[key] = {"in_scope": False}  # 지워졌거나 볼 권한이 없다
+                continue
+            new_key = _text(issue.get("key")).upper()
+            if new_key == key:
+                found[key] = issue
+            elif KEY_RE.match(new_key):
+                marks[key] = _moved_mark(new_key)
+                if new_key not in returned:
+                    found.setdefault(new_key, issue)
+            else:
+                marks[key] = {"in_scope": False}
+    docs = _docs_for(cfg, client, list(found.values()))
+    for doc in docs:
+        doc.in_scope = False
+    return docs, marks
+
+
+def _write_docs(
+    cfg: Config,
+    docs: list[IssueDoc],
+    stamp: dt.datetime,
+    projects: Iterable[str],
+    *,
+    marks: Mapping[str, Mapping[str, Any]] | None = None,
+) -> Report:
+    """잠금 안에서 이슈 파일·표시 → 캐시 → 프로젝트 페이지. 쓰지 못한 파일은 캐시에 반영하지 않는다."""
+    marks = dict(marks or {})
     report = write_issues(cfg, docs, stamp)
+    report.merge(mark_files(cfg, marks))
     failed = {rel for rel, _ in report.skipped}
-    update_cache(cfg, [doc for doc in docs if f"jira/{doc.key}.md" not in failed])
-    report.merge(update_projects(cfg, projects, docs))
+    update_cache(
+        cfg,
+        [doc for doc in docs if f"jira/{doc.key}.md" not in failed],
+        drop=[key for key in marks if f"jira/{key}.md" not in failed],
+    )
+    report.merge(update_projects(cfg, projects, docs, exclude=marks))
     return report
 
 
 def sync_key(cfg: Config, client: JiraClient, key: str) -> Path:
     """계약(부록 A §2): 이슈 하나를 받아 jira/KEY.md를 쓰고 경로를 돌려준다.
 
-    없는 키는 NotFoundError. 그 파일을 쓰지 못하면 KbError(종료 1).
+    없는 키는 NotFoundError. 그 파일을 쓰지 못하면 KbError(종료 1). 일감이 다른 키로 옮겨졌으면
+    새 키 파일을 쓰고 그 경로를 돌려주며, 옛 키 파일이 있으면 `in_scope: false`·`moved_to: 새 키`를 단다.
     """
     doc = fetch_doc(cfg, client, key)
     stamp = core.now(cfg.tz)
-    projects = [doc.project] if doc.project in cfg.project_keys else []
+    requested = key.strip().upper()
+    marks: dict[str, dict[str, Any]] = {}
+    if doc.key != requested and cfg.path("jira", f"{requested}.md").exists():
+        marks[requested] = _moved_mark(doc.key)
+    touched = {doc.project, requested.split("-", 1)[0]}
+    projects = [p for p in cfg.project_keys if p in touched]
     with core.kb_lock(cfg.root, LOCK_OWNER):
-        report = _write_docs(cfg, [doc], stamp, projects)
+        report = _write_docs(cfg, [doc], stamp, projects, marks=marks)
     rel = f"jira/{doc.key}.md"
     for skipped_rel, reason in report.skipped:
         if skipped_rel == rel:
@@ -659,6 +822,11 @@ def run_scope(cfg: Config, client: JiraClient, *, full: bool, dry_run: bool, out
     kind, jql = plan_scope(cfg, state, start, full=full)
     issues = list(client.search(jql, fields=client.sync_fields()))
     docs = _docs_for(cfg, client, issues)
+    extra: list[IssueDoc] = []
+    marks: dict[str, dict[str, Any]] = {}
+    if kind == "full":  # 범위를 벗어난 로컬 일감을 고쳐 표시한다(재배정·지움·옮김)
+        extra, marks = fetch_out_of_scope(cfg, client, {doc.key for doc in docs})
+    all_docs = docs + extra
     views = fetch_views(cfg, client)
     logger = _log(cfg, dry_run)
     for view in views:
@@ -669,17 +837,19 @@ def run_scope(cfg: Config, client: JiraClient, *, full: bool, dry_run: bool, out
 
     report = Report()
     if dry_run:
-        report.merge(write_issues(cfg, docs, start, dry_run=True))
+        report.merge(write_issues(cfg, all_docs, start, dry_run=True))
+        report.merge(mark_files(cfg, marks, dry_run=True))
         view_report = write_views(cfg, views, start, dry_run=True)
         report.merge(view_report)
-        report.merge(update_projects(cfg, cfg.project_keys, docs, dry_run=True))
+        report.merge(update_projects(cfg, cfg.project_keys, all_docs, exclude=marks, dry_run=True))
     else:
         with core.kb_lock(cfg.root, LOCK_OWNER):
-            report.merge(_write_docs(cfg, docs, start, cfg.project_keys))
+            report.merge(_write_docs(cfg, all_docs, start, cfg.project_keys, marks=marks))
             issue_failed = any(rel.startswith("jira/") and not rel.startswith("jira/_views/") for rel, _ in report.skipped)
             report.merge(write_views(cfg, views, start))
             counts = {
                 "issues": len(docs),
+                "out_of_scope": len(extra) + len(marks),
                 "written": len(report.written),
                 "unchanged": len(report.unchanged),
                 "skipped": len(report.skipped),
@@ -690,6 +860,7 @@ def run_scope(cfg: Config, client: JiraClient, *, full: bool, dry_run: bool, out
             new_state["last_run"] = start.isoformat(timespec="seconds")
             if not issue_failed:  # 쓰지 못한 이슈가 있으면 다음 증분이 같은 구간을 다시 받게 둔다
                 new_state["last_sync"] = start.isoformat(timespec="seconds")
+                new_state["scope"] = scope_hash(cfg)
                 if kind == "full":
                     new_state["last_full"] = start.isoformat(timespec="seconds")
             core.save_state(cfg.root, STATE, new_state)
@@ -700,9 +871,10 @@ def run_scope(cfg: Config, client: JiraClient, *, full: bool, dry_run: bool, out
     errors = [v for v in views if v.error is not None]
     head = "sync(시험 실행, 쓰지 않음)" if dry_run else "sync"
     label = "전체" if kind == "full" else "증분"
+    outside = f" · 범위 밖 정리 {len(extra) + len(marks)}" if (extra or marks) else ""
     print(
         f"{head} {label}: 받은 일감 {len(docs)}건 · 새 파일 {len(report.created)} · 바뀜 {len(report.changed)} · "
-        f"그대로 {len(report.unchanged)} · 뷰 {len(views) - len(errors)}/{len(views)}",
+        f"그대로 {len(report.unchanged)} · 뷰 {len(views) - len(errors)}/{len(views)}{outside}",
         file=out,
     )
     _print_report(report, out, dry_run=dry_run)
@@ -713,15 +885,20 @@ def run_keys(cfg: Config, client: JiraClient, keys: list[str], *, dry_run: bool,
     code = 0
     for raw in keys:
         try:
+            requested = raw.strip().upper()
             if dry_run:
                 doc = fetch_doc(cfg, client, raw)
                 report = write_issues(cfg, [doc], core.now(cfg.tz), dry_run=True)
                 state = "만들 예정" if report.created else ("바뀔 예정" if report.changed else "그대로")
                 print(f"jira/{doc.key}.md: {state} (시험 실행, 쓰지 않음)", file=out)
+                if doc.key != requested:
+                    print(f"{requested}는 {doc.key}로 옮겨진 일감입니다", file=out)
                 _print_report(report, out, dry_run=False)
             else:
                 path = sync_key(cfg, client, raw)
                 print(f"jira/{path.name}: 동기화함", file=out)
+                if path.stem != requested:
+                    print(f"{requested}는 {path.stem}로 옮겨진 일감입니다 (jira/{requested}.md에 moved_to 표시)", file=out)
         except NotFoundError as exc:
             print(f"오류: {raw}: {exc}", file=sys.stderr)
             code = max(code, 4)

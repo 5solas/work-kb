@@ -213,6 +213,21 @@ def test_old_last_sync_means_full(env, capsys, monkeypatch):
     assert state(env.vault)["last_full"] == NOW
 
 
+def test_last_sync_is_run_start_time(env, capsys, monkeypatch):
+    # 실행 중에 시간이 흘러도 last_sync는 검색 전(실행 시작) 시각이다(D50: 겹침 구간의 기준)
+    start = dt.datetime.fromisoformat(NOW)
+    later = start + dt.timedelta(minutes=7)
+
+    def fake_now(tz):
+        searched = any(e["path"] == "/rest/api/2/search" for e in env.jira.log)
+        return (later if searched else start).astimezone(tz)
+
+    monkeypatch.setattr(jira_sync.core, "now", fake_now)
+    assert run(capsys, env.vault)[0] == 0
+    saved = state(env.vault)
+    assert saved["last_sync"] == saved["last_full"] == saved["last_run"] == NOW
+
+
 def test_missing_cache_means_full(env, capsys, monkeypatch):
     assert run(capsys, env.vault)[0] == 0
     fts.cache_path(env.cfg).unlink()
@@ -224,15 +239,94 @@ def test_missing_cache_means_full(env, capsys, monkeypatch):
 
 def test_plan_scope_minutes(env):
     start = dt.datetime.fromisoformat("2026-11-04T16:30:30+09:00")
-    kind, jql = jira_sync.plan_scope(env.cfg, {"last_sync": NOW}, start, full=False)
+    good = {"last_sync": NOW, "last_full": NOW, "scope": jira_sync.scope_hash(env.cfg)}
+    kind, jql = jira_sync.plan_scope(env.cfg, good, start, full=False)
     assert kind == "full"  # 캐시가 아직 없다
     fts.open_cache(env.cfg).close()
-    kind, jql = jira_sync.plan_scope(env.cfg, {"last_sync": NOW}, start, full=False)
+    kind, jql = jira_sync.plan_scope(env.cfg, good, start, full=False)
     assert kind == "incremental" and jql.endswith("updated >= '-16m'")  # 10분 27초 → 11 + 5
-    kind, _ = jira_sync.plan_scope(env.cfg, {"last_sync": NOW}, start, full=True)
+    kind, _ = jira_sync.plan_scope(env.cfg, good, start, full=True)
     assert kind == "full"
-    kind, _ = jira_sync.plan_scope(env.cfg, {"last_sync": "망가진 값"}, start, full=False)
+    kind, _ = jira_sync.plan_scope(env.cfg, {**good, "last_sync": "망가진 값"}, start, full=False)
     assert kind == "full"
+
+
+def test_plan_scope_full_triggers(env, vault):
+    fts.open_cache(env.cfg).close()
+    start = dt.datetime.fromisoformat("2026-11-04T16:30:30+09:00")
+    good = {"last_sync": NOW, "last_full": NOW, "scope": jira_sync.scope_hash(env.cfg)}
+
+    def kind(state, cfg=env.cfg, at=start):
+        return jira_sync.plan_scope(cfg, state, at, full=False)[0]
+
+    assert kind(good) == "incremental"
+    # 시계가 뒤로 감: last_sync가 지금보다 미래 → 증분 구간을 믿을 수 없다
+    assert kind({**good, "last_sync": "2026-11-04T16:40:00+09:00"}) == "full"
+    assert kind({**good, "last_full": "2027-01-01T00:00:00+09:00"}) == "full"
+    # 범위 해시가 없거나 다름
+    assert kind({k: v for k, v in good.items() if k != "scope"}) == "full"
+    assert kind({**good, "scope": "0" * 64}) == "full"
+    # 주기적 전체: 마지막 전체가 24시간(기본)보다 오래
+    assert kind({k: v for k, v in good.items() if k != "last_full"}) == "full"
+    day_later = dt.datetime.fromisoformat("2026-11-05T16:20:04+09:00")
+    assert kind({**good, "last_sync": "2026-11-05T16:00:00+09:00"}, at=day_later) == "full"
+    assert kind({**good, "last_sync": "2026-11-05T16:00:00+09:00"}, at=day_later - dt.timedelta(seconds=2)) == "incremental"
+    # 설정으로 바꾼다
+    hourly = _configure(vault, env.jira.base_url, full_every_hours=1)
+    hourly_good = {**good, "scope": jira_sync.scope_hash(hourly)}
+    assert kind(hourly_good, cfg=hourly) == "incremental"
+    assert kind(hourly_good, cfg=hourly, at=start + dt.timedelta(hours=1)) == "full"
+    # 범위 해시: 키 순서는 상관없고, jql_mine·project_keys가 바뀌면 다르다
+    same = _configure(vault, env.jira.base_url, project_keys=["OPS", "KB"])
+    assert jira_sync.scope_hash(same) == jira_sync.scope_hash(env.cfg)
+    assert jira_sync.scope_hash(_configure(vault, env.jira.base_url, project_keys=["KB"])) != jira_sync.scope_hash(env.cfg)
+    assert jira_sync.scope_hash(_configure(vault, env.jira.base_url, jql_mine="assignee = currentUser()")) != jira_sync.scope_hash(env.cfg)
+    for bad in ("매일", 0, -1, True):
+        with pytest.raises(core.ConfigError):
+            jira_sync.plan_scope(_configure(vault, env.jira.base_url, full_every_hours=bad), good, start, full=False)
+
+
+def test_future_last_sync_means_full(env, capsys, monkeypatch):
+    assert run(capsys, env.vault)[0] == 0
+    saved = state(env.vault)
+    saved["last_sync"] = "2027-06-01T00:00:00+09:00"  # 다른 기계의 빠른 시계·시계를 뒤로 돌림
+    (env.vault / ".state" / "sync.json").write_text(json.dumps(saved), encoding="utf-8")
+    env.jira.log.clear()
+    set_now(monkeypatch, "2026-11-04T16:30:03+09:00")
+    code, out, _ = run(capsys, env.vault)
+    assert code == 0 and "sync 전체" in out
+    assert searches(env.jira)[0] == jira_sync.scope_jql(env.cfg) + " ORDER BY key ASC"
+    assert state(env.vault)["last_sync"] == "2026-11-04T16:30:03+09:00"
+
+
+def test_periodic_full_after_a_day(env, capsys, monkeypatch):
+    assert run(capsys, env.vault)[0] == 0
+    set_now(monkeypatch, "2026-11-05T09:00:00+09:00")
+    code, out, _ = run(capsys, env.vault)
+    assert code == 0 and "sync 증분" in out  # 17시간 뒤: 아직 증분
+    set_now(monkeypatch, "2026-11-05T16:30:00+09:00")  # 첫 전체 뒤 24시간 넘음(증분은 7.5시간 전)
+    env.jira.log.clear()
+    code, out, _ = run(capsys, env.vault)
+    assert code == 0 and "sync 전체" in out
+    assert searches(env.jira)[0] == jira_sync.scope_jql(env.cfg) + " ORDER BY key ASC"
+    assert state(env.vault)["last_full"] == "2026-11-05T16:30:00+09:00"
+
+
+def test_added_project_is_backfilled_on_next_plain_sync(vault, start_jira, capsys, fake_now, monkeypatch):
+    fake_now(NOW)
+    server = start_jira()
+    _configure(vault, server.base_url, project_keys=["KB"])
+    assert run(capsys, vault)[0] == 0
+    assert {k for k in jira_files(vault) if k.startswith("OPS-")} == set()
+    _configure(vault, server.base_url, project_keys=["KB", "OPS"])  # init으로 프로젝트를 더함
+    set_now(monkeypatch, "2026-11-04T16:35:03+09:00")
+    code, out, err = run(capsys, vault)
+    assert code == 0, err
+    assert "sync 전체" in out
+    assert set(jira_files(vault)) == SCOPE_KEYS  # 30일 안의 OPS 일감이 모두 왔다
+    assert state(vault)["scope"] == jira_sync.scope_hash(config.load(vault))
+    set_now(monkeypatch, "2026-11-04T16:50:03+09:00")
+    assert "sync 증분" in run(capsys, vault)[1]  # 범위가 그대로면 다시 증분
 
 
 # ---------------------------------------------------------------- mentions 보존
@@ -289,6 +383,42 @@ def test_crlf_file_keeps_eol_and_mentions(env, capsys, monkeypatch):
     assert frontmatter.parse(data)["summary"] == "증분 동기화 시각 계산 (수정)"
 
 
+def test_bom_file_keeps_bom_and_mentions(env, capsys, monkeypatch):
+    assert run(capsys, env.vault)[0] == 0
+    path = env.vault / "jira" / "KB-7.md"
+    data = managed.replace_region(path.read_bytes(), "mentions", "- [[2026-11-02]] 09:00 막힘 확인")
+    path.write_bytes(b"\xef\xbb\xbf" + data)  # 옛 메모장은 UTF-8에 BOM을 붙인다
+    region = managed.read_region(path.read_bytes(), "mentions")
+    env.jira.touch("KB-7", summary="증분 동기화 시각 계산 (BOM)")
+    set_now(monkeypatch, "2026-11-04T16:40:00+09:00")
+    assert run(capsys, env.vault)[0] == 0
+    data = path.read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf---\n") and not data.startswith(b"\xef\xbb\xbf\xef\xbb\xbf")
+    assert managed.read_region(data, "mentions") == region
+    assert frontmatter.parse(data)["summary"] == "증분 동기화 시각 계산 (BOM)"
+    assert frontmatter.split(data)[1].startswith("# KB-7 증분 동기화 시각 계산 (BOM)\n".encode("utf-8"))  # front matter 블록은 하나
+    # 바뀐 게 없으면 BOM 파일도 다시 쓰지 않는다
+    before = path.read_bytes()
+    set_now(monkeypatch, "2026-11-04T16:50:00+09:00")
+    assert run(capsys, env.vault, "--full")[0] == 0
+    assert path.read_bytes() == before
+
+
+def test_line_break_characters_in_front_matter_values(env, capsys):
+    status = {"id": "3", "name": "검토\x85대기", "statusCategory": {"id": 4, "key": "indeterminate", "name": "In Progress"}}
+    assignee = {"name": "honggildong", "key": "honggildong", "displayName": "홍 길동"}
+    env.jira.touch("KB-12", status=status, assignee=assignee, priority={"id": "3", "name": "Me\rdium"}, labels=["a b", "c"])
+    assert run(capsys, env.vault)[0] == 0
+    meta = frontmatter.parse((env.vault / "jira" / "KB-12.md").read_bytes())
+    assert meta["status"] == "검토 대기"
+    assert meta["assignee"] == "홍 길동"
+    assert meta["priority"] == "Me dium"
+    assert meta["labels"] == ["a b", "c"]
+    text = (env.vault / "jira" / "KB-12.md").read_bytes().decode("utf-8")
+    head = text.split("\n---\n", 1)[0]
+    assert not any(ch in head for ch in "\x85  \r")
+
+
 def test_marker_lines_in_jira_text_are_neutralized(env, capsys, monkeypatch):
     env.jira.touch("KB-5", description="h2. 주의\n<!-- kb:mentions:start -->\n가짜 구역\n<!-- kb:mentions:end -->\n끝")
     assert run(capsys, env.vault)[0] == 0
@@ -310,6 +440,10 @@ def test_bad_markers_skip_file_and_keep_last_sync(env, capsys, monkeypatch):
     assert "jira/KB-12.md" in err and "관리 구역" in err
     assert path.read_bytes() == broken
     assert state(env.vault)["last_sync"] == NOW  # 다음 증분이 같은 구간을 다시 받는다
+    # 쓰지 못한 일감은 캐시도 앞서 나가지 않는다(페이지와 같은 옛 값)
+    with fts.open_cache(env.cfg) as cache:
+        assert cache.get("KB-12")["summary"] == "캐시 front matter 확정"
+        assert cache.get("KB-5")["summary"] == frontmatter.parse((env.vault / "jira" / "KB-5.md").read_bytes())["summary"]
 
 
 # ---------------------------------------------------------------- --key, --jql
@@ -433,6 +567,18 @@ def test_views_round_trip_through_read_view(env, capsys):
     assert "KB-3" not in rows  # Done은 today에 없다
 
 
+def test_views_are_not_wrapped_in_scope(env, capsys):
+    # 막힌 지 30일 넘은 내 일감: 범위(jql_mine의 -30d) 밖이지만 blocked 뷰에는 나와야 한다(D49)
+    env.jira.touch("KB-7", updated="2026-09-01T10:00:00.000+0900")
+    assert run(capsys, env.vault)[0] == 0
+    sent = searches(env.jira)
+    for name, jql in env.cfg.get("jira.views").items():
+        assert jql + " ORDER BY key ASC" in sent, name  # 뷰 JQL 그대로(감싸지 않음)
+    assert not any(q.startswith(jira_sync.scope_jql(env.cfg)) and "status = Blocked" in q for q in sent)
+    assert "KB-7" not in jira_files(env.vault)  # 범위 밖이라 이슈 파일은 없다
+    assert [r["key"] for r in notes.read_view(env.cfg, "blocked")] == ["KB-7"]
+
+
 def test_view_cell_escaping_round_trips(env, capsys):
     env.jira.touch("KB-12", summary="파이프 | 와 \\| 역슬래시")
     assert run(capsys, env.vault)[0] == 0
@@ -488,14 +634,18 @@ def test_project_issues_table(env, capsys, monkeypatch):
         "\n## 언급\n<!-- kb:mentions:start -->\n- 사람 언급\n<!-- kb:mentions:end -->\n"
     ).encode("utf-8")
     page.write_bytes(human)
+    stub = notes.ensure_page(env.cfg, "jira", "KB-99").read_bytes()  # 동기화되지 않은 stub(o 명령이 만든 것)
     assert run(capsys, env.vault)[0] == 0
+    # stub은 동기화된 일감이 아니라 범위 밖 정리 대상도 아니다(표시도, 다시 묻기도 없음)
+    assert (env.vault / "jira" / "KB-99.md").read_bytes() == stub
+    assert not any(q.startswith("key in") for q in searches(env.jira))
     data = page.read_bytes()
     region = managed.read_region(data, "issues").decode("utf-8")
     rows = notes.parse_table(region)
     keys = [notes.wikilinks(r["키"])[0] for r in rows]
-    # 열린 KB 일감만, 갱신 내림차순
+    # 열린 KB 일감만, 갱신 내림차순. stub은 빠진다
     assert keys == ["KB-12", "KB-9", "KB-5", "KB-7", "KB-14", "KB-10"]
-    assert "KB-3" not in keys
+    assert "KB-3" not in keys and "[[KB-99]]" not in region
     assert rows[0]["갱신"] == "2026-11-04" and rows[0]["담당"] == "홍길동"
     # 구역 밖은 그대로, updated만 오늘로
     assert "사람이 쓴 개요. 기계가 건드리지 않음." in data.decode("utf-8")
@@ -523,6 +673,160 @@ def test_project_issues_table(env, capsys, monkeypatch):
     data = page.read_bytes()
     assert b"[[KB-12]]" not in managed.read_region(data, "issues")
     assert frontmatter.parse(data)["updated"] == "2026-11-05"
+
+
+# ---------------------------------------------------------------- 범위 밖으로 나간 일감
+
+KIMCS = {"name": "kimcs", "key": "kimcs", "displayName": "김철수"}
+HONG = {"name": "honggildong", "key": "honggildong", "displayName": "홍길동"}
+NOT_WATCHING = {"watchCount": 1, "isWatching": False}
+
+
+def table_keys(vault: Path, project: str) -> list[str]:
+    region = managed.read_region((vault / "wiki" / "projects" / f"{project}.md").read_bytes(), "issues").decode("utf-8")
+    return [notes.wikilinks(r["키"])[0] for r in notes.parse_table(region)]
+
+
+def cached(cfg, key: str) -> dict | None:
+    with fts.open_cache(cfg) as cache:
+        return cache.get(key)
+
+
+def test_reassigned_issue_leaves_project_table_after_full(env, capsys, monkeypatch):
+    assert run(capsys, env.vault)[0] == 0
+    assert "KB-12" in table_keys(env.vault, "KB")
+    # 다른 사람에게 넘어가고 지켜보기도 끔 → 범위(jql_mine) 밖. 상태는 열린 그대로
+    env.jira.touch("KB-12", assignee=KIMCS, watches=NOT_WATCHING, summary="넘겨준 일감")
+    set_now(monkeypatch, "2026-11-04T16:30:03+09:00")
+    code, out, _ = run(capsys, env.vault)
+    assert code == 0 and "sync 증분" in out
+    assert "KB-12" in table_keys(env.vault, "KB")  # 증분은 범위 밖을 모른다
+
+    set_now(monkeypatch, "2026-11-04T16:40:03+09:00")
+    env.jira.log.clear()
+    before = jira_files(env.vault)
+    code, out, err = run(capsys, env.vault, "--full")
+    assert code == 0, err
+    assert "범위 밖 정리 1" in out
+    # 범위로 감싸지 않은 key in (…)로 다시 받았다
+    assert "key in (KB-12) ORDER BY key ASC" in searches(env.jira)
+    meta = frontmatter.parse((env.vault / "jira" / "KB-12.md").read_bytes())
+    assert meta["in_scope"] == "false" and meta["assignee"] == "김철수" and meta["summary"] == "넘겨준 일감"
+    assert "moved_to" not in meta
+    assert "KB-12" not in table_keys(env.vault, "KB")
+    assert cached(env.cfg, "KB-12") is None
+    assert not any(h["key"] == "KB-12" for h in fts.search(env.cfg, ["넘겨준"]))
+    after = jira_files(env.vault)
+    assert {k for k in after if after[k] != before[k]} == {"KB-12"}
+    assert state(env.vault)["counts"]["out_of_scope"] == 1
+
+    # 이미 표시한 일감은 다음 전체 동기화에서 다시 묻지 않는다
+    set_now(monkeypatch, "2026-11-04T16:50:03+09:00")
+    env.jira.log.clear()
+    assert run(capsys, env.vault, "--full")[0] == 0
+    assert not any(q.startswith("key in") for q in searches(env.jira))
+    assert (env.vault / "jira" / "KB-12.md").read_bytes() == after["KB-12"]
+
+    # 다시 내 일감이 되면 표시가 사라지고 표·캐시로 돌아온다
+    env.jira.touch("KB-12", assignee=HONG)
+    set_now(monkeypatch, "2026-11-04T17:00:03+09:00")
+    assert run(capsys, env.vault)[0] == 0
+    assert "in_scope" not in frontmatter.parse((env.vault / "jira" / "KB-12.md").read_bytes())
+    assert "KB-12" in table_keys(env.vault, "KB") and cached(env.cfg, "KB-12") is not None
+
+
+def test_deleted_issue_is_marked_via_issue_404(env, capsys, monkeypatch):
+    assert run(capsys, env.vault)[0] == 0
+    env.jira.remove("KB-5")  # Jira에서 지워짐 → key in (KB-12, KB-5)는 400
+    env.jira.touch("KB-12", assignee=KIMCS, watches=NOT_WATCHING)
+    old_kb5 = (env.vault / "jira" / "KB-5.md").read_bytes()
+    set_now(monkeypatch, "2026-11-04T16:40:03+09:00")
+    env.jira.log.clear()
+    code, out, err = run(capsys, env.vault, "--full")
+    assert code == 0, err
+    issue_calls = [e["path"] for e in env.jira.log if e["path"].startswith("/rest/api/2/issue/")]
+    assert "/rest/api/2/issue/KB-5" in issue_calls and "/rest/api/2/issue/KB-12" in issue_calls
+    kb5 = (env.vault / "jira" / "KB-5.md").read_bytes()
+    meta = frontmatter.parse(kb5)
+    assert meta["in_scope"] == "false" and "moved_to" not in meta
+    assert meta["summary"] == frontmatter.parse(old_kb5)["summary"]  # 내용은 그대로, 표시만
+    assert frontmatter.split(kb5)[1] == frontmatter.split(old_kb5)[1]
+    assert frontmatter.parse((env.vault / "jira" / "KB-12.md").read_bytes())["in_scope"] == "false"
+    assert {"KB-5", "KB-12"}.isdisjoint(table_keys(env.vault, "KB"))
+    assert cached(env.cfg, "KB-5") is None and cached(env.cfg, "KB-12") is None
+
+
+def test_moved_issue_marks_old_key_and_writes_new(env, capsys, monkeypatch):
+    assert run(capsys, env.vault)[0] == 0
+    env.jira.move("KB-12", "OPS-40")  # 범위 안 그대로(내 일감) → 전체 검색이 OPS-40을 준다
+    # KB-14는 남의 일감이 된 뒤 OPS-41로 옮겨짐 → 새 키도 범위 밖
+    env.jira.touch("KB-14", assignee=KIMCS, reporter=KIMCS, watches=NOT_WATCHING)
+    env.jira.move("KB-14", "OPS-41")
+    set_now(monkeypatch, "2026-11-04T16:40:03+09:00")
+    # 시험 실행도 표시할 옛 키를 표에서 빼고 보고한다(아무것도 쓰지 않음)
+    before = tree(env.vault)
+    code, out, err = run(capsys, env.vault, "--full", "--dry-run")
+    assert code == 0, err
+    for rel in ("jira/KB-12.md", "jira/KB-14.md", "wiki/projects/KB.md"):
+        assert f"바뀔 예정: {rel}" in out
+    assert "만들 예정: jira/OPS-41.md" in out
+    assert tree(env.vault) == before
+    code, out, err = run(capsys, env.vault, "--full")
+    assert code == 0, err
+    old = frontmatter.parse((env.vault / "jira" / "KB-12.md").read_bytes())
+    assert old["in_scope"] == "false" and old["moved_to"] == "OPS-40"
+    new = frontmatter.parse((env.vault / "jira" / "OPS-40.md").read_bytes())
+    assert new["key"] == "OPS-40" and new["project"] == "OPS" and "in_scope" not in new
+    assert frontmatter.parse((env.vault / "jira" / "KB-14.md").read_bytes())["moved_to"] == "OPS-41"
+    ops41 = frontmatter.parse((env.vault / "jira" / "OPS-41.md").read_bytes())
+    assert ops41["in_scope"] == "false" and ops41["assignee"] == "김철수"
+    assert {"KB-12", "KB-14"}.isdisjoint(table_keys(env.vault, "KB"))
+    assert "OPS-40" in table_keys(env.vault, "OPS") and "OPS-41" not in table_keys(env.vault, "OPS")
+    assert cached(env.cfg, "KB-12") is None and cached(env.cfg, "OPS-40") is not None and cached(env.cfg, "OPS-41") is None
+
+
+def test_key_option_on_moved_issue(env, capsys):
+    notes.ensure_page(env.cfg, "jira", "KB-12")  # o 명령이 만든 stub
+    env.jira.move("KB-12", "OPS-40")
+    code, out, err = run(capsys, env.vault, "--key", "KB-12")
+    assert code == 0, err
+    assert "jira/OPS-40.md: 동기화함" in out and "OPS-40로 옮겨진" in out
+    assert frontmatter.parse((env.vault / "jira" / "OPS-40.md").read_bytes())["key"] == "OPS-40"
+    old = frontmatter.parse((env.vault / "jira" / "KB-12.md").read_bytes())
+    assert old["moved_to"] == "OPS-40" and old["in_scope"] == "false" and old["stub"] == "true"
+    assert "OPS-40" in table_keys(env.vault, "OPS")
+    with jira_sync.JiraClient.from_config(env.cfg) as client:  # 계약: 새 키 파일 경로
+        assert jira_sync.sync_key(env.cfg, client, "KB-12") == env.cfg.path("jira", "OPS-40.md")
+
+
+def test_locked_cache_exits_6(env, capsys, monkeypatch):
+    import sqlite3
+
+    assert run(capsys, env.vault)[0] == 0
+    monkeypatch.setattr(fts, "BUSY_TIMEOUT", 0.2)
+    other = sqlite3.connect(str(fts.cache_path(env.cfg)), timeout=0, isolation_level=None)
+    try:
+        other.execute("BEGIN EXCLUSIVE")
+        set_now(monkeypatch, "2026-11-04T16:40:03+09:00")
+        code, _out, err = run(capsys, env.vault, "--full")
+    finally:
+        other.close()
+    assert code == 6
+    assert "캐시를 다른 프로그램이 쓰고 있습니다" in err and "손상" not in err
+    assert state(env.vault)["last_sync"] == NOW  # 다음 실행이 다시 받는다
+
+
+def test_repeated_issue_across_pages_written_once(vault, start_jira, capsys, fake_now):
+    fake_now(NOW)
+    server = start_jira(repeat_page_boundary=True, page_size_cap=4)
+    _configure(vault, server.base_url)
+    code, out, err = run(capsys, vault)
+    assert code == 0, err
+    n = len(SCOPE_KEYS)
+    # 이슈 n + 뷰 3이 새 파일, 프로젝트 페이지 2는 만든 뒤 표를 채움. 두 번 쓰인(그대로) 파일 없음
+    assert f"받은 일감 {n}건 · 새 파일 {n + 3} · 바뀜 2 · 그대로 0" in out
+    assert set(jira_files(vault)) == SCOPE_KEYS
+    assert state(vault)["counts"]["issues"] == n
 
 
 # ---------------------------------------------------------------- 검색 캐시

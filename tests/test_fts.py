@@ -121,6 +121,14 @@ def test_upsert_replaces_row(db):
         assert cache.upsert([{"key": ""}, {"summary": "키 없음"}]) == 0
 
 
+def test_delete_removes_row_and_index(db):
+    with fts.Cache(db) as cache:
+        assert cache.delete(["KB-12", "없음-1", ""]) == 1
+        assert cache.get("KB-12") is None and cache.count() == 2
+        assert keys(cache.search(["캐시"])) == []  # FTS 색인에서도 빠졌다(LIKE로도 없음)
+        assert cache.delete([]) == 0
+
+
 def test_search_missing_file_creates_nothing(tmp_path):
     path = tmp_path / "jira" / ".cache.sqlite"
     assert fts.search(path, ["캐시"]) == []
@@ -134,6 +142,37 @@ def test_corrupt_file_is_config_error(tmp_path):
         fts.Cache(path)
     assert exc.value.exit_code == 4
     assert "--full" in str(exc.value)
+
+
+def test_locked_cache_is_file_busy_not_corruption(db, monkeypatch):
+    monkeypatch.setattr(fts, "BUSY_TIMEOUT", 0.2)
+    other = sqlite3.connect(str(db), timeout=0, isolation_level=None)
+    try:
+        other.execute("BEGIN EXCLUSIVE")  # 다른 프로그램이 쓰기 트랜잭션을 잡고 있다
+        with pytest.raises(core.FileBusy) as exc:
+            fts.Cache(db)
+        assert exc.value.exit_code == 6
+        assert "캐시를 다른 프로그램이 쓰고 있습니다" in str(exc.value)
+        assert "손상" not in str(exc.value) and "_trash" not in str(exc.value)
+        other.execute("ROLLBACK")
+        # 열린 뒤 쓰기(upsert)에서 잠겨도 같은 오류
+        with fts.Cache(db) as cache:
+            other.execute("BEGIN EXCLUSIVE")
+            with pytest.raises(core.FileBusy):
+                cache.upsert(ROWS[:1])
+            other.execute("ROLLBACK")
+            assert cache.get("KB-12")["summary"] == ROWS[0]["summary"]
+    finally:
+        other.close()
+
+
+def test_opening_existing_cache_does_not_write(db):
+    before = (db.read_bytes(), db.stat().st_mtime_ns)
+    for _ in range(2):
+        with fts.Cache(db) as cache:
+            assert cache.fts_enabled and cache.count() == 3
+    assert keys(fts.search(db, ["캐시"])) == ["KB-12"]
+    assert (db.read_bytes(), db.stat().st_mtime_ns) == before
 
 
 def test_schema_change_recreates(db):

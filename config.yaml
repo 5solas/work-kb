@@ -17,6 +17,8 @@ jira:
     review: "reporter = currentUser() AND status = 'In Review'"
   poll_minutes: 15
   max_results: 500
+  # 전체 동기화 주기(시간). 범위에서 빠진 일감(담당 변경·삭제·이동)을 정리한다.
+  full_every_hours: 24
 
 confluence:
   title_prefix: "[KB] "

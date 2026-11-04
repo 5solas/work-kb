@@ -25,6 +25,21 @@ FTS_COLUMNS: tuple[str, ...] = ("key", "summary", "body")
 LIKE_COLUMNS: tuple[str, ...] = ("key", "summary", "status", "assignee", "body")
 FTS_MODULE = "fts5"  # 테스트가 없는 모듈 이름으로 바꿔 LIKE 경로를 확인한다
 FTS_TOKENIZE = "unicode61"
+BUSY_TIMEOUT = 10.0  # 초. 다른 연결이 잡고 있으면 이만큼 기다린 뒤 core.FileBusy(종료 6)
+
+
+def _is_busy(exc: BaseException) -> bool:
+    """sqlite가 잠김(다른 연결의 트랜잭션) 때문에 낸 오류인가."""
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    text = str(exc).lower()
+    return "locked" in text or "busy" in text
+
+
+def _busy_error(path: Path, exc: BaseException) -> core.FileBusy:
+    return core.FileBusy(
+        f"{path}: 캐시를 다른 프로그램이 쓰고 있습니다 ({exc}). 그 프로그램(DB 도구 등)을 닫고 다시 실행하세요"
+    )
 
 
 def cache_path(cfg: Any) -> Path:
@@ -58,8 +73,10 @@ class Cache:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._conn = sqlite3.connect(str(self.path), timeout=10)
+            self._conn = sqlite3.connect(str(self.path), timeout=BUSY_TIMEOUT)
         except sqlite3.Error as exc:
+            if _is_busy(exc):
+                raise _busy_error(self.path, exc) from exc
             raise core.ConfigError(f"{self.path}: 검색 캐시를 열지 못했습니다 ({exc})") from exc
         self._conn.row_factory = sqlite3.Row
         self.fts_enabled = False
@@ -67,6 +84,8 @@ class Cache:
             self._setup()
         except sqlite3.DatabaseError as exc:
             self._conn.close()
+            if _is_busy(exc):
+                raise _busy_error(self.path, exc) from exc
             raise core.ConfigError(
                 f"{self.path}: 검색 캐시가 손상되었습니다 ({exc}). 이 파일을 _trash/로 옮기고 `kb.py sync --full`을 실행하세요"
             ) from exc
@@ -91,26 +110,37 @@ class Cache:
     def _set_meta(self, name: str, value: str) -> None:
         self._conn.execute("INSERT OR REPLACE INTO meta(name, value) VALUES (?, ?)", (name, value))
 
+    def _tables(self) -> set[str]:
+        return {str(row[0]) for row in self._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+
     def _setup(self) -> None:
+        """먼저 읽고, 표·형식이 이미 맞으면 아무것도 쓰지 않는다(검색만 하는 실행이 파일을 바꾸지 않게)."""
         conn = self._conn
-        with conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS meta(name TEXT PRIMARY KEY, value TEXT)")
-            if self._meta("schema") not in (None, SCHEMA_VERSION):
-                # 다시 만들 수 있는 캐시라 형식이 바뀌면 비우고 새로 만든다
-                conn.execute("DROP TABLE IF EXISTS issues_fts")
-                conn.execute("DROP TABLE IF EXISTS issues")
-            columns = ", ".join(f"{name} TEXT" if name != "key" else "key TEXT PRIMARY KEY" for name in COLUMNS)
-            conn.execute(f"CREATE TABLE IF NOT EXISTS issues({columns})")
-            self._set_meta("schema", SCHEMA_VERSION)
-        try:
+        tables = self._tables()
+        schema = self._meta("schema") if "meta" in tables else None
+        if "meta" not in tables or "issues" not in tables or schema != SCHEMA_VERSION:
             with conn:
-                conn.execute(
-                    f"CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING {FTS_MODULE}"
-                    f"({', '.join(FTS_COLUMNS)}, tokenize='{FTS_TOKENIZE}')"
-                )
-                conn.execute("SELECT count(*) FROM issues_fts").fetchone()
+                conn.execute("CREATE TABLE IF NOT EXISTS meta(name TEXT PRIMARY KEY, value TEXT)")
+                if schema not in (None, SCHEMA_VERSION):
+                    # 다시 만들 수 있는 캐시라 형식이 바뀌면 비우고 새로 만든다
+                    conn.execute("DROP TABLE IF EXISTS issues_fts")
+                    conn.execute("DROP TABLE IF EXISTS issues")
+                columns = ", ".join(f"{name} TEXT" if name != "key" else "key TEXT PRIMARY KEY" for name in COLUMNS)
+                conn.execute(f"CREATE TABLE IF NOT EXISTS issues({columns})")
+                self._set_meta("schema", SCHEMA_VERSION)
+            tables = self._tables()
+        try:
+            if "issues_fts" not in tables:
+                with conn:
+                    conn.execute(
+                        f"CREATE VIRTUAL TABLE IF NOT EXISTS issues_fts USING {FTS_MODULE}"
+                        f"({', '.join(FTS_COLUMNS)}, tokenize='{FTS_TOKENIZE}')"
+                    )
+            conn.execute("SELECT count(*) FROM issues_fts").fetchone()
             self.fts_enabled = True
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as exc:
+            if _is_busy(exc):
+                raise
             self.fts_enabled = False  # FTS5 없음 → LIKE만
             return
         if self._meta("fts_synced") != "1":
@@ -139,21 +169,53 @@ class Cache:
         placeholders = ", ".join("?" for _ in COLUMNS)
         fts_index = [COLUMNS.index(name) for name in FTS_COLUMNS]
         conn = self._conn
-        with conn:
-            conn.executemany(f"INSERT OR REPLACE INTO issues({', '.join(COLUMNS)}) VALUES ({placeholders})", items)
-            if self.fts_enabled:
-                try:
-                    conn.executemany("DELETE FROM issues_fts WHERE key = ?", [(item[0],) for item in items])
-                    conn.executemany(
-                        f"INSERT INTO issues_fts({', '.join(FTS_COLUMNS)}) VALUES ({', '.join('?' for _ in FTS_COLUMNS)})",
-                        [tuple(item[i] for i in fts_index) for item in items],
-                    )
-                    self._set_meta("fts_synced", "1")
-                except sqlite3.OperationalError:
-                    self.fts_enabled = False
-            if not self.fts_enabled:
-                self._set_meta("fts_synced", "0")  # FTS를 다시 쓸 수 있게 되면 처음 열 때 다시 만든다
+        try:
+            with conn:
+                conn.executemany(f"INSERT OR REPLACE INTO issues({', '.join(COLUMNS)}) VALUES ({placeholders})", items)
+                if self.fts_enabled:
+                    try:
+                        conn.executemany("DELETE FROM issues_fts WHERE key = ?", [(item[0],) for item in items])
+                        conn.executemany(
+                            f"INSERT INTO issues_fts({', '.join(FTS_COLUMNS)}) VALUES ({', '.join('?' for _ in FTS_COLUMNS)})",
+                            [tuple(item[i] for i in fts_index) for item in items],
+                        )
+                        self._set_meta("fts_synced", "1")
+                    except sqlite3.OperationalError as exc:
+                        if _is_busy(exc):
+                            raise
+                        self.fts_enabled = False
+                if not self.fts_enabled:
+                    self._set_meta("fts_synced", "0")  # FTS를 다시 쓸 수 있게 되면 처음 열 때 다시 만든다
+        except sqlite3.OperationalError as exc:
+            if _is_busy(exc):
+                raise _busy_error(self.path, exc) from exc
+            raise
         return len(items)
+
+    def delete(self, keys: Iterable[str]) -> int:
+        """키의 행을 지운다(범위 밖으로 나간 일감). 지운 행 수."""
+        items = [(str(key).strip(),) for key in keys if str(key or "").strip()]
+        if not items:
+            return 0
+        conn = self._conn
+        try:
+            with conn:
+                before = conn.total_changes
+                conn.executemany("DELETE FROM issues WHERE key = ?", items)
+                removed = conn.total_changes - before
+                if self.fts_enabled:
+                    try:
+                        conn.executemany("DELETE FROM issues_fts WHERE key = ?", items)
+                    except sqlite3.OperationalError as exc:
+                        if _is_busy(exc):
+                            raise
+                        self.fts_enabled = False
+                        self._set_meta("fts_synced", "0")
+        except sqlite3.OperationalError as exc:
+            if _is_busy(exc):
+                raise _busy_error(self.path, exc) from exc
+            raise
+        return removed
 
     # ------------------------------------------------------------ 읽기
 

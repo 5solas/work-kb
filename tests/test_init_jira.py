@@ -133,21 +133,61 @@ def test_from_env_company_prints_public_host_warning(run_kb, vault, mock_jira):
     assert _data(vault)["environment"] == "company"
 
 
-def test_from_env_bad_pat_exit_2_writes_nothing(run_kb, vault, mock_jira):
+def test_from_env_bad_pat_exit_2_writes_nothing(run_kb, vault, tmp_path, mock_jira):
+    kb_secrets.store("work-kb", "jira", TOKEN)  # 잘 되던 PAT
     bad = "wrong-pat-9999"
     result = run_kb("init", "--non-interactive", "--from-env", env=_env(mock_jira, KB_INIT_JIRA_PAT=bad))
     assert result.returncode == 2, result.stdout + result.stderr
     assert "401" in result.stderr
     assert bad not in result.stdout + result.stderr
     assert not _local(vault).exists()
+    assert _keyring(tmp_path) == {"work-kb\njira": TOKEN}  # 확인 전에는 저장소를 건드리지 않는다
 
 
-def test_from_env_refused_port_exit_3(run_kb, vault, mock_jira):
+def test_from_env_refused_port_exit_3(run_kb, vault, tmp_path, mock_jira):
+    kb_secrets.store("work-kb", "jira", TOKEN)
     url = mock_jira.base_url
     mock_jira.stop()
-    result = run_kb("init", "--non-interactive", "--from-env", env=_env(mock_jira, KB_INIT_JIRA_URL=url))
+    env = _env(mock_jira, KB_INIT_JIRA_URL=url, KB_INIT_JIRA_PAT="other-pat-5555")
+    result = run_kb("init", "--non-interactive", "--from-env", env=env)
     assert result.returncode == 3, result.stdout + result.stderr
     assert not _local(vault).exists()
+    assert _keyring(tmp_path) == {"work-kb\njira": TOKEN}
+
+
+def test_failed_rerun_keeps_working_pat_for_sync(run_kb, vault, tmp_path, mock_jira):
+    """좋은 init 뒤 잘못된 PAT로 다시 init해도 저장된 PAT와 sync는 그대로 동작한다."""
+    assert run_kb("init", "--non-interactive", "--from-env", env=_env(mock_jira)).returncode == 0
+    first = _local(vault).read_bytes()
+    bad = run_kb("init", "--non-interactive", "--from-env", env=_env(mock_jira, KB_INIT_JIRA_PAT="typo-pat-9999"))
+    assert bad.returncode == 2, bad.stdout + bad.stderr
+    assert _keyring(tmp_path) == {"work-kb\njira": TOKEN}
+    assert _local(vault).read_bytes() == first
+    result = run_kb("sync", "--full")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_rerun_same_pat_does_not_rewrite_keyring(vault, tmp_path, mock_jira, monkeypatch):
+    kb_secrets.store("work-kb", "jira", TOKEN)
+    writes: list[tuple] = []
+    real_store = kb_secrets.store
+    monkeypatch.setattr(kb_secrets, "store", lambda *a: (writes.append(a), real_store(*a)))
+    script = Script(["home", mock_jira.base_url, "KB"], [TOKEN])  # 저장된 것과 같은 PAT를 다시 입력
+    out: list[str] = []
+    assert _wizard(vault, script, out) == 0
+    assert writes == []
+    assert not any(line.startswith("자격 증명 저장소에 저장했습니다") for line in out)
+
+
+def test_saved_message_comes_before_config_saved(vault, tmp_path, mock_jira):
+    script = Script(["home", mock_jira.base_url, "KB"], [TOKEN])
+    out: list[str] = []
+    assert _wizard(vault, script, out) == 0
+    stored = next(i for i, line in enumerate(out) if line.startswith("자격 증명 저장소에 저장했습니다"))
+    saved = next(i for i, line in enumerate(out) if "설정을 저장했습니다" in line)
+    checked = next(i for i, line in enumerate(out) if "PAT를 확인했습니다" in line)
+    assert checked < stored < saved
+    assert _keyring(tmp_path)["work-kb\njira"] == TOKEN
 
 
 @pytest.mark.parametrize(
@@ -206,6 +246,26 @@ def test_interactive_eof_cancels(run_kb, vault):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "취소" in result.stderr
     assert not _local(vault).exists()
+
+
+def test_piped_eof_at_pat_prompt_cancels(run_kb, vault, tmp_path, mock_jira):
+    """stdin이 파이프면 PAT 질문도 stdin을 읽는다. Windows getpass처럼 콘솔을 기다리며 멈추지 않는다."""
+    prior = "prior-pat-1111"
+    kb_secrets.store("work-kb", "jira", prior)
+    result = run_kb("init", stdin=f"home\n{mock_jira.base_url}\n", timeout=30)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "취소" in result.stderr
+    assert "PAT" in result.stdout  # PAT 질문까지 갔다
+    assert not _local(vault).exists()
+    assert _keyring(tmp_path) == {"work-kb\njira": prior}
+
+
+def test_piped_pat_line_succeeds(run_kb, vault, tmp_path, mock_jira):
+    result = run_kb("init", stdin=f"home\n{mock_jira.base_url}\n{TOKEN}\n2\n", timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert TOKEN not in result.stdout + result.stderr
+    assert _data(vault)["jira"]["project_keys"] == ["OPS"]
+    assert _keyring(tmp_path)["work-kb\njira"] == TOKEN
 
 
 # ---------------------------------------------------------------- --section jira
@@ -288,15 +348,30 @@ def test_interactive_gives_up_after_three_bad_answers(vault, mock_jira):
     assert not _local(vault).exists()
 
 
-def test_interactive_eof_mid_jira_keeps_existing_file(vault, mock_jira):
+def test_interactive_eof_mid_jira_keeps_existing_file(vault, tmp_path, mock_jira):
     _existing_config(vault, mock_jira.base_url)
     original = _local(vault).read_bytes()
-    script = Script(["company", mock_jira.base_url], [TOKEN])  # 프로젝트 질문에서 입력 끝
+    prior = "prior-pat-1111"
+    kb_secrets.store("work-kb", "jira", prior)
+    script = Script(["company", mock_jira.base_url], [TOKEN])  # 새 PAT는 확인됐지만 프로젝트 질문에서 입력 끝
     with pytest.raises(init.Cancelled) as info:
         _wizard(vault, script, [])
     assert info.value.exit_code == 1
     assert "취소" in str(info.value)
     assert _local(vault).read_bytes() == original
+    assert _keyring(tmp_path) == {"work-kb\njira": prior}
+
+
+def test_interactive_bad_new_pat_keeps_stored_one_as_default(vault, tmp_path, mock_jira):
+    """새로 입력한 PAT가 거부되면 저장된 PAT는 그대로이고, 다시 물을 때 비우면 그것을 쓴다."""
+    _existing_config(vault, mock_jira.base_url)
+    kb_secrets.store("work-kb", "jira", TOKEN)
+    script = Script(["", "", "", ""], ["wrong-pat-0000", ""])
+    out: list[str] = []
+    assert _wizard(vault, script, out, section="jira") == 0
+    assert "비우면 저장된 값 유지" in script.secret_prompts[1]
+    assert any("저장된 PAT를 씁니다" in line for line in out)
+    assert _keyring(tmp_path) == {"work-kb\njira": TOKEN}
 
 
 def test_jql_problems_are_reported_but_saved(vault, mock_jira):

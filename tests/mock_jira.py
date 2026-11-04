@@ -22,8 +22,12 @@
 - `sprint_form="object"`: 스프린트 값을 DC 문자열 대신 객체 꼴 `{id, name, state, …}`로 준다.
 - `search_comment_limit=N`: 검색 결과에 싣는 댓글 수(기본 3, total은 그대로). 이슈 조회는 전부 싣는다.
 - `updates={"KB-12": {"updated": "…", "summary": "…"}}`: 시작할 때 이슈 필드를 바꾼다.
+- `repeat_page_boundary=True`: startAt > 0인 검색 페이지가 한 칸 앞에서 시작하고 total이 하나 크다
+  (페이지를 넘기는 사이 앞쪽에 이슈 하나가 끼어든 것처럼. 앞 페이지의 마지막 이슈가 다시 온다).
 
 실행 중에는 `mock.touch("KB-12", updated=None, **fields)`로 이슈를 바꾸고, `mock.issues`로 데이터를 본다.
+`mock.move("KB-12", "OPS-40")`은 이슈를 다른 키(프로젝트)로 옮긴다. 옛 키로 이슈 조회·JQL `key`를 하면
+새 이슈가 나온다(Jira처럼). `mock.remove("KB-12")`는 이슈를 지운다(조회 404, JQL `key = KB-12`는 400).
 `mock.count("search")`는 받은 검색 요청 수(429·500 포함).
 
 라우팅은 `ROUTES` 표(메서드, 경로 정규식, 처리 함수)로 한다. 처리 함수는 (상태, 본문) 또는
@@ -55,6 +59,7 @@ KNOWN_MODES = {
     "sprint_form",
     "search_comment_limit",
     "updates",
+    "repeat_page_boundary",
 }
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "jira"
@@ -130,6 +135,7 @@ class RunningMock:
         self._counts: dict[str, int] = {}
         self._flags: set[str] = set()
         self.issues: dict[str, dict] = {item["key"]: item for item in load_fixture("issues")}
+        self.moved: dict[str, str] = {}  # 옛 키 → 새 키
         for key, changes in (modes.get("updates") or {}).items():
             self.issues[key]["fields"].update(copy.deepcopy(changes))
 
@@ -184,6 +190,30 @@ class RunningMock:
             target.update(copy.deepcopy(fields))
             target["updated"] = updated
         return updated
+
+    def move(self, old: str, new: str) -> None:
+        """이슈를 새 키로 옮긴다(프로젝트는 새 키의 접두). 옛 키는 새 키를 가리킨다."""
+        project = next(p for p in PROJECTS if p["key"] == new.split("-", 1)[0])
+        with self._lock:
+            issue = self.issues.pop(old)
+            issue["key"] = new
+            issue["fields"]["project"] = {**issue["fields"]["project"], "key": project["key"], "name": project["name"], "id": project["id"]}
+            self.issues[new] = issue
+            self.moved[old] = new
+
+    def remove(self, key: str) -> None:
+        with self._lock:
+            del self.issues[key]
+
+    def resolve(self, key: str) -> str:
+        """옮겨진 키를 따라간 지금 키(없으면 받은 그대로)."""
+        key = key.upper()
+        with self._lock:
+            seen = set()
+            while key in self.moved and key not in seen:
+                seen.add(key)
+                key = self.moved[key]
+        return key
 
 
 class _Server(ThreadingHTTPServer):
@@ -642,6 +672,9 @@ def _key_known(ctx: _Ctx, field: str):
         key = text.upper()
         if not re.fullmatch(r"[A-Z][A-Z0-9_]+-\d+", key):
             raise JqlError(f"The issue key '{text}' for field '{field}' is invalid.")
+        current = ctx.mock.resolve(key)  # 옮겨진 옛 키는 새 이슈를 찾는다
+        if current in ctx.keys:
+            return current
         if key not in ctx.keys:
             raise JqlError(f"An issue with key '{key}' does not exist for field '{field}'.")
         return key
@@ -905,18 +938,20 @@ def _search(req: Request):
     except JqlError as exc:
         return _error(400, str(exc))
     max_results = _cap(req, wanted)
-    page = found[start : start + max_results] if max_results else []
+    shifted = start > 0 and bool(mock.modes.get("repeat_page_boundary"))
+    first = start - 1 if shifted else start
+    page = found[first : first + max_results] if max_results else []
     return 200, {
         "expand": "schema,names",
         "startAt": start,
         "maxResults": max_results,
-        "total": len(found),
+        "total": len(found) + (1 if shifted else 0),  # 앞에 하나가 끼어든 것처럼(그래서 한 칸 밀림)
         "issues": [render_issue(mock, issue, req.query.get("fields"), search=True) for issue in page],
     }
 
 
 def _find_issue(req: Request) -> dict | None:
-    wanted = req.params["key"]
+    wanted = req.mock.resolve(req.params["key"]) if not req.params["key"].isdigit() else req.params["key"]
     with req.mock._lock:
         for issue in req.mock.issues.values():
             if issue["key"] == wanted.upper() or issue["id"] == wanted:

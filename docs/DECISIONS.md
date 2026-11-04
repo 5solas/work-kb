@@ -120,7 +120,22 @@ Opus 3명 독립 검토 → 23건 → 전부 수정. 606개 통과 + 클립보�
 - **jira_sync**: `synced_at`만 다른 파일은 다시 쓰지 않는다. 기존 `mentions` 바이트·EOL·BOM 보존. `.cache.sqlite`가 없으면 전체 동기화. 쓰지 못한 파일(마커 손상·동시 편집·잠김)이 있으면 `last_sync`를 옮기지 않아 다음 증분이 같은 구간을 다시 받는다. 설명의 제목은 두 단계 내려 `## 설명`·`## 댓글`과 충돌하지 않게 하고, Jira 본문에 `kb:` 마커 꼴이 있으면 앞에 공백을 넣어 구역이 생기지 않게 한다. 프로젝트 `issues` 표는 디스크의 동기화된 `jira/*.md` 전체 기준(stub·완료 제외). 뷰는 프로젝트 범위로 감싸지 않는다. 옵션 조합 `--cache` 단독, `--jql`+`--key`/`--full`, `--key`+`--full`은 종료 4.
 - **wikimarkup**: 변환 실패 시 `(Jira wiki markup 변환 실패, 원문)` + 펜스 블록. 강조는 ASCII 영숫자 옆에서는 적용하지 않음(한국어 조사 옆은 적용). `-strike-`, `+underline+`, 여러 줄 표 셀은 변환하지 않음.
 - **init 마법사**: 모든 경로가 저장 뒤 doctor를 실행하고 그 종료 코드를 돌려준다. confluence 블록이 없으면 `enabled: false`로 써서 Phase 5 전까지 ✗가 나지 않게 한다. 인증·네트워크 실패 시 대화형은 URL·PAT를 3회까지 다시 묻고, 비대화형은 즉시 2/3/4로 종료. PAT 입력에서 Enter는 기존 저장값 유지. `jql_mine`과 뷰는 선택 뒤 검증하되 문제가 있어도 저장은 한다.
-- **Emacs `o`**: 페이지가 없거나 `stub: true`면 `sync --key`를 비동기로 돌린 뒤 연다. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
+- **search ↔ FTS**: `jira/.cache.sqlite`가 있으면 jira 범위는 캐시만 검색한다(파일 단위 결과: 경로, 줄 1, `키 · 상태 · 제목`). 캐시를 열지 못하면 jira/*.md를 직접 훑는다. daily·inbox·wiki는 항상 파일 스캔(D63).
+- **init 동작 변경(Phase 0 테스트 수정)**: `kb.py init`(인수 없음)은 대화형 마법사이고 stdin이 닫혀 있으면 첫 질문에서 취소(종료 1). `--section jira`는 `config.local.yaml`이 없으면 종료 4("먼저 init으로 전체 설정").
+- **Emacs `o`**: 페이지가 없거나 `stub: true`면 `sync --key`를 비동기로 돌린 뒤 연다.
+
+### Phase 2 검토·수정 라운드 (2026-11-05)
+
+Opus 3명 독립 검토(지시서·Jira DC API 대조 / 데이터 안전 / 거짓 통과) → 14건 → 전부 수정. 865개 통과 + 클립보드 2개 건너뜀. 추가 결정:
+
+- **범위 밖 일감**: 전체 동기화 때 로컬에 있는 동기화된 일감(stub·완료 제외) 중 범위 검색이 돌려주지 않은 것을 `key in (…)` 50개 묶음(범위로 감싸지 않음, 400이면 `issue()`로 하나씩)으로 다시 받는다. 돌아오지 않는 것(삭제·권한 없음)은 `in_scope: false`, 키가 바뀐 것은 `moved_to: NEW` + 새 파일. `in_scope: false`인 파일은 프로젝트 표·캐시·`일감.base`(`!file.hasProperty("in_scope")`)에서 제외하고 다시 받지 않는다. 나중에 범위에 다시 들어오면 표시가 사라진다. `sync --key KB-12`가 OPS-40을 돌려주면 OPS-40.md를 쓰고 KB-12는 옮김 표시.
+- **전체 동기화 조건**(기존 `--full`·캐시 없음·25일 외에): 범위 해시(정렬된 project_keys + jql_mine, `sync.json`의 `scope`)가 없거나 달라짐, `last_sync`/`last_full`이 미래, `last_full`이 `jira.full_every_hours`(기본 24)보다 오래됨. 기존 볼트는 업그레이드 뒤 첫 실행에서 전체 동기화 1회.
+- **캐시 잠김**: sqlite `locked`/`busy`는 FileBusy(종료 6, "캐시를 다른 프로그램이 쓰고 있습니다"), 손상 메시지와 구분. 열 때 스키마·메타가 같으면 아무것도 쓰지 않는다.
+- front matter의 모든 텍스트 필드는 한 줄(NEL·U+2028·CR·LF → 공백). DC 스프린트 문자열은 첫 값 우선(goal 안의 `,name=` 무시).
+- **init PAT**: 입력한 PAT는 `/myself` 성공 전에는 저장하지 않고, 마지막 `config.local.yaml` 저장 직전에 함께 저장(같은 값이면 생략). 실패·취소는 자격 증명 저장소를 건드리지 않는다. stdin이 tty가 아니면 `getpass` 대신 한 줄을 읽고 EOF는 취소(Windows에서 `getpass`가 리다이렉트된 stdin을 무시하기 때문).
+- mock 모드 추가: `move()`, `remove()`, `repeat_page_boundary`. 클라이언트는 페이지 경계에서 중복 키를 건너뛴다.
+- 미처리(다음 Phase로): Emacs `o`가 `moved_to`를 따라가기; `sync --key`·`--jql --cache`로 받은 범위 밖 일감은 다음 전체 동기화 때 표시됨.
+- 사용자 확인 대기(D31): Obsidian에서 `jira/_views/일감.base`·`wiki/엔티티.base` 열어 표·정렬 확인(`sort` 키 문법 미확인). 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 

@@ -44,6 +44,7 @@ class Command:
     func: str = "main"
     agent_ok: bool = True
     help: str = field(default="", kw_only=True)
+    agent_ok_sub: tuple[str, ...] = field(default=(), kw_only=True)  # agent_ok=False여도 허용되는 하위 명령
 
 
 # Phase가 진행되며 늘어난다. 이름 → Command. 모듈은 scripts/ 바로 아래.
@@ -57,6 +58,8 @@ COMMANDS: dict[str, Command] = {
     "search": Command("search", help='검색: kb.py search "질의"'),
     # Phase 2
     "sync": Command("jira_sync", help="Jira 일감 캐시 동기화 (--full, --key, --jql)"),
+    # Phase 3
+    "act": Command("jira_act", agent_ok=False, agent_ok_sub=("list",), help="Jira 쓰기(큐): comment·transition·assign·worklog·create·promote·flush·list"),
 }
 
 ALIASES: dict[str, str] = {"jira_sync": "sync"}
@@ -78,7 +81,7 @@ def main(argv: list[str]) -> int:
     command = COMMANDS.get(name)
     if command is None:
         raise core.ConfigError(f"알 수 없는 명령: {argv[0]}\n{usage()}")
-    if not command.agent_ok:
+    if not command.agent_ok and argv[1:2] != [sub for sub in argv[1:2] if sub in command.agent_ok_sub]:
         core.refuse_if_agent(name)
     module = importlib.import_module(command.module)
     return int(getattr(module, command.func)(argv[1:]) or 0)

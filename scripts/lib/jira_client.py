@@ -142,7 +142,8 @@ def _sprint_entry(value: Any) -> tuple[str, str] | None:
         for part in _SPRINT_SPLIT.split(match.group(1)):
             key, sep, val = part.partition("=")
             if sep:
-                attrs[key.strip()] = val
+                # 첫 값이 이긴다: goal(자유 글) 안의 `,name=`·`,state=`가 앞의 진짜 값을 덮지 못하게
+                attrs.setdefault(key.strip(), val)
         name = (attrs.get("name") or "").strip()
         if not name or name == "<null>":
             return None

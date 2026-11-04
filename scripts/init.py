@@ -2,13 +2,15 @@
 
 대화형 마법사 (§6.11, Phase 2 범위)
 1. environment 선택(home/company). company면 공개 호스트 금지 안내.
-2. Jira: base_url → PAT(가려서 입력) → 자격 증명 저장소 work-kb/jira → `/myself` 확인 →
+2. Jira: base_url → PAT(가려서 입력, 메모리에만) → `/myself` 확인 →
    `/project` 목록에서 번호·키로 고르기 → project_keys. sprint 필드를 찾아 jira.sprint_field에 적고(D51),
    jql_mine·뷰 JQL을 maxResults=0으로 확인한다(D49, 실패해도 저장은 한다).
 3. Confluence·LLM 단계는 이후 Phase에서 더한다(지금은 안내만).
-4. config.local.yaml 저장(config.save_local, PAT는 쓰지 않는다) → doctor 실행, 그 종료 코드를 돌려준다.
+4. 확인된 PAT를 자격 증명 저장소 work-kb/jira에 저장(같은 값이면 건너뜀) → config.local.yaml 저장
+   (config.save_local, PAT는 쓰지 않는다) → doctor 실행, 그 종료 코드를 돌려준다.
 
-재실행하면 기존 config.local.yaml 값이 기본값이다. 입력이 끝나면(EOF) 취소하고 종료 1, 설정은 그대로다.
+재실행하면 기존 config.local.yaml 값이 기본값이다. 입력이 끝나면(EOF) 취소하고 종료 1, 설정 파일과
+자격 증명 저장소는 그대로다. 인증·네트워크 실패도 저장된 PAT를 바꾸지 않는다.
 
 옵션
 - `--section jira`: 기존 설정 위에서 Jira 단계만. confluence·llm은 해당 Phase 안내(종료 4).
@@ -29,6 +31,7 @@ import copy
 import getpass
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -82,11 +85,32 @@ def default_ask(prompt: str, default: str | None = None) -> str:
     return answer.strip() or (default or "")
 
 
-def default_ask_secret(prompt: str) -> str:
+def _stdin_is_tty() -> bool:
     try:
-        value = getpass.getpass(f"{prompt} (입력이 보이지 않습니다): ")
-    except EOFError:
-        raise Cancelled(CANCEL_MESSAGE) from None
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def default_ask_secret(prompt: str) -> str:
+    """콘솔이면 getpass(가림). 입력이 파이프·파일이면 한 줄을 읽는다.
+
+    Windows의 getpass는 콘솔을 직접 읽어 넘겨준 stdin과 그 끝(EOF)을 보지 못하고 멈춘다. 그래서 콘솔이 아닐 때는
+    stdin을 직접 읽고, 입력이 끝났으면 취소한다. 콘솔에서 Ctrl-Z만 입력해도 취소로 본다.
+    """
+    if _stdin_is_tty():
+        try:
+            value = getpass.getpass(f"{prompt} (입력이 보이지 않습니다): ")
+        except EOFError:
+            raise Cancelled(CANCEL_MESSAGE) from None
+        if value.strip() in ("\x1a", "\x04"):
+            raise Cancelled(CANCEL_MESSAGE)
+    else:
+        print(f"{prompt} (표준 입력에서 읽습니다): ", end="", flush=True)
+        line = sys.stdin.readline() if sys.stdin is not None else ""
+        if line == "":
+            raise Cancelled(CANCEL_MESSAGE)
+        value = line.rstrip("\r\n")
     value = value.strip()
     core.register_secret(value)
     return value
@@ -120,6 +144,8 @@ class Wizard:
         self.steps: list[Callable[[Wizard, dict], None]] = list(steps or [])
         self.values = values  # None이면 대화형
         self.cfg = cfg  # 병합된 설정(lib.config.Config). 뷰 JQL·연결 설정을 읽는다
+        # 확인을 마친 비밀값 {저장소 이름: 값}. 마지막에 설정 파일과 함께 저장한다(실패·취소면 저장소는 그대로)
+        self.pending_secrets: dict[str, str] = {}
 
     @property
     def interactive(self) -> bool:
@@ -307,31 +333,37 @@ def step_environment(wizard: Wizard, data: dict) -> None:
 
 
 def _connect(wizard: Wizard, jira: dict):
-    """base_url → PAT → 저장 → /myself. (client, myself)를 돌려준다. 대화형이면 실패 시 다시 묻는다."""
+    """base_url → PAT → /myself. (client, myself)를 돌려준다. 대화형이면 실패 시 다시 묻는다.
+
+    입력한 PAT는 메모리에만 두고 /myself가 성공하면 `wizard.pending_secrets`에 올린다. 자격 증명 저장소에는
+    run_wizard가 config.local.yaml과 함께 마지막에 쓴다. 그래서 인증·네트워크 실패나 취소는 저장된 PAT를 바꾸지 않는다.
+    """
     from lib import jira_client
-    from lib import secrets as kb_secrets
 
     url_default = jira.get("base_url") if isinstance(jira.get("base_url"), str) and jira.get("base_url") else None
-    existing_pat = _stored_pat(jira.get("pat_ref"), wizard.cfg)
+    stored_pat = _stored_pat(jira.get("pat_ref"), wizard.cfg)
+    fallback = stored_pat  # 비워 두면 쓸 값: 저장된 PAT, 또는 네트워크 실패 전에 방금 입력한 PAT
     for attempt in range(1, MAX_TRIES + 1):
         base_url = wizard.choose("jira.base_url", "Jira 주소 (예: https://jira.example.invalid)", url_default, parse_base_url)
         url_default = base_url
-        hint = " (비우면 저장된 값 유지)" if existing_pat else ""
+        if fallback and fallback == stored_pat:
+            hint = " (비우면 저장된 값 유지)"
+        elif fallback:
+            hint = " (비우면 방금 입력한 값 사용)"
+        else:
+            hint = ""
         pat = wizard.secret("jira.pat", f"Jira 개인 액세스 토큰(PAT){hint}")
         if not pat:
-            if not existing_pat:
+            if not fallback:
                 if not wizard.interactive:
                     raise core.ConfigError(f"{ENV_FIELDS['jira.pat']}이(가) 필요합니다 (자격 증명 저장소에 저장된 PAT도 없습니다)")
                 if attempt == MAX_TRIES:
                     raise core.ConfigError("PAT를 입력하지 않았습니다")
                 wizard.out("  PAT가 비었습니다. 다시 입력하세요")
                 continue
-            pat = existing_pat
-            wizard.out(f"  저장된 PAT를 씁니다 ({SERVICE}/jira)")
-        else:
-            kb_secrets.store(SERVICE, "jira", pat)
-            wizard.out(f"  자격 증명 저장소에 저장했습니다 ({SERVICE}/jira)")
-            existing_pat = pat
+            pat = fallback
+            if pat == stored_pat:
+                wizard.out(f"  저장된 PAT를 씁니다 ({SERVICE}/jira)")
         client = jira_client.JiraClient(base_url, pat, conn=_conn(wizard, jira))
         try:
             me = client.myself()
@@ -341,8 +373,14 @@ def _connect(wizard: Wizard, jira: dict):
                 raise
             wizard.out(f"  연결하지 못했습니다: {_error_text(exc)}")
             wizard.out("  주소와 PAT를 다시 입력하세요")
-            existing_pat = None if isinstance(exc, core.AuthError) else existing_pat
+            if isinstance(exc, core.AuthError):
+                fallback = None if pat == fallback else fallback  # 거부된 PAT는 기본값으로 다시 내놓지 않는다
+            else:
+                fallback = pat
             continue
+        if pat != stored_pat:
+            wizard.out(f"  PAT를 확인했습니다. 설정과 함께 자격 증명 저장소에 저장합니다 ({SERVICE}/jira)")
+        wizard.pending_secrets["jira"] = pat
         jira["base_url"] = base_url
         jira["pat_ref"] = _keyring_ref("jira")
         return client, me if isinstance(me, Mapping) else {}
@@ -470,6 +508,17 @@ def read_local(config_dir: Path) -> dict:
     return data
 
 
+def _commit_secrets(pending: Mapping[str, str], say: Callable[[str], None]) -> None:
+    """확인된 비밀값을 자격 증명 저장소에 쓴다. 이미 같은 값이면 쓰지 않는다."""
+    from lib import secrets as kb_secrets
+
+    for name, value in pending.items():
+        if _stored_pat(_keyring_ref(name), None) == value:
+            continue
+        kb_secrets.store(SERVICE, name, value)
+        say(f"자격 증명 저장소에 저장했습니다 ({SERVICE}/{name})")
+
+
 def run_wizard(
     root: Path | str | None,
     *,
@@ -495,6 +544,7 @@ def run_wizard(
     if cfg.local_exists:
         say(f"기존 설정을 기본값으로 씁니다: {local_path}")
     data = wizard.run(existing)  # 구역만 다시 할 때 environment 등 다른 값은 그대로 남는다
+    _commit_secrets(wizard.pending_secrets, say)  # 확인된 PAT만, 설정 파일 바로 앞에서
     config.save_local(config_dir, data)
     say(f"\n설정을 저장했습니다: {local_path}" + (" (덮어씀)" if cfg.local_exists else ""))
     if not run_doctor:
