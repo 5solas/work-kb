@@ -26,12 +26,25 @@ def run_ps(*args: str, sta: bool = True, cwd: Path | None = None):
     return proc.returncode, proc.stdout.decode("oem", "replace"), proc.stderr.decode("oem", "replace")
 
 
+CLIPBOARD_DENIED = ("Clipboard operation did not succeed", "클립보드 작업을 수행하지 못했습니다")
+
+
+def _skip_if_clipboard_inaccessible(code: int, err: str) -> None:
+    """빌드용 셸(샌드박스·비대화형 데스크톱)에서는 클립보드 자체가 열리지 않는다.
+
+    스크립트 결함이 아니라 환경 문제이므로 건너뛰고, 사용자가 일반 데스크톱 세션에서 확인한다(DECISIONS Phase 1 관문).
+    """
+    if code == 3 and any(marker in err for marker in CLIPBOARD_DENIED):
+        pytest.skip("이 세션에서는 클립보드를 열 수 없습니다. 일반 데스크톱 세션에서 다시 실행하세요: " + err.strip().splitlines()[-1])
+
+
 def test_script_is_ascii():
     SCRIPT.read_bytes().decode("ascii")
 
 
 def test_probe_writes_nothing(tmp_path):
     code, _, err = run_ps("-Probe", cwd=tmp_path)
+    _skip_if_clipboard_inaccessible(code, err)
     assert code in (0, 2), err
     assert list(tmp_path.iterdir()) == []
 
@@ -51,6 +64,7 @@ def test_requires_sta(tmp_path):
 
 def test_save_matches_probe(tmp_path):
     pcode, _, perr = run_ps("-Probe")
+    _skip_if_clipboard_inaccessible(pcode, perr)
     assert pcode in (0, 2), perr
     out = tmp_path / "sub" / "clip.png"
     code, _, err = run_ps("-Out", str(out))
