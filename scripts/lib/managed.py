@@ -2,7 +2,8 @@
 
 규칙(D17·D24·D25):
 - 마커는 줄 전체가 `<!-- kb:NAME:start -->` 또는 `<!-- kb:NAME:end -->`인 줄이다(NAME = [a-z_]+).
-  줄 끝 공백은 허용하고, 앞에 공백이 있으면 마커가 아니다(들여쓴 코드 예시 보호).
+  줄 끝 공백·CR(\r\r\n 포함)은 허용하고, 앞에 공백이 있으면 마커가 아니다(들여쓴 코드 예시 보호).
+  CR 전용 줄끝(\r)도 줄 경계로 본다. 그런 파일에 새로 쓰는 줄끝은 \r이다.
 - 짝이 안 맞거나 같은 이름이 두 번이거나 겹치면 MarkerError. 그 파일은 고치지 않는다.
 - 구역 밖 바이트는 절대 바꾸지 않는다. 새 텍스트는 파일의 주된 줄끝(EOL)을 쓴다. BOM은 그대로 둔다.
 """
@@ -12,7 +13,8 @@ import re
 from typing import Iterable, Iterator, NamedTuple
 
 BOM = b"\xef\xbb\xbf"
-_MARKER = re.compile(rb"<!-- kb:([a-z_]+):(start|end) -->[ \t]*\r?")
+# 줄끝 앞의 CR은 몇 개든 공백처럼 본다(텍스트 모드로 CRLF를 쓰면 \r\r\n이 된다).
+_MARKER = re.compile(rb"<!-- kb:([a-z_]+):(start|end) -->[ \t\r]*")
 _NAME = re.compile(r"[a-z_]+")
 
 
@@ -43,13 +45,43 @@ def _lines(data: bytes) -> Iterator[tuple[int, int, int]]:
         pos = nl + 1
 
 
+def _marker_lines(data: bytes) -> Iterator[tuple[int, int, int]]:
+    """마커 찾기용 줄 나누기. `\\n` 말고도 CR 전용 줄끝(뒤에 \\r·\\n이 없는 \\r)에서 끊는다.
+
+    `\\r\\r\\n`의 앞 CR들은 줄 내용에 남고(_MARKER가 허용), 줄끝은 `\\n`이다.
+    """
+    pos, size = 0, len(data)
+    while pos < size:
+        nl = data.find(b"\n", pos)
+        stop = size if nl < 0 else nl
+        cr = data.find(b"\r", pos, stop)
+        while cr >= 0 and cr + 1 < size and data[cr + 1 : cr + 2] in (b"\r", b"\n"):
+            cr = data.find(b"\r", cr + 1, stop)
+        if cr >= 0:
+            yield pos, cr, cr + 1
+            pos = cr + 1
+        elif nl < 0:
+            yield pos, size, size
+            return
+        else:
+            yield pos, nl, nl + 1
+            pos = nl + 1
+
+
 def _line_no(data: bytes, offset: int) -> int:
-    return data.count(b"\n", 0, offset) + 1
+    return sum(1 for start, _, _ in _marker_lines(data) if start <= offset) or 1
+
+
+def _eol(data: bytes) -> bytes:
+    """새로 쓰는 줄끝. CR 전용 파일이면 b'\\r', 아니면 detect_eol."""
+    if b"\n" not in data and b"\r" in data:
+        return b"\r"
+    return detect_eol(data)
 
 
 def _markers(data: bytes) -> Iterator[tuple[str, str, int, int]]:
     """(이름, 'start'|'end', 마커 줄 시작, 다음 줄 시작)."""
-    for start, content_end, end in _lines(data):
+    for start, content_end, end in _marker_lines(data):
         pos = 3 if start == 0 and data.startswith(BOM) else start
         if data[pos : pos + 1] != b"<":
             continue
@@ -115,7 +147,7 @@ def _encode_lines(text: str, eol: bytes) -> bytes:
 def _append_new(data: bytes, name: str, body: bytes, eol: bytes) -> bytes:
     """파일 끝에 구역을 만든다. 마지막 줄이 줄끝 없이 끝나면 줄끝 하나만 붙인다."""
     head = data
-    if head and head != BOM and not head.endswith(b"\n"):
+    if head and head != BOM and not head.endswith((b"\n", b"\r")):
         head += eol
     return head + _marker(name, "start") + eol + body + _marker(name, "end") + eol
 
@@ -143,7 +175,7 @@ def read_region(data: bytes, name: str) -> bytes | None:
 def replace_region(data: bytes, name: str, body: str) -> bytes:
     """구역 본문을 통째로 바꾼다. 구역이 없으면 파일 끝에 만든다. 빈 본문이면 마커만 남는다."""
     region = _find(data, name)
-    eol = detect_eol(data)
+    eol = _eol(data)
     new_body = _encode_lines(body, eol) if body else b""
     if region is None:
         return _append_new(data, name, new_body, eol)
@@ -153,7 +185,7 @@ def replace_region(data: bytes, name: str, body: str) -> bytes:
 def append_to_region(data: bytes, name: str, entries: Iterable[str]) -> bytes:
     """끝 마커 바로 앞에 항목을 넣는다. 기존 바이트는 바꾸지 않는다. 구역이 없으면 만든다."""
     region = _find(data, name)
-    eol = detect_eol(data)
+    eol = _eol(data)
     payload = b"".join(_encode_lines(entry, eol) for entry in entries)
     if region is None:
         return _append_new(data, name, payload, eol)

@@ -20,7 +20,6 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import urlsplit
 
 from lib import core
 
@@ -96,6 +95,8 @@ class Context:
     secrets: dict[str, str | None] = field(default_factory=dict)  # 참조 이름 → 값
     secret_errors: dict[str, str] = field(default_factory=dict)  # 참조 이름 → 해결 안내
     public_profiles: set[str] = field(default_factory=set)
+    # 회사 환경에서는 공개 호스트 검사가 끝까지 돈 뒤에만 LLM을 부른다(D44, 안전 쪽).
+    public_check_done: bool = False
 
     def vault_root(self) -> Path:
         if self.cfg is not None:
@@ -212,6 +213,10 @@ def check_config(ctx: Context) -> None:
 
     try:
         ctx.cfg = config.load(ctx.root_arg)
+    except config.BlocklistError as exc:
+        # 차단 목록을 믿을 수 없다. 설정이 없으니 LLM도 부르지 않는다. 회사 환경이면 종료 5.
+        ctx.report.fail("config.yaml", str(exc), public_host=exc.environment == "company")
+        return
     except core.ConfigError as exc:
         ctx.report.fail("config.yaml", str(exc))
         return
@@ -236,23 +241,59 @@ def check_public_hosts(ctx: Context) -> None:
         return
     if cfg.environment != "company":
         ctx.report.info("공개 호스트 차단", "집 환경이라 검사하지 않습니다")
+        ctx.public_check_done = True
         return
+    try:
+        _scan_public_hosts(ctx)
+    except Exception as exc:  # 검사가 깨지면 모든 프로필을 공개로 본다(안전 쪽)
+        ctx.public_profiles.update(_all_profile_names(cfg))
+        ctx.report.fail(
+            "공개 호스트 차단",
+            f"검사하지 못했습니다 ({type(exc).__name__}: {exc}) → LLM을 부르지 않습니다. "
+            "llm.profiles와 llm.public_hosts_blocklist를 확인하세요",
+            public_host=True,
+        )
+        return
+    ctx.public_check_done = True
+
+
+def _all_profile_names(cfg: Any) -> set[str]:
+    names: set[str] = set()
+    try:
+        raw = cfg.get("llm.profiles")
+        if isinstance(raw, Mapping):
+            names.update(str(k) for k in raw)
+    except Exception:
+        pass
+    try:
+        names.update(_profiles_to_check(cfg))
+    except Exception:
+        pass
+    return names
+
+
+def _scan_public_hosts(ctx: Context) -> None:
     from lib import config
 
-    blocklist = cfg.blocklist
+    cfg = ctx.cfg
+    blocklist = cfg.blocklist | config.CODE_BLOCKLIST
     for name, profile in cfg.profiles().items():
         url = profile.get("base_url")
-        if isinstance(url, str) and config.is_public_host(url, blocklist):
-            ctx.public_profiles.add(name)
-            try:
-                host = urlsplit(url).hostname or url
-            except ValueError:
-                host = url
-            ctx.report.fail(
-                f"LLM {name} 주소",
-                f"공개 LLM 호스트입니다 ({host}) → 회사 자료가 밖으로 나갈 수 있습니다. 사내 LLM 주소로 바꾸세요 (kb.py init --section llm)",
-                public_host=True,
+        if not isinstance(url, str) or not config.is_public_host(url, blocklist):
+            continue
+        ctx.public_profiles.add(name)
+        host = config.checked_host(url)
+        if host is None:
+            text = (
+                f"주소에서 호스트를 하나로 정할 수 없습니다 ({url!r}) → '\\'·'@'·공백·한글 없이 "
+                "사내 LLM 주소를 다시 쓰세요 (kb.py init --section llm)"
             )
+        else:
+            text = (
+                f"공개 LLM 호스트입니다 ({host}) → 회사 자료가 밖으로 나갈 수 있습니다. "
+                "사내 LLM 주소로 바꾸세요 (kb.py init --section llm)"
+            )
+        ctx.report.fail(f"LLM {name} 주소", text, public_host=True)
     if not ctx.public_profiles:
         ctx.report.ok("공개 호스트 차단", "공개 LLM 주소 없음")
 
@@ -396,6 +437,9 @@ def _check_profile(ctx: Context, name: str, profiles: Mapping[str, dict]) -> Non
     if name in ctx.public_profiles:
         ctx.report.info(label, "공개 LLM 호스트라 호출하지 않았습니다")
         return
+    if ctx.cfg.environment != "home" and not ctx.public_check_done:
+        ctx.report.info(label, "공개 호스트 검사가 끝나지 않아 호출하지 않았습니다")
+        return
     base = profile.get("base_url")
     if not isinstance(base, str) or not base.strip():
         ctx.report.fail(label, f"llm.profiles.{name}.base_url이 없습니다 → kb.py init --section llm")
@@ -507,36 +551,125 @@ def check_powershell(ctx: Context) -> None:
     if exe is None:
         ctx.report.info(name, "powershell.exe를 찾지 못했습니다. 클립보드 이미지는 F(파일)로 캡처하세요")
         return
-    # pwsh 7에서 물려받은 PSModulePath가 있으면 5.1이 Security 모듈을 못 읽는다. 빼고 실행한다.
-    env = {k: v for k, v in os.environ.items() if k.upper() != "PSMODULEPATH"}
-    try:
-        result = subprocess.run(
-            [exe, "-NoProfile", "-NonInteractive", "-Command", "Get-ExecutionPolicy"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=TIMEOUT,
-            stdin=subprocess.DEVNULL,
-            env=env,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    except subprocess.TimeoutExpired:
-        ctx.report.info(name, f"{TIMEOUT}초 안에 응답하지 않았습니다")
+    result = _run_powershell(exe, _POLICY_COMMAND)
+    if isinstance(result, str):
+        ctx.report.info(name, result)
         return
-    except OSError as exc:
-        ctx.report.info(name, f"실행하지 못했습니다 ({exc.strerror or exc})")
-        return
-    policy = (result.stdout or "").strip().splitlines()
-    if result.returncode != 0 or not policy:
+    scopes, effective = _parse_policies(result.stdout or "")
+    if result.returncode != 0 or effective is None:
         first = next((line.strip() for line in (result.stderr or "").splitlines() if line.strip()), "출력 없음")
         ctx.report.info(name, f"확인하지 못했습니다 ({first[:120]})")
         return
-    value = policy[-1].strip()
-    note = "클립보드 스크립트는 -ExecutionPolicy Bypass로 실행합니다"
-    if value in ("Restricted", "AllSigned"):
-        note += ". 그룹 정책이 막으면 F(파일)로 캡처하세요"
-    ctx.report.info(name, f"{value} ({note})")
+    # 그룹 정책(MachinePolicy·UserPolicy)은 -ExecutionPolicy Bypass보다 앞선다(D12).
+    for scope in _GPO_SCOPES:
+        if scopes.get(scope) in _BLOCKING_POLICIES:
+            ctx.report.fail(
+                name,
+                f"그룹 정책 {scope}가 {scopes[scope]}입니다. 클립보드 이미지 스크립트를 실행할 수 없습니다 → F(파일) 캡처를 쓰세요",
+            )
+            return
+    scope = next((s for s in _SCOPE_ORDER if scopes.get(s) not in (None, "Undefined")), None)
+    where = f", {scope} 범위" if scope else ", 기본값"
+    ctx.report.info(name, f"{effective}{where} (클립보드 스크립트는 -ExecutionPolicy Bypass로 실행합니다)")
+
+
+_POLICY_COMMAND = (
+    "Get-ExecutionPolicy -List | ForEach-Object { [string]$_.Scope + '=' + [string]$_.ExecutionPolicy }; "
+    "'Effective=' + [string](Get-ExecutionPolicy)"
+)
+_SCOPE_ORDER = ("MachinePolicy", "UserPolicy", "Process", "CurrentUser", "LocalMachine")
+_GPO_SCOPES = ("MachinePolicy", "UserPolicy")
+_BLOCKING_POLICIES = ("Restricted", "AllSigned")
+
+
+def _parse_policies(stdout: str) -> tuple[dict[str, str], str | None]:
+    scopes: dict[str, str] = {}
+    effective = None
+    for line in stdout.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if not sep or not value.strip():
+            continue
+        if key.strip() == "Effective":
+            effective = value.strip()
+        else:
+            scopes[key.strip()] = value.strip()
+    return scopes, effective
+
+
+def _powershell_env() -> dict[str, str]:
+    """5.1에 넘길 환경. 부모(pwsh 7 등)의 설정이 결과를 바꾸지 않게 뺀다.
+
+    - PSModulePath: 7의 경로가 있으면 5.1이 Security 모듈을 못 읽는다.
+    - PSExecutionPolicyPreference: 부모의 Process 범위 Bypass가 그대로 보인다.
+    """
+    drop = {"PSMODULEPATH", "PSEXECUTIONPOLICYPREFERENCE"}
+    return {k: v for k, v in os.environ.items() if k.upper() not in drop}
+
+
+def _run_powershell(exe: str, command: str) -> subprocess.CompletedProcess | str:
+    """실행 결과 또는 안내 문장. 5.1은 출력을 콘솔 OEM 코드 페이지(cp949 등)로 쓴다."""
+    try:
+        return subprocess.run(
+            [exe, "-NoProfile", "-NonInteractive", "-Command", command],
+            capture_output=True,
+            text=True,
+            encoding="oem" if sys.platform == "win32" else "utf-8",
+            errors="replace",
+            timeout=TIMEOUT,
+            stdin=subprocess.DEVNULL,
+            env=_powershell_env(),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return f"{TIMEOUT}초 안에 응답하지 않았습니다"
+    except OSError as exc:
+        return f"실행하지 못했습니다 ({exc.strerror or exc})"
+
+
+def _offset_text(offset: Any) -> str:
+    if offset is None:
+        return "?"
+    minutes = int(offset.total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    minutes = abs(minutes)
+    return f"{sign}{minutes // 60:02d}:{minutes % 60:02d}"
+
+
+def _zoneinfo_available(name: str) -> bool:
+    try:
+        from zoneinfo import ZoneInfo
+
+        ZoneInfo(name)
+    except Exception:
+        return False
+    return True
+
+
+@check("시간대")
+def check_timezone(ctx: Context) -> None:
+    """설정 시간대와 OS 시간대를 견준다(D04). 늘 '-'이다."""
+    cfg = ctx.cfg
+    if cfg is None:
+        return
+    import datetime as dt
+
+    tz_name = str(cfg.get("timezone") or "Asia/Seoul")
+    tz = core.resolve_tz(tz_name)
+    now = dt.datetime.now(dt.timezone.utc)
+    configured = now.astimezone(tz).utcoffset()
+    local = now.astimezone().utcoffset()
+    text = f"설정 {tz_name}({_offset_text(configured)}) · OS {_offset_text(local)}"
+    notes = []
+    if configured != local:
+        notes.append("OS 시간대가 설정과 다릅니다. 기록 시각은 설정 시간대를 따릅니다")
+    if not _zoneinfo_available(tz_name):
+        if isinstance(tz, dt.timezone) and tz.tzname(None) == tz_name:
+            notes.append("tzdata가 없어 고정 표를 씁니다")
+        else:
+            notes.append("tzdata가 없고 고정 표에도 없어 OS 시간대를 씁니다")
+    if notes:
+        text += " → " + ". ".join(notes)
+    ctx.report.info("시간대", text)
 
 
 @check("편집기")
@@ -574,6 +707,7 @@ CHECKS: list[Checker] = [
     check_detected,
     check_write,
     check_path,
+    check_timezone,
     check_powershell,
     check_editors,
 ]

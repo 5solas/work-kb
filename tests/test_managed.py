@@ -85,6 +85,43 @@ def test_marker_trailing_whitespace_and_end_at_eof():
     assert managed.read_region(data, "lint") == b"body\r\n"
 
 
+CRCRLF = b"# p\r\r\n<!-- kb:mentions:start -->\r\r\n- old\r\r\n<!-- kb:mentions:end -->\r\r\n"
+CR_ONLY = b"# p\r<!-- kb:mentions:start -->\r- old\r<!-- kb:mentions:end -->\r"
+
+
+def test_crcrlf_markers_are_recognised():
+    # 텍스트 모드 스트림에 CRLF를 쓰면 \r\r\n이 된다(Windows).
+    assert managed.spans(CRCRLF) == [("mentions", CRCRLF.index(b"- old"), CRCRLF.index(b"<!-- kb:mentions:end"))]
+    assert managed.read_region(CRCRLF, "mentions") == b"- old\r\r\n"
+    new = managed.replace_region(CRCRLF, "mentions", "- new")
+    assert new.count(b"<!-- kb:mentions:start -->") == 1
+    assert new == b"# p\r\r\n<!-- kb:mentions:start -->\r\r\n- new\r\n<!-- kb:mentions:end -->\r\r\n"
+    assert managed.strip_markers(CRCRLF, drop_regions=["mentions"]) == b"# p\r\r\n"
+
+
+def test_cr_only_markers_are_recognised():
+    assert [name for name, _, _ in managed.spans(CR_ONLY)] == ["mentions"]
+    assert managed.read_region(CR_ONLY, "mentions") == b"- old\r"
+    new = managed.replace_region(CR_ONLY, "mentions", "- new\n- 둘째")
+    assert new.count(b"<!-- kb:mentions:start -->") == 1
+    assert new == "# p\r<!-- kb:mentions:start -->\r- new\r- 둘째\r<!-- kb:mentions:end -->\r".encode("utf-8")
+    assert managed.append_to_region(CR_ONLY, "mentions", ["- 추가"]).count(b"<!-- kb:mentions:end -->") == 1
+    assert managed.strip_markers(CR_ONLY, drop_regions=["mentions"]) == b"# p\r"
+
+
+def test_cr_only_new_region_and_error_line_number():
+    assert managed.detect_eol(b"a\rb\r") == b"\n"  # 공개 계약은 그대로(CR 전용은 내부에서만 처리)
+    assert managed.replace_region(b"a\rb\r", "summary", "S") == b"a\rb\r<!-- kb:summary:start -->\rS\r<!-- kb:summary:end -->\r"
+    with pytest.raises(MarkerError, match="3번째 줄"):
+        managed.spans(b"a\rb\r<!-- kb:x:end -->\r")
+
+
+def test_stray_cr_variants_of_markers_are_not_silently_ignored():
+    # 줄끝 앞 CR이 몇 개든 마커로 본다 → 짝이 안 맞으면 MarkerError(D24), 무시하지 않는다.
+    with pytest.raises(MarkerError):
+        managed.spans(b"<!-- kb:a:start -->\r\r\r\nbody\n")
+
+
 def test_lookalikes_are_not_markers():
     data = (
         b"    <!-- kb:summary:start -->\n"  # 들여쓴 코드 예시

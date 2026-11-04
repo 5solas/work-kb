@@ -44,9 +44,22 @@ def test_run_main_redacts_registered_secrets(capsys):
     assert "***" in err
 
 
-def test_argv_stdin_roundtrips_korean_and_emoji(monkeypatch):
-    payload = ["link", "--note", "한글 😀 경로", "C:\\한글 폴더\\파일.md"]
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(payload).encode("utf-8"))))
+def _feed_stdin(monkeypatch, raw: bytes) -> None:
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8"))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        ["link", "--note", "한글 😀 경로", "C:\\한글 폴더\\파일.md"],
+        ["capture", "가나다라마바사 아자차카타파하", "뷁 똠 쀍"],  # cp949로 읽으면 깨지거나 실패
+    ],
+)
+def test_argv_stdin_roundtrips_raw_utf8(monkeypatch, payload):
+    raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")  # Emacs json-serialize와 같은 날것 UTF-8
+    assert b"\\u" not in raw
+    assert raw.decode("cp949", "replace") != raw.decode("utf-8")  # 전제: cp949 해독이면 다른 결과
+    _feed_stdin(monkeypatch, raw + b" \r\n")
     seen = {}
 
     def main(argv):
@@ -54,13 +67,21 @@ def test_argv_stdin_roundtrips_korean_and_emoji(monkeypatch):
         return 0
 
     with pytest.raises(SystemExit) as info:
-        core.run_main(main, ["--argv-stdin"])
+        core.run_main(main, ["--argv-stdin", "--뒤"])
     assert info.value.code == 0
-    assert seen["argv"] == payload
+    assert seen["argv"] == payload + ["--뒤"]
+
+
+def test_argv_stdin_rejects_invalid_utf8(monkeypatch, capsys):
+    _feed_stdin(monkeypatch, '["한글"]'.encode("cp949"))
+    with pytest.raises(SystemExit) as info:
+        core.run_main(lambda argv: 0, ["--argv-stdin"])
+    assert info.value.code == 4
+    assert "--argv-stdin" in capsys.readouterr().err
 
 
 def test_argv_stdin_rejects_non_list(monkeypatch, capsys):
-    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b'{"a": 1}')))
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(b'{"a": 1}'), encoding="utf-8"))
     with pytest.raises(SystemExit) as info:
         core.run_main(lambda argv: 0, ["--argv-stdin"])
     assert info.value.code == 4
@@ -81,10 +102,31 @@ def test_refuse_if_agent(monkeypatch):
         core.refuse_if_agent("댓글")
 
 
-def test_resolve_tz_seoul_without_tzdata():
-    tz = core.resolve_tz("Asia/Seoul")
-    assert tz.utcoffset(dt.datetime(2026, 11, 5)) == dt.timedelta(hours=9)
-    assert core.resolve_tz("Nowhere/Invalid") is not None
+def test_resolve_tz_uses_fixed_table_without_tzdata(monkeypatch):
+    import zoneinfo
+
+    def no_tzdata(name):
+        raise zoneinfo.ZoneInfoNotFoundError(name)
+
+    local = dt.timezone(dt.timedelta(hours=-5), "테스트 로컬")
+    monkeypatch.setattr(zoneinfo, "ZoneInfo", no_tzdata)
+    monkeypatch.setattr(core, "_os_local_tz", lambda: local)
+    when = dt.datetime(2026, 11, 5)
+    assert core.resolve_tz("Asia/Seoul").utcoffset(when) == dt.timedelta(hours=9)  # OS 로컬(-5)이 아님
+    assert core.resolve_tz("UTC").utcoffset(when) == dt.timedelta(0)
+    assert core.resolve_tz("Nowhere/Invalid") is local
+
+
+def test_resolve_tz_prefers_zoneinfo(monkeypatch):
+    import zoneinfo
+
+    sentinel = dt.timezone(dt.timedelta(hours=3), "zoneinfo")
+    monkeypatch.setattr(zoneinfo, "ZoneInfo", lambda name: sentinel)
+    assert core.resolve_tz("Asia/Seoul") is sentinel
+
+
+def test_os_local_tz_is_a_tzinfo():
+    assert isinstance(core._os_local_tz(), dt.tzinfo)
 
 
 def test_now_honours_fake_now(monkeypatch):
@@ -126,19 +168,20 @@ def test_atomic_write_retries_while_handle_is_held(tmp_path):
         with pytest.raises(PermissionError):  # 전제: 열린 파일은 바로 교체되지 않는다
             os.replace(other, path)
 
-    release = threading.Event()
+    opened = threading.Event()
 
     def hold():
         with open(path, "rb"):
-            release.wait(0.6)
+            opened.set()
+            time.sleep(0.6)
 
     thread = threading.Thread(target=hold)
     thread.start()
-    time.sleep(0.05)
+    assert opened.wait(10), "도우미 스레드가 파일을 열지 못함"
     started = time.monotonic()
     core.atomic_write(path, b"new")
     assert time.monotonic() - started >= 0.3
-    thread.join()
+    thread.join(10)
     assert path.read_bytes() == b"new"
 
 
@@ -202,10 +245,33 @@ def test_lock_is_reentrant_in_process_and_held_until_outer_exit(tmp_path):
         ("con.md", "_con.md"),
         ("가" * 100, "가" * 80),
         ("a\x00b", "ab"),
+        ("CON .txt", "_CON .txt"),
+        ("nul .md", "_nul .md"),
+        ("COM¹", "_COM¹"),
+        ("LPT².png", "_LPT².png"),
+        ("CONIN$", "_CONIN$"),
+        ("CONOUT$", "_CONOUT$"),
+        ("conout$.md", "_conout$.md"),
+        ("COM0", "COM0"),
+        ("CONSOLE.md", "CONSOLE.md"),
+        ("회의 CON", "회의 CON"),
     ],
 )
 def test_safe_name(raw, expected):
     assert core.safe_name(raw) == expected
+
+
+@pytest.mark.skipif(not hasattr(os.path, "isreserved"), reason="os.path.isreserved는 Windows 전용")
+@pytest.mark.parametrize("raw", ["CON .txt", "nul .md", "COM¹", "LPT².png", "CONIN$", "CONOUT$", "aux", "PRN.tar.gz"])
+def test_safe_name_result_is_never_reserved(raw):
+    assert os.path.isreserved(raw)  # 전제
+    assert not os.path.isreserved(core.safe_name(raw))
+
+
+def test_safe_name_uses_os_isreserved(monkeypatch):
+    monkeypatch.setattr(os.path, "isreserved", lambda p: p == "새 예약 이름", raising=False)
+    assert core.safe_name("새 예약 이름") == "_새 예약 이름"
+    assert core.safe_name("보통 이름") == "보통 이름"
 
 
 def test_unique_path_never_overwrites(tmp_path):

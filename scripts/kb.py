@@ -10,7 +10,7 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -38,16 +38,18 @@ def _preflight() -> None:
 
 @dataclass(frozen=True)
 class Command:
+    """부록 A §2 계약: Command(module, func="main", agent_ok=True). help는 키워드 전용."""
+
     module: str
-    help: str
     func: str = "main"
     agent_ok: bool = True
+    help: str = field(default="", kw_only=True)
 
 
-# Phase가 진행되며 늘어난다. 이름 → (모듈, 설명). 모듈은 scripts/ 바로 아래.
+# Phase가 진행되며 늘어난다. 이름 → Command. 모듈은 scripts/ 바로 아래.
 COMMANDS: dict[str, Command] = {
-    "init": Command("init", "연결 설정 마법사 (--dev: 집 모의 환경)", agent_ok=False),
-    "doctor": Command("doctor", "연결·환경 점검"),
+    "init": Command("init", agent_ok=False, help="연결 설정 마법사 (--dev: 집 모의 환경)"),
+    "doctor": Command("doctor", help="연결·환경 점검"),
 }
 
 ALIASES: dict[str, str] = {}

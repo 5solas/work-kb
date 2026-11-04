@@ -376,15 +376,38 @@ def test_jql_mine_order_by_inside_quotes_allowed(vault):
         ("https://llm.example.invalid/v1", False),
         ("http://127.0.0.1:8083/v1", False),
         ("http://localhost:8083/v1", False),
+        ("http://[::1]:8083/v1", False),
+        ("  https://llm.example.invalid/v1  ", False),
         ("", False),
         ("   ", False),
-        ("http://[::1", False),
-        ("https://", False),
         (None, False),
+        # 호스트를 하나로 정할 수 없는 주소는 공개로 본다(안전 쪽, D44)
+        ("http://[::1", True),
+        ("https://", True),
+        ("https://api.deepinfra.com\\@llm.corp.invalid/v1", True),
+        ("https://llm.corp.invalid\\x/v1", True),
+        ("https://user@llm.corp.invalid/v1", True),
+        ("https://llm.corp.invalid#@x/v1", True),
+        ("https://llm.corp .invalid/v1", True),
+        ("https://llm.corp.invalid/v 1", True),
+        ("https://llm.corp.invalid\t/v1", True),
+        ("https://사내.invalid/v1", True),
+        ("https://llm%2Ecorp.invalid/v1", True),
     ],
 )
 def test_is_public_host(url, expected):
     assert config.is_public_host(url, config.CODE_BLOCKLIST) is expected
+
+
+def test_checked_host_matches_urllib3():
+    from urllib3.util import parse_url
+
+    for url in ("https://API.Example.invalid.:8443/v1", "http://127.0.0.1:8083/v1", "llm.example.invalid/v1"):
+        expected = parse_url(url if "://" in url else "//" + url).host.lower().rstrip(".")
+        assert config.checked_host(url) == expected
+    assert config.checked_host("http://[::1]:8083/v1") == "::1"
+    assert config.checked_host("https://api.deepinfra.com\\@llm.corp.invalid/v1") is None
+    assert config.checked_host(None) is None
 
 
 def test_is_public_host_normalises_blocklist_entries():
@@ -399,8 +422,56 @@ def test_blocklist_is_union(vault):
     cfg = config.load(vault, environ={})
     assert "cloud-llm.invalid" in cfg.blocklist
     assert config.CODE_BLOCKLIST <= cfg.blocklist  # 설정으로 뺄 수 없다
+    # 환경변수 겹도 더하기만 한다. 빈 목록으로 줄일 수 없다(D44).
     cfg = config.load(vault, environ={"KB_LLM_PUBLIC_HOSTS_BLOCKLIST": "[]"})
+    assert "cloud-llm.invalid" in cfg.blocklist
+    assert config.CODE_BLOCKLIST <= cfg.blocklist
+    cfg = config.load(vault, environ={"KB_LLM_PUBLIC_HOSTS_BLOCKLIST": "env-llm.invalid, other.invalid"})
+    assert {"cloud-llm.invalid", "env-llm.invalid", "other.invalid"} <= cfg.blocklist
+
+
+def test_blocklist_local_cannot_shrink_config_yaml(vault):
+    text = (vault / "config.yaml").read_text(encoding="utf-8")
+    text = text.replace("public_hosts_blocklist: [", "public_hosts_blocklist: [repo-llm.invalid, ", 1)
+    assert "repo-llm.invalid" in text
+    write(vault / "config.yaml", text)
+    write(vault / "config.local.yaml", "environment: company\nllm:\n  public_hosts_blocklist: []\n")
+    cfg = config.load(vault, environ={})
+    assert "repo-llm.invalid" in cfg.blocklist
+    assert config.is_public_host("https://x.repo-llm.invalid/v1", cfg.blocklist)
+
+
+@pytest.mark.parametrize(
+    "local, environ, environment",
+    [
+        ("environment: company\nllm:\n  public_hosts_blocklist: 5\n", {}, "company"),
+        ("environment: company\nllm:\n  public_hosts_blocklist: {deepinfra.com: true}\n", {}, "company"),
+        ("environment: home\nllm:\n  public_hosts_blocklist: [a.invalid, 7]\n", {}, "home"),
+        ("environment: company\n", {"KB_LLM_PUBLIC_HOSTS_BLOCKLIST": "5"}, "company"),
+        ("environment: home\n", {"KB_LLM_PUBLIC_HOSTS_BLOCKLIST": "on"}, "home"),
+        ("environment: nope\n", {"KB_LLM_PUBLIC_HOSTS_BLOCKLIST": "1"}, "company"),
+    ],
+)
+def test_blocklist_malformed_refused_at_load(vault, local, environ, environment):
+    write(vault / "config.local.yaml", local)
+    with pytest.raises(config.BlocklistError, match="public_hosts_blocklist") as info:
+        config.load(vault, environ=environ)
+    assert isinstance(info.value, core.ConfigError)
+    assert info.value.environment == environment
+
+
+def test_blocklist_malformed_in_config_yaml_refused(vault):
+    write(vault / "config.yaml", "llm:\n  public_hosts_blocklist: 5\n")
+    with pytest.raises(config.BlocklistError):
+        config.load(vault, environ={})
+
+
+@pytest.mark.parametrize("raw", [5, {"a.invalid": True}, True])
+def test_blocklist_property_never_raises(raw):
+    cfg = config.Config(root=Path("C:/kb"), data={"llm": {"public_hosts_blocklist": raw}}, environment="company")
     assert cfg.blocklist == config.CODE_BLOCKLIST
+    cfg = config.Config(root=Path("C:/kb"), data={"llm": {"public_hosts_blocklist": ["x.invalid", 5, None]}}, environment="company")
+    assert cfg.blocklist == config.CODE_BLOCKLIST | {"x.invalid"}
 
 
 # ---------------------------------------------------------------- 프로필

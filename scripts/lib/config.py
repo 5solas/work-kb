@@ -122,11 +122,49 @@ def _hostname(url: Any) -> str | None:
     return host or None
 
 
+def _strip_brackets(host: str) -> str:
+    return host[1:-1] if host.startswith("[") and host.endswith("]") else host
+
+
+def checked_host(url: Any) -> str | None:
+    """HTTP 계층(urllib3)이 실제로 접속할 호스트. 안전하게 하나로 정할 수 없으면 None.
+
+    urllib.parse와 urllib3는 '\\', '@', 퍼센트 인코딩 등을 다르게 읽는다. 둘이 어긋나거나,
+    주소에 '\\'·'@'·공백·ASCII 아닌 문자가 있거나, 읽지 못하면 None이다.
+    """
+    if not isinstance(url, str):
+        return None
+    text = url.strip()
+    if not text or not text.isascii() or "\\" in text or "@" in text or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        return None
+    ours = _hostname(text)
+    if ours is None:
+        return None
+    try:
+        from urllib3.util import parse_url
+
+        theirs = parse_url(text if _SCHEME.match(text) or text.startswith("//") else "//" + text).host
+    except Exception:  # LocationParseError, urllib3 없음 등 → 안전 쪽
+        return None
+    if not theirs:
+        return None
+    theirs = _strip_brackets(theirs.lower().rstrip("."))
+    if theirs != _strip_brackets(ours):
+        return None
+    return ours
+
+
 def is_public_host(url: str, blocklist: Iterable[str]) -> bool:
-    """URL의 호스트가 목록의 도메인이거나 그 하위 도메인이면 True. 잘못된 URL은 False."""
-    host = _hostname(url)
-    if host is None:
+    """URL의 호스트가 목록의 도메인이거나 그 하위 도메인이면 True.
+
+    비어 있는 주소(None·빈 문자열)는 False(호출할 곳이 없다). 그 밖에 호스트를 하나로 정할 수
+    없는 주소는 True다(안전 쪽, D44). `checked_host` 참고.
+    """
+    if not isinstance(url, str) or not url.strip():
         return False
+    host = checked_host(url)
+    if host is None:
+        return True
     for entry in blocklist:
         domain = _norm_host(entry)
         if domain and (host == domain or host.endswith("." + domain)):
@@ -246,11 +284,15 @@ class Config:
 
     @property
     def blocklist(self) -> frozenset[str]:
-        raw = self.get("llm.public_hosts_blocklist") or []
+        """코드 기본값 ∪ 설정. 예외를 내지 않고 늘 CODE_BLOCKLIST를 포함한다(D44).
+
+        `load()`가 형식을 이미 검사한다. 직접 만든 Config의 잘못된 값은 무시한다.
+        """
+        raw = self.get("llm.public_hosts_blocklist")
         if isinstance(raw, str):
-            raw = [x for x in re.split(r"[\s,]+", raw) if x]
+            raw = _split_hosts(raw)
         if not isinstance(raw, (list, tuple, set, frozenset)):
-            raise core.ConfigError("llm.public_hosts_blocklist: 도메인 목록이어야 합니다")
+            return CODE_BLOCKLIST
         extra = {_norm_host(x) for x in raw}
         return CODE_BLOCKLIST | frozenset(x for x in extra if x)
 
@@ -281,6 +323,37 @@ class Config:
         out.update(copy.deepcopy(dict(task)))
         out["reasoning"] = normalize_reasoning(out["reasoning"], f"llm.tasks.{name}.reasoning")
         return out
+
+
+class BlocklistError(core.ConfigError):
+    """`llm.public_hosts_blocklist` 형식 오류. doctor가 회사 환경이면 종료 5로 알린다."""
+
+    def __init__(self, message: str, *, environment: str = "company") -> None:
+        super().__init__(message)
+        self.environment = environment
+
+
+def _split_hosts(text: str) -> list[str]:
+    return [x for x in re.split(r"[\s,]+", text) if x]
+
+
+def _blocklist_layer(value: Any, where: str, environment: str) -> list[str]:
+    """한 겹(config.yaml·config.local.yaml·환경변수)의 차단 목록. 형식이 틀리면 BlocklistError."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _split_hosts(value)
+    if isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
+        return [x for x in value if x.strip()]
+    raise BlocklistError(
+        f"{where}: llm.public_hosts_blocklist는 도메인 목록이어야 합니다 (지금 값: {value!r}). 예: [corp-llm.example.com]",
+        environment=environment,
+    )
+
+
+def _layer_blocklist(layer: Mapping[str, Any]) -> Any:
+    llm = layer.get("llm")
+    return llm.get("public_hosts_blocklist") if isinstance(llm, Mapping) else None
 
 
 def _inside(base: Path, parts: tuple[str, ...]) -> Path:
@@ -423,7 +496,16 @@ def load(root: Path | str | None = None, *, environ: Mapping[str, str] | None = 
     environment = _normalize_environment(local.get("environment"))
     _deep_merge(data, {k: v for k, v in local.items() if k != "environment"})
 
-    _apply_overrides(data, parse_env_overrides(env))
+    overrides = parse_env_overrides(env)
+    # 차단 목록은 겹마다 검사하고 합집합으로 둔다. 어느 겹도 목록을 줄이지 못한다(D44).
+    blocked: list[str] = []
+    for where, layer in ((CONFIG_NAME, structure), (LOCAL_NAME, local), ("KB_LLM_PUBLIC_HOSTS_BLOCKLIST", overrides)):
+        for host in _blocklist_layer(_layer_blocklist(layer), where, environment):
+            if host not in blocked:
+                blocked.append(host)
+    _apply_overrides(data, overrides)
+    if isinstance(data.get("llm"), dict):
+        data["llm"]["public_hosts_blocklist"] = blocked
     data["environment"] = environment
     _validate(data)
 

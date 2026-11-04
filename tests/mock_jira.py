@@ -7,6 +7,7 @@
 
 모드:
 - `bad_token="x"`: 그 토큰은 401.
+- `require_token="x"`: `Authorization: Bearer x`가 아니면 401.
 
 라우팅은 `ROUTES` 표(메서드, 경로 정규식, 처리 함수)로 한다. 이후 단계는 표에 줄을 더하고
 `KNOWN_MODES`에 모드 이름을 더한다.
@@ -22,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 FIXED_PORT = 8081
-KNOWN_MODES = {"bad_token"}
+KNOWN_MODES = {"bad_token", "require_token"}
 
 # ---------------------------------------------------------------- 공통 골격
 
@@ -184,6 +185,9 @@ ROUTES = [
 
 def _authorized(req: Request) -> bool:
     if req.token is None:
+        return False
+    required = req.mock.modes.get("require_token")
+    if required is not None and req.token != required:
         return False
     bad = req.mock.modes.get("bad_token")
     return not (bad is not None and req.token == bad)

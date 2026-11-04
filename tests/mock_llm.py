@@ -8,6 +8,7 @@
 모드:
 - `require_key="k"`: `Authorization: Bearer k`가 아니면 401.
 - `delay_sec=1.5`: 모든 응답 전에 그만큼 잔다(타임아웃 시험용).
+- `redirect_to="http://…"`: `GET /models`(`/v1/models`)에 302와 `Location: <값>`으로 답한다.
 
 라우팅은 `ROUTES` 표(메서드, 경로 정규식, 처리 함수)로 한다. 이후 단계(Phase 4)는 표에 줄을
 더하고 `KNOWN_MODES`에 모드 이름을 더한다.
@@ -23,7 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlsplit
 
 FIXED_PORT = 8083
-KNOWN_MODES = {"require_key", "delay_sec"}
+KNOWN_MODES = {"require_key", "delay_sec", "redirect_to"}
 
 # ---------------------------------------------------------------- 공통 골격
 
@@ -117,8 +118,14 @@ class _Handler(BaseHTTPRequestHandler):
         mock.log.append({"method": self.command, "path": parts.path, "query": query, "has_auth": token is not None, "json": body})
         req = Request(method=self.command, path=parts.path, query=query, headers=self.headers, json_body=body, bad_json=bad_json, token=token, mock=mock)
         status, payload = handle(req)
+        headers: dict[str, str] = {}
+        if isinstance(payload, Redirect):
+            headers["Location"] = payload.location
+            payload = {"redirect": payload.location}
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        for name, value in headers.items():
+            self.send_header(name, value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -167,7 +174,17 @@ MODELS = {"object": "list", "data": [{"id": "mock", "object": "model", "metadata
 COMPLETION_TOKENS = 5
 
 
+class Redirect:
+    """처리 함수가 돌려주면 `Location` 머리글을 붙인다."""
+
+    def __init__(self, location: str):
+        self.location = location
+
+
 def _models(req: Request):
+    target = req.mock.modes.get("redirect_to")
+    if target:
+        return 302, Redirect(str(target))
     return 200, MODELS
 
 

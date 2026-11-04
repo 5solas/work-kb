@@ -162,6 +162,11 @@ def resolve_tz(name: str) -> dt.tzinfo:
         pass
     if name in _FIXED_OFFSETS:
         return dt.timezone(dt.timedelta(hours=_FIXED_OFFSETS[name]), name)
+    return _os_local_tz()
+
+
+def _os_local_tz() -> dt.tzinfo:
+    """OS가 알려 주는 현재 로컬 시간대(마지막 대안)."""
     local = dt.datetime.now().astimezone().tzinfo
     return local if local is not None else dt.timezone.utc
 
@@ -327,18 +332,30 @@ def kb_lock(root: Path | str, owner: str, timeout: float = 60.0) -> Iterator[Non
 # ---------------------------------------------------------------- 파일명·경로
 
 _FORBIDDEN = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-_RESERVED = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
+# os.path.isreserved(Windows 전용)가 없을 때의 대안. ntpath와 같은 규칙: 첫 '.' 앞, 끝 공백 무시.
+_RESERVED = {
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+    *(f"COM{c}" for c in "123456789¹²³"),
+    *(f"LPT{c}" for c in "123456789¹²³"),
+}  # fmt: skip
+
+
+def _is_reserved(text: str) -> bool:
+    isreserved = getattr(os.path, "isreserved", None)
+    if isreserved is not None and isreserved(text):
+        return True
+    return text.partition(".")[0].rstrip(" ").upper() in _RESERVED
 
 
 def safe_name(name: str, max_len: int = 80) -> str:
-    """Windows에서 쓸 수 있는 파일명 조각으로 다듬는다. 비면 '_'."""
+    """Windows에서 쓸 수 있는 파일명 조각으로 다듬는다. 비면 '_'. 예약 이름이면 앞에 '_'(D16)."""
     text = unicodedata.normalize("NFC", name or "")
     text = _FORBIDDEN.sub("", text)
     text = _WS.sub(" ", text).strip(" .")
     text = text[:max_len].rstrip(" .")
     if not text:
         return "_"
-    if text.split(".")[0].upper() in _RESERVED:
+    if _is_reserved(text):
         text = "_" + text
     return text
 

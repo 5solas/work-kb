@@ -74,6 +74,19 @@
 - W0.5 추가 결정: `init --dev`는 `DEEPINFRA_API_KEY`가 없거나 네트워크가 막히면 doctor ✗로 종료 1(테스트는 `KB_LLM_FALLBACK_ORDER=[mock]`과 더미 키로 0을 확인). `KB_INIT_LLM_KEY`가 있으면 main과 같은 참조를 쓰는 프로필도 `keyring:work-kb/llm`으로 바뀜. 기존 설정의 `environment`가 비었거나 잘못돼도 company로 보고 `--dev`를 거부(D44). `llm.enabled: false`여도 company 공개 호스트 ✗(종료 5)는 유지. doctor·probe는 리다이렉트를 따르지 않음. D48 보완: 키 참조가 풀리지 않으면 키 없이 `/models`를 조회하고 "(키 없이 확인)"을 표시.
 - 미확인: 실제 Jira·Confluence DC, 회사 인증서(`ca_bundle`), 스케줄 작업 환경의 keyring.
 
+### Phase 0 검토·수정 라운드 (2026-11-05)
+
+Opus 3명 독립 검토(지시서 대조 / Windows·인코딩·안전 / 거짓 통과 테스트) → 22건 → 전부 수정. 430개 테스트 통과(양쪽 venv). 이 라운드에서 추가된 결정:
+
+- **공개 호스트 차단은 fail-closed**: `llm.public_hosts_blocklist`가 목록이 아니면 로드 시 `BlocklistError`(ConfigError)이고 company에서는 doctor ✗ + 종료 5. 유효 목록은 코드 ∪ `config.yaml` ∪ `config.local.yaml` ∪ 환경변수의 **합집합**이라 어떤 겹도 줄일 수 없다. `is_public_host`는 `\`, `@`, 공백, 제어 문자, 비ASCII가 든 URL, 파싱 실패, urllib3와 urllib.parse의 호스트 불일치를 모두 공개(거부)로 본다(`config.checked_host`). company에서는 공개 호스트 검사가 끝나기 전에는 LLM 호출을 하지 않는다. doctor·probe는 리다이렉트를 따르지 않고 3xx를 ✗로 본다.
+- **D12 보완**: PowerShell 실행 정책은 `Get-ExecutionPolicy -List`로 읽어 MachinePolicy/UserPolicy가 Restricted/AllSigned면 ✗("F(파일) 캡처를 쓰세요"), 그 외는 `-`에 유효 정책과 범위를 표시. 자식 환경에서 `PSExecutionPolicyPreference`·`PSModulePath`를 지운다(부모 pwsh의 Process 범위 Bypass가 새어 들어오던 문제). 5.1 출력은 `oem` 코덱으로 해독.
+- **D04 보완**: doctor에 `- 시간대` 줄(설정 vs OS 오프셋, tzdata 없음 표시). uv 관리 Python에는 tzdata가 없어 `Asia/Seoul`은 고정 표(+09:00)를 쓴다.
+- **D16 보완**: `safe_name`은 `os.path.isreserved`(3.13+)로 `CON .txt`, `COM¹`, `CONIN$` 같은 이름도 `_` 접두.
+- **kb.py `Command`**: 계약대로 `Command(module, func="main", agent_ok=True)`, `help`는 키워드 전용.
+- **테스트 격리 강화**: `tests/sitecustomize.py`가 하위 프로세스에도 루프백 전용 소켓 가드를 건다(`KB_ALLOW_NETWORK=1`로 해제). `run_kb(utf8=False)`로 cp949 로캘에서 `setup_stdio`를 검증(`tests/test_cli_encoding.py`). mock Jira·Confluence에 `require_token`, mock LLM에 `redirect_to` 모드. `--argv-stdin` 테스트는 `\uXXXX` 없는 날것의 UTF-8을 보낸다. 인코딩 AST 규칙이 `io.TextIOWrapper`, `os.fdopen`, `tempfile.*`, `logging.*Handler`, `from subprocess import run` 꼴까지 잡는다.
+- **managed.py**: 마커 줄 끝의 `\r\r\n`(텍스트 모드로 CRLF를 두 번 변환한 경우)도 마커로 인식.
+- 남은 알려진 한계: `KB_LLM_PUBLIC_HOSTS_BLOCKLIST`에 YAML 매핑을 주면 환경변수 파서가 먼저 ConfigError를 내어 종료 1(호출은 없음, 5는 아님). fsync 생략은 테스트로 잡지 못한다.
+
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 
 Repo root is `D:\work\work-kb`. Paths in sections 1 to 4 are repo-relative. Nothing was created or changed in this stage.
