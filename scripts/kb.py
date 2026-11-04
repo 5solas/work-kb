@@ -59,7 +59,7 @@ COMMANDS: dict[str, Command] = {
     # Phase 2
     "sync": Command("jira_sync", help="Jira 일감 캐시 동기화 (--full, --key, --jql)"),
     # Phase 3
-    "act": Command("jira_act", agent_ok=False, agent_ok_sub=("list",), help="Jira 쓰기(큐): comment·transition·assign·worklog·create·promote·flush·list"),
+    "act": Command("jira_act", agent_ok=False, agent_ok_sub=("list", "transitions"), help="Jira 쓰기(큐): comment·transition·assign·worklog·create·promote·flush·list"),
 }
 
 ALIASES: dict[str, str] = {"jira_sync": "sync"}
