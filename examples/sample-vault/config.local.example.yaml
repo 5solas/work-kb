@@ -1,0 +1,5 @@
+# 샘플 볼트용 환경 설정 예시. 복사본 볼트에 config.local.yaml 이름으로 저장해 쓴다.
+# config.local.yaml은 .gitignore 대상이라 이 이름으로 둔다. 비밀값·연결 주소 없음(Phase 1 도구는 필요 없음).
+environment: home
+jira:
+  project_keys: [KB, OPS]
