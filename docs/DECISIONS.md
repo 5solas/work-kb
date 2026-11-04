@@ -87,6 +87,19 @@ Opus 3명 독립 검토(지시서 대조 / Windows·인코딩·안전 / 거짓 �
 - **managed.py**: 마커 줄 끝의 `\r\r\n`(텍스트 모드로 CRLF를 두 번 변환한 경우)도 마커로 인식.
 - 남은 알려진 한계: `KB_LLM_PUBLIC_HOSTS_BLOCKLIST`에 YAML 매핑을 주면 환경변수 파서가 먼저 ConfigError를 내어 종료 1(호출은 없음, 5는 아님). fsync 생략은 테스트로 잡지 못한다.
 
+### Phase 1 관문 (2026-11-05)
+
+- pytest: 양쪽 venv 546개 통과 + 클립보드 2개 실패(아래). ERT 29개는 상속 콘솔·`CREATE_NO_WINDOW` 두 번, `(set-language-environment "Korean")` 아래에서 실행.
+- 샘플 볼트(`examples/sample-vault` → 임시 한글 경로 복사): `link` 1회차 원천 7개·언급 43건·새 페이지 8·정규화 6줄, 2회차·3회차 쓰기 0(전체 파일 해시 diff 0). `today`(KB_FAKE_NOW=2026-11-06)가 이월 5건 복사·`[>]` 5건 표시. `status`·`search` 정상.
+- perf: 1,000 daily × 20줄. 2회차(warm) 0.14초(한도 2.0초), 1회차(cold, 전부 정규화·페이지 149개 생성) 3.9~4.7초. §6.1의 2초는 warm 기준으로 해석(D: 1회차는 전체 재작성이라 성격이 다름).
+- **클립보드**: `clip_image.ps1`의 `[Windows.Forms.Clipboard]::ContainsImage()`가 이 빌드 세션(Claude Code 셸, STA, session 1, UserInteractive)에서 "요청한 클립보드 작업을 수행하지 못했습니다"로 실패한다. pwsh 7 직접 호출도 같다. 테스트 2개(`test_probe_writes_nothing`, `test_save_matches_probe`)는 이 환경에서 실패 → 사용자가 일반 데스크톱 세션에서 확인해야 하는 항목으로 넘긴다(§8 Phase 1 사용자 확인에 이미 포함).
+- Phase 1 추가 결정:
+  - link: 원천 파일은 크기·수정시각이 캐시와 같으면 읽지 않는다(Defender 첫 열기 비용 때문에 2초 한도를 지키기 위함). 같은 크기로 고치고 mtime을 되돌리면 `--rebuild` 전까지 놓친다. 원장은 `.state/links.json`(계약 형태) + `.state/links_cache.json`(sha·렌더 캐시), 둘 다 재생성 가능. 언급 항목에서 `- `, 체크박스, `HH:MM` 접두는 제거. 다른 위키링크 안의 키(`[[KB-12-설계]]`, 이미지 임베드)는 언급이 아니다. inbox는 정규화하지 않는다. `mentions`가 비면 비운다. `--stub KEY`는 stub만 만들고 스캔하지 않는다(Emacs `o`용).
+  - daily_prepare: 이전 carryover에서 옮긴 항목도 원본 줄을 `[>]`로 표시(지운 항목이 되살아나는 것 방지). 모든 이전 carryover 구역을 훑는다. 오늘 파일을 먼저 쓰고 그다음 원본에 `[>]` 표시(오늘 파일 실패 시 아무것도 잃지 않음). 막힘 항목은 `· 막힘 · 마감 MM-DD`, 두 뷰에 다 있으면 막힘 형태 하나만. carryover에는 프로젝트 키가 필요(없으면 종료 4, `--no-carryover`는 예외).
+  - Emacs: 볼트 경로는 환경변수가 아니라 stdin JSON 안의 `--root`로 전달(한글 경로가 로캘 코드페이지를 타지 않게). 인터프리터는 상대 `.venv/Scripts/python.exe` + `exec-path` 앞에 루트. 캡처는 `## 기록`의 마지막 비어 있지 않은 줄 뒤에, 제목이 없으면 파일 끝에 제목을 추가. 열린 버퍼에 저장 안 된 변경이 있고 디스크도 바뀌었으면 캡처 거부. `C`는 이름과 설명을 한 번에 입력, 임시 파일은 `<코드 루트>/.state/tmp/clip-<ts>.png`. `F`는 png·jpg·jpeg·gif·webp·bmp.
+  - search: 최신 daily부터, `--limit` 기본 100(0=무제한), 코드 블록·관리 구역을 걸러내지 않음, 줄 번호는 `\n` 기준(Emacs grep 버퍼와 일치). status는 아무것도 쓰지 않고 네트워크·keyring을 건드리지 않는다.
+  - 샘플 볼트에는 `config.local.yaml` 대신 `config.local.example.yaml`(gitignore 때문). 사용: 임시 폴더로 복사 후 이름 변경.
+
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 
 Repo root is `D:\work\work-kb`. Paths in sections 1 to 4 are repo-relative. Nothing was created or changed in this stage.
