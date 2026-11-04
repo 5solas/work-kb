@@ -77,7 +77,18 @@ compile과 ingest는 daily, inbox, raw를 바이트 그대로 둔다. 그 밖의
 
 ## 작업 스키마
 
-Phase 4에서 채움
+B단계(compile·ingest)의 입력과 출력. 출력은 **JSON 객체 하나만**, 다른 글 없이. 모든 문장에는 출처(입력에서 받은 줄 id 또는 Jira 키)가 있어야 한다. 모르면 빈 값으로 둔다.
+
+| 작업 | 입력 | 출력 JSON |
+|---|---|---|
+| T1 tag | `## 기록` 줄들(id 포함) + 고정 태그 10개 | `{"tags": {"<id>": "결정"}}` (줄마다 태그 하나, 목록에 있는 것만) |
+| T2 decisions | 하루치 `## 기록`(사이드카 추출문 포함, 줄 id) + 관련 Jira 캐시 요약 | `{"decisions": [{"title": "", "content": "", "rationale": "", "related": ["KB-12", "@김철수"], "source_line": "<id>"}], "actions": [{"text": "", "related": [], "source_line": "<id>"}]}` |
+| T3 entity_summary | 현재 `summary` + 새 언급 줄(id) + (프로젝트) 미완료 일감 표 | `{"summary": "3~5문장", "sources": ["<id>", "KB-12"]}` |
+| T4 topic_proposal | 최근 2주 기록 전문(id) + 기존 topics | `{"proposals": [{"name": "", "why": "", "sample_sources": ["<id>"], "merge_with": "기존 주제 또는 null"}]}` |
+| T5 contradictions | 엔티티 summary + 관련 decisions | `{"conflicts": [{"a": "<출처>", "b": "<출처>", "why": ""}]}` |
+| T6 image_ingest | 이미지 1장 + 힌트(파일명, 같은 줄 텍스트) | `{"kind": "screenshot\|photo\|document", "text": "읽은 글 전체", "summary": "", "jira_keys": ["KB-12"], "people": ["김철수"]}` |
+
+규칙: `source_line`·`sources`는 입력에 있던 id만. `related`의 키는 설정된 프로젝트 키만. 사람은 입력에 `@이름`으로 있던 이름만. 결정은 '제안'으로 적히며 사람이 '확정'/'기각'으로 바꾼다.
 
 ## 답변 규칙
 
