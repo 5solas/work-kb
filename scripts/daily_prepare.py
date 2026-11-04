@@ -7,6 +7,8 @@
   제목은 있는데 구역 표시가 없으면 그 제목 바로 아래에 빈 구역을 넣는다. `## 기록` 내용은 건드리지 않는다.
 - `today`(merge): `jira/_views/today.md`·`blocked.md`의 일감. 다시 돌려도 키별 체크 상태를 지키고,
   뷰에서 빠진 키는 `[x]`일 때만 남긴다. 뷰 파일이 둘 다 없으면 `- (Jira 동기화 전)` 한 줄.
+  도구가 그린 줄(지난번 본문은 `.state/today.json`에 기록)만 다시 그리고, 사람이 쓰거나 고친 줄은
+  바이트 그대로 순서대로 남긴다(merge_today_record).
 - `carryover`(merge): 이전 daily들의 `## 기록`과 `carryover` 구역에서 Jira 키 없는 `- [ ]` 줄을
   `- [ ] 내용 (← YYYY-MM-DD)`로 옮기고, 원래 줄은 `- [>] 내용 (YYYY-MM-DD로 이월)`로 표시한다.
   `[>]` 줄은 다시 옮기지 않으므로 원장 없이 멱등이다. 이미 구역에 있는 항목(체크 여부 무관)은 더하지 않는다.
@@ -19,11 +21,14 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Mapping
 
 from lib import config, core, managed, notes
 from lib.config import Config
 
 NOTE_NO_SYNC = "- (Jira 동기화 전)"
+TODAY_STATE = "today"  # .state/today.json: daily별로 지난번에 그린 today 본문(merge 판정용)
+TODAY_STATE_KEEP = 31
 _SECTIONS = (("오늘", "today"), ("이월", "carryover"), ("기록", None))
 _JIRA_KEY = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
 _TODAY_LINE = re.compile(r"^- \[([ xX])\] \[\[([A-Z][A-Z0-9_]+-\d+)(?:[|#][^\]]*)?\]\]")
@@ -31,6 +36,7 @@ _OPEN_TASK = re.compile(r"^- \[ \] (.*)$")
 _ANY_TASK = re.compile(r"^- \[[ xX>]\] (.*)$")
 _TIME = re.compile(r"^\d{2}:\d{2}(?:\s+|$)")
 _TASK_PROBE = b"- [ ]"
+_TRAILING_BLANKS = " \t"
 
 
 @dataclass(frozen=True)
@@ -88,7 +94,7 @@ def _region_lines(data: bytes, name: str) -> list[str]:
     body = managed.read_region(data, name)
     if not body:
         return []
-    return body.decode("utf-8").splitlines()
+    return notes.split_lines(body.decode("utf-8"))  #   같은 문자에서 줄을 끊지 않는다
 
 
 def _line_end(data: bytes, offset: int) -> int:
@@ -211,31 +217,86 @@ def view_items(cfg: Config) -> list[tuple[str, str]] | None:
     return items
 
 
-def merge_today(old_lines: list[str], items: list[tuple[str, str]] | None) -> list[str]:
-    """체크 상태를 키별로 지키며 합친다. 뷰에서 빠진 키는 `[x]`만 남는다. 키 없는 사람 글은 끝에 남긴다."""
-    state: dict[str, str] = {}
-    keyed_order: list[tuple[str, str]] = []
-    others: list[str] = []
+def merge_today_record(
+    old_lines: list[str], items: list[tuple[str, str]] | None, previous: Mapping[str, str] | None = None
+) -> tuple[list[str], dict[str, str]]:
+    """today 구역 merge. (새 줄 목록, 이번에 그린 본문 기록 {키: '[[KEY]] …'}).
+
+    도구가 그린 줄은 `- [s] 본문`이 지금 뷰의 본문이나 지난번에 그린 본문(previous)과 정확히 같은,
+    키별 첫 줄뿐이다. 그 줄만 다시 그리고(체크 상태 유지), 뷰에서 빠졌으면 `[x]`일 때만 남긴다.
+    그 밖의 줄(같은 키의 둘째 줄, 사람이 덧붙여 고친 줄, 뷰에 없는 키의 사람 줄, 키 없는 글)은
+    바이트 그대로, 원래 순서대로 남긴다. 각 사람 줄은 바로 앞의 도구 줄을 따라다닌다.
+    사람이 쓴 줄이 이미 있는 키는 새 줄을 더하지 않는다(사람 줄이 그 키를 대신한다).
+    """
+    previous = previous or {}
+    view = dict(items or [])
+    lead: list[str] = []  # 첫 도구 줄 앞의 사람 줄
+    ours: dict[str, tuple[str, str, list[str]]] = {}  # 키 → (체크, 원래 줄, 뒤따르는 사람 줄)
+    taken: set[str] = set()  # 사람 줄로 이미 있는 키
+    followers = lead
     for line in old_lines:
+        stripped = line.strip()
+        if not stripped or stripped == NOTE_NO_SYNC:
+            continue
         match = _TODAY_LINE.match(line)
         if match:
-            if match.group(2) not in state:
-                state[match.group(2)] = match.group(1)
-                keyed_order.append((match.group(2), line))
-        elif line.strip() and line.strip() != NOTE_NO_SYNC:
-            others.append(line)
-    out: list[str] = []
-    present: set[str] = set()
+            key, mark = match.group(2), match.group(1)
+            body = line[len("- [ ] "):]
+            if key not in ours and body in (view.get(key), previous.get(key)):
+                ours[key] = (mark, line, [])
+                followers = ours[key][2]
+                continue
+            taken.add(key)
+        followers.append(line)
+    out = list(lead)
+    record: dict[str, str] = {}
     for key, body in items or []:
-        present.add(key)
-        out.append(f"- [{state.get(key, ' ')}] {body}")
-    for key, line in keyed_order:
-        if key not in present and state[key] in "xX":
+        if key in ours:
+            mark, _line, after = ours[key]
+            out.append(f"- [{mark}] {body}")
+            out.extend(after)
+            record[key] = body
+        elif key not in taken:
+            out.append(f"- [ ] {body}")
+            record[key] = body
+    for key, (mark, line, after) in ours.items():
+        if key in view:
+            continue
+        if mark in "xX":
             out.append(line)
-    out.extend(others)
+            record[key] = line[len("- [ ] "):]
+        out.extend(after)
     if items is None:
         out.append(NOTE_NO_SYNC)
-    return out
+    return out, record
+
+
+def merge_today(
+    old_lines: list[str], items: list[tuple[str, str]] | None, *, previous: Mapping[str, str] | None = None
+) -> list[str]:
+    """체크 상태를 키별로 지키며 합친다. 규칙은 merge_today_record."""
+    return merge_today_record(old_lines, items, previous)[0]
+
+
+def _load_records(cfg: Config) -> dict[str, dict[str, str]]:
+    """`.state/today.json`: daily별로 지난번에 그린 today 본문. 손상되었으면 빈 것으로 본다."""
+    try:
+        data = core.load_state(cfg.root, TODAY_STATE)
+    except (core.KbError, OSError):
+        return {}
+    return {
+        rel: {str(k): str(v) for k, v in item.items()}
+        for rel, item in data.items()
+        if isinstance(rel, str) and isinstance(item, dict)
+    }
+
+
+def _save_record(cfg: Config, records: dict[str, dict[str, str]], rel: str, record: dict[str, str]) -> None:
+    if records.get(rel, {}) == record:
+        return
+    records[rel] = record
+    keep = sorted(records)[-TODAY_STATE_KEEP:]
+    core.save_state(cfg.root, TODAY_STATE, {name: records[name] for name in keep})
 
 
 # ---------------------------------------------------------------- carryover
@@ -247,7 +308,8 @@ def _carry_key(text: str) -> str:
 
 
 def _mark(line: notes.NoteLine, path: Path, content: str, day: dt.date) -> _Edit:
-    new = f"- [>] {content.rstrip()} ({day.isoformat()}로 이월)"
+    body = content.rstrip(_TRAILING_BLANKS)  # str.rstrip()은 \x0c·  같은 줄 안 문자까지 지운다
+    new = f"- [>] {body} ({day.isoformat()}로 이월)"
     return _Edit(path, line.offset, line.text.encode("utf-8"), new.encode("utf-8"))
 
 
@@ -378,8 +440,9 @@ def run(cfg: Config, day: dt.date | str, *, carryover: bool = True) -> Result:
         try:
             data = ensure_skeleton(data, rel)
             old_today = _region_lines(data, "today")
-            new_today = merge_today(old_today, view_items(cfg))
-            result.today_items = sum(1 for line in new_today if _TODAY_LINE.match(line))
+            records = _load_records(cfg)
+            new_today, record = merge_today_record(old_today, view_items(cfg), records.get(rel))
+            result.today_items = len(record)  # 도구가 그린 일감 줄(사람 줄 제외)
             if new_today != old_today:
                 data = managed.replace_region(data, "today", "\n".join(new_today))
             candidates: list[_Candidate] = []
@@ -395,10 +458,8 @@ def run(cfg: Config, day: dt.date | str, *, carryover: bool = True) -> Result:
 
         if data != original:
             try:
-                if original is None:
-                    if path.exists():  # 읽은 뒤에 누가 만들었다
-                        raise core.ConcurrentEdit(f"{path}: 읽은 뒤에 파일이 생겨 쓰지 않았습니다")
-                    core.atomic_write(path, data)
+                if original is None:  # 읽은 뒤에 누가 만들었으면 ConcurrentEdit(교체 순간까지 확인)
+                    core.atomic_write(path, data, expect_sha256=core.MUST_NOT_EXIST)
                 else:
                     core.atomic_write(path, data, expect_sha256=core.sha256_hex(original))
             except core.ConcurrentEdit:
@@ -408,6 +469,7 @@ def run(cfg: Config, day: dt.date | str, *, carryover: bool = True) -> Result:
                 return result
             result.created = original is None
             result.changed = True
+        _save_record(cfg, records, rel, record)
         if carryover and candidates:
             _apply_marks(cfg, [c.edit for c in candidates], sources, result)
     return result

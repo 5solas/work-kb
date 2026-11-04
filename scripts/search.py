@@ -10,6 +10,7 @@ Phase 1: daily·inbox·wiki(+ 있으면 jira 캐시)를 순수 Python으로 훑�
 from __future__ import annotations
 
 import json
+import sys
 import unicodedata
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -67,10 +68,19 @@ def _hidden(path: Path, base: Path) -> bool:
     return any(part.startswith(".") for part in path.relative_to(base).parts)
 
 
-def iter_files(cfg: Config, scope: str) -> Iterator[tuple[Path, bytes]]:
-    """한 범위(daily·inbox·wiki·jira)의 (경로, 바이트)."""
+def iter_files(
+    cfg: Config, scope: str, *, skipped: list[tuple[str, str]] | None = None
+) -> Iterator[tuple[Path, bytes]]:
+    """한 범위(daily·inbox·wiki·jira)의 (경로, 바이트). 읽기 전용이라 로그도 남기지 않는다.
+
+    UTF-8이 아니라 건너뛴 daily·inbox 파일은 skipped에 (경로, 이유)로 더한다.
+    """
     if scope in ("daily", "inbox"):
-        found = [(p, d) for p, d in notes.iter_sources(cfg) if notes.rel_path(cfg, p).split("/", 1)[0] == scope]
+        bad: list[tuple[str, str]] = []
+        sources = notes.iter_sources(cfg, skipped=bad, log=False)
+        found = [(p, d) for p, d in sources if notes.rel_path(cfg, p).split("/", 1)[0] == scope]
+        if skipped is not None:
+            skipped.extend(item for item in bad if item[0].split("/", 1)[0] == scope)
         # 이름이 날짜(daily)·날짜시각(inbox)으로 시작하므로 역순 = 최신 먼저
         yield from sorted(found, key=lambda item: item[0].name, reverse=True)
         return
@@ -108,8 +118,10 @@ def fts_search(cfg: Config, terms: list[str]) -> list[Hit] | None:
 # ---------------------------------------------------------------- 검색
 
 
-def search(cfg: Config, query: str, *, scope: str = "all") -> list[Hit]:
-    """모든 결과(개수 제한 없음). 빈 질의는 ConfigError."""
+def search(
+    cfg: Config, query: str, *, scope: str = "all", skipped: list[tuple[str, str]] | None = None
+) -> list[Hit]:
+    """모든 결과(개수 제한 없음). 빈 질의는 ConfigError. 건너뛴 파일은 skipped에 더한다."""
     terms = parse_terms(query)
     if not terms:
         raise core.ConfigError('검색어를 입력하세요. 예: kb.py search "캐시 KB-12"')
@@ -123,7 +135,7 @@ def search(cfg: Config, query: str, *, scope: str = "all") -> list[Hit]:
             if fts is not None:
                 hits.extend(fts)
                 continue
-        for path, data in iter_files(cfg, name):
+        for path, data in iter_files(cfg, name, skipped=skipped):
             hits.extend(scan_file(notes.rel_path(cfg, path), data, terms))
     return hits
 
@@ -141,7 +153,10 @@ def main(argv: list[str]) -> int:
     if not parse_terms(query):
         raise core.ConfigError('검색어를 입력하세요. 예: kb.py search "캐시 KB-12"')
     cfg = config.load(args.root)
-    hits = search(cfg, query, scope=args.scope)
+    skipped: list[tuple[str, str]] = []
+    hits = search(cfg, query, scope=args.scope, skipped=skipped)
+    for rel, reason in skipped:
+        print(f"건너뜀: {rel}: {reason}", file=sys.stderr)
     shown = hits[: args.limit] if args.limit else hits
     if args.json:
         print(json.dumps([asdict(h) for h in shown], ensure_ascii=False, indent=1))

@@ -89,6 +89,52 @@ def test_find_keys_bare_bracketed_and_exclusions():
     assert [m.key for m in notes.find_keys("ab-KB-5 KB-6", ["KB"])] == ["KB-6"]
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["[[jira/KB-12]]", "[[jira/KB-12.md]]", "[[jira/KB-12|x]]", "[[jira/KB-12#설명]]", "[[jira/KB-12.md|별칭]]"],
+)
+def test_find_keys_obsidian_absolute_path_links_are_bracketed(text):
+    """D64: Obsidian 절대 경로 링크 형식으로 자동 완성하면 `[[jira/KB-12]]`가 된다."""
+    found = notes.find_keys(f"- 19:00 {text} 경로 링크", ["KB"])
+    assert [(m.key, m.bracketed) for m in found] == [("KB-12", True)]
+
+
+@pytest.mark.parametrize("text", ["[[jira/KB-12-설계]]", "[[docs/KB-12]]", "[[jira/KB-12.mdx]]", "jira/KB-12"])
+def test_find_keys_other_paths_are_not_bracketed(text):
+    assert [m.bracketed for m in notes.find_keys(text, ["KB"])] == [False]
+
+
+@pytest.mark.parametrize(
+    "text, keys",
+    [
+        ("``KB-5`` 이중 백틱", []),
+        ("``KB-5 ` 안의 백틱`` 과 KB-6", ["KB-6"]),
+        ("```a `KB-7` b``` 끝", []),
+        ("`KB-8` 과 ``KB-9``", []),
+        ("짝 없는 `` 과 KB-10", ["KB-10"]),
+        ("``짝이 다른` KB-11", ["KB-11"]),
+    ],
+)
+def test_find_keys_commonmark_code_spans(text, keys):
+    assert [m.key for m in notes.find_keys(text, ["KB"])] == keys
+
+
+@pytest.mark.parametrize("sep", ["\x0c", "\x0b", "\x1c", "\x85", " ", " "])
+def test_iter_lines_splits_only_on_newline_and_lone_cr(sep):
+    data = f"## 기록\n- [ ] 보고서 초안{sep}담당 확인 후 제출\n- 메모{sep}## 제목 아님\n- 09:00 다음\r마지막\r\n".encode("utf-8")
+    lines = list(notes.iter_lines("daily/2026-11-04.md", data))
+    assert [l.text for l in lines] == [
+        "## 기록", f"- [ ] 보고서 초안{sep}담당 확인 후 제출", f"- 메모{sep}## 제목 아님", "- 09:00 다음", "마지막"
+    ]
+    for line in lines:
+        assert data[line.offset:line.offset + len(line.text.encode("utf-8"))].decode("utf-8") == line.text
+    start, end = notes.section_span(data, "기록")  # 줄 가운데의 `## `는 제목이 아니다
+    assert data[start:end].decode("utf-8") == (
+        f"- [ ] 보고서 초안{sep}담당 확인 후 제출\n- 메모{sep}## 제목 아님\n- 09:00 다음\r마지막\r\n"
+    )
+    assert notes.split_lines(f"a{sep}b\r\nc\rd\n") == [f"a{sep}b", "c", "d"]
+
+
 def test_find_people_korean_and_email_exclusion():
     assert notes.find_people("@김철수 와 @이영희, @kim_2 그리고 mail@example.invalid (@박민수)") == ["김철수", "이영희", "kim_2", "박민수"]
     assert notes.find_people("`@코드` @김철수 @김철수") == ["김철수"]
@@ -119,6 +165,19 @@ def test_iter_sources_skips_non_utf8_and_emacs_temp(vault):
     assert got == ["daily/2026-11-04.md", "inbox/20261105-0900-메모.md"]
     log = (vault / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
     assert "2026-11-05.md" in log
+
+
+def test_iter_sources_reports_skipped_and_can_stay_silent(vault):
+    cfg = _cfg(vault)
+    (vault / "daily" / "2026-11-05.md").write_bytes("## 기록\n- 09:00 깨짐\n".encode("cp949"))
+    (vault / "daily" / "2026-11-04.md").write_bytes("## 기록\n".encode("utf-8"))
+    skipped: list = []
+    got = [notes.rel_path(cfg, p) for p, _ in notes.iter_sources(cfg, skipped=skipped, log=False)]
+    assert got == ["daily/2026-11-04.md"]
+    assert skipped == [("daily/2026-11-05.md", notes.NOT_UTF8)]
+    assert not (vault / ".state" / "logs").exists()  # 읽기 전용 호출은 로그 폴더를 만들지 않는다
+    list(notes.iter_sources(cfg))  # 기본은 로그를 남긴다(계약)
+    assert (vault / ".state" / "logs" / "kb.log").exists()
 
 
 def test_ensure_page_creates_once_and_never_overwrites(vault, fake_now):

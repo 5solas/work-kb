@@ -1,11 +1,13 @@
 """link 성능 예산(perf): daily 1,000개 × 20줄, 두 번째(웜) 실행 ≤ 2.0초, 쓰기 0.
 
 실행: .\\.venv\\Scripts\\python -m pytest -m perf -q -s tests/test_link_perf.py
-콜드 시간은 출력만 하고 단언하지 않는다(보고용).
+콜드 시간은 출력과 로그 줄(`work-kb.perf` INFO)로만 보고하고 단언하지 않는다.
+로그 줄 보기: ... -m perf -q --log-cli-level=INFO tests/test_link_perf.py
 """
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import time
 from pathlib import Path
 
@@ -67,7 +69,10 @@ def test_warm_run_within_budget_and_writes_nothing(vault, fake_now):
     t1 = time.perf_counter()
     warm = link.run(cfg)
     warm_s = time.perf_counter() - t1
-    print(f"\nlink perf: cold {cold_s:.2f}s, warm {warm_s:.2f}s, pages {cold['pages_created']}, mentions {cold['mentions']}")
+    report = f"link perf: cold {cold_s:.2f}s, warm {warm_s:.2f}s, pages {cold['pages_created']}, mentions {cold['mentions']}"
+    print(f"\n{report}")
+    # 콜드 시간은 관문이 아니라 보고용: 로그 줄로도 남긴다(`--log-cli-level=INFO`나 실패 시 보고서에 보임)
+    logging.getLogger("work-kb.perf").info(report)
 
     assert warm["written"] == []
     assert warm["files_parsed"] == 0

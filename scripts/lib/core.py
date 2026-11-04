@@ -205,33 +205,84 @@ def line_hash(text: str) -> str:
 _RETRY_WINERRORS = {5, 32, 33}  # ACCESS_DENIED, SHARING_VIOLATION, LOCK_VIOLATION
 
 
+MUST_NOT_EXIST = ""
+"""atomic_write(expect_sha256=MUST_NOT_EXIST): 파일이 없을 때만 만든다(있으면 ConcurrentEdit)."""
+
+
+class _Unreadable(Exception):
+    """대상 파일을 지금 읽을 수 없음(다른 프로그램이 잡고 있음)."""
+
+
+def _current_sha(path: Path) -> str | None:
+    """대상의 현재 sha256. 없으면 None. 공유 위반으로 못 읽으면 _Unreadable."""
+    try:
+        return sha256_hex(path.read_bytes())
+    except FileNotFoundError:
+        return None
+    except PermissionError as exc:
+        if getattr(exc, "winerror", None) in _RETRY_WINERRORS:
+            raise _Unreadable(str(exc)) from exc
+        raise
+
+
+def _check_expected(path: Path, expect_sha256: str) -> None:
+    current = _current_sha(path)
+    if expect_sha256 == MUST_NOT_EXIST:
+        if current is not None:
+            raise ConcurrentEdit(f"{path}: 읽은 뒤에 파일이 생겨 쓰지 않았습니다")
+    elif current != expect_sha256:
+        raise ConcurrentEdit(f"{path}: 읽은 뒤에 파일이 바뀌어 쓰지 않았습니다")
+
+
+def _create_exclusive(tmp: Path, path: Path) -> bool:
+    """임시 파일을 대상 이름으로 하드 링크해 '없을 때만 만들기'를 원자적으로 한다.
+
+    True면 만들었다. 하드 링크를 못 쓰는 파일 시스템이면 False(호출자가 확인 후 os.replace).
+    """
+    try:
+        os.link(tmp, path)
+        return True
+    except FileExistsError as exc:
+        raise ConcurrentEdit(f"{path}: 읽은 뒤에 파일이 생겨 쓰지 않았습니다") from exc
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+
+
 def atomic_write(path: Path | str, data: bytes, *, expect_sha256: str | None = None, retries: int = 8) -> None:
     """같은 폴더의 임시 파일에 쓰고 os.replace. 열린 파일이면 잠시 기다렸다 다시 시도한다.
 
-    expect_sha256가 주어지면 현재 파일 해시와 다를 때 ConcurrentEdit를 낸다(사람 편집 보호).
+    expect_sha256가 주어지면 교체를 시도할 때마다 바로 앞에서 현재 파일 해시를 다시 확인하고,
+    다르면 ConcurrentEdit를 낸다(사람 편집 보호: 편집기가 저장하느라 파일을 잡고 있던 사이에
+    바뀐 내용을 덮지 않는다). `MUST_NOT_EXIST`("")면 파일이 없을 때만 만든다.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if expect_sha256 is not None:
-        current = sha256_hex(path.read_bytes()) if path.exists() else None
-        if current != expect_sha256:
-            raise ConcurrentEdit(f"{path}: 읽은 뒤에 파일이 바뀌어 쓰지 않았습니다")
+        with contextlib.suppress(_Unreadable):  # 지금 못 읽으면 교체 직전에 다시 확인한다
+            _check_expected(path, expect_sha256)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         with open(tmp, "wb") as fh:
             fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
+        if expect_sha256 == MUST_NOT_EXIST and _create_exclusive(tmp, path):
+            return
         delay = 0.05
         for attempt in range(retries + 1):
             try:
+                if expect_sha256 is not None:
+                    _check_expected(path, expect_sha256)
                 os.replace(tmp, path)
                 return
+            except _Unreadable as exc:
+                if attempt == retries:
+                    raise FileBusy(f"{path}: 다른 프로그램이 파일을 잡고 있어 쓰지 못했습니다 ({exc})") from exc
             except PermissionError as exc:
                 if getattr(exc, "winerror", None) not in _RETRY_WINERRORS or attempt == retries:
                     raise FileBusy(f"{path}: 다른 프로그램이 파일을 잡고 있어 쓰지 못했습니다 ({exc})") from exc
-                time.sleep(delay)
-                delay = min(delay * 2, 1.0)
+            time.sleep(delay)
+            delay = min(delay * 2, 1.0)
     finally:
         with contextlib.suppress(OSError):
             tmp.unlink(missing_ok=True)
@@ -304,6 +355,10 @@ def kb_lock(root: Path | str, owner: str, timeout: float = 60.0) -> Iterator[Non
             held["depth"] -= 1
         return
 
+    override = os.environ.get("KB_LOCK_TIMEOUT")  # 테스트용: 기다리는 시간을 줄인다
+    if override:
+        with contextlib.suppress(ValueError):
+            timeout = min(timeout, float(override))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT)
     try:
@@ -358,6 +413,17 @@ def safe_name(name: str, max_len: int = 80) -> str:
     if _is_reserved(text):
         text = "_" + text
     return text
+
+
+_LINK_UNSAFE = re.compile(r"[\[\]#^|]")
+
+
+def link_safe_name(name: str, max_len: int = 80) -> str:
+    """위키링크 `[[...]]` 안에 들어갈 파일명. safe_name 뒤에 `[ ] # ^ |`를 `-`로 바꾼다.
+
+    Obsidian은 이 문자들을 링크 문법(제목·블록·별칭)으로 읽는다. Emacs 쪽도 같은 규칙을 따로 구현한다.
+    """
+    return _LINK_UNSAFE.sub("-", safe_name(name, max_len))
 
 
 def unique_path(path: Path | str) -> Path:
@@ -417,17 +483,27 @@ class _RedactFilter(logging.Filter):
         return True
 
 
+class _LazyRotatingHandler(logging.handlers.RotatingFileHandler):
+    """첫 기록 때에야 폴더와 파일을 만든다(delay=True). 읽기 전용 명령이 로그 폴더를 만들지 않게."""
+
+    def _open(self):  # type: ignore[override]
+        os.makedirs(os.path.dirname(self.baseFilename), exist_ok=True)
+        return super()._open()
+
+
 def get_logger(root: Path | str, name: str = "kb") -> logging.Logger:
-    """`.state/logs/kb.log`에 회전 저장. 비밀값은 가려진다. 루트가 바뀌면 핸들러를 바꾼다."""
+    """`.state/logs/kb.log`에 회전 저장. 비밀값은 가려진다. 루트가 바뀌면 핸들러를 바꾼다.
+
+    파일과 폴더는 처음 기록할 때 만든다. 로거를 얻기만 해서는 아무것도 생기지 않는다.
+    """
     logger = logging.getLogger(f"work-kb.{name}")
     log_dir = state_dir(root) / "logs"
     if getattr(logger, "_kb_log_dir", None) != str(log_dir):
         for handler in list(logger.handlers):
             logger.removeHandler(handler)
             handler.close()
-        log_dir.mkdir(parents=True, exist_ok=True)
-        handler = logging.handlers.RotatingFileHandler(
-            log_dir / f"{name}.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8"
+        handler = _LazyRotatingHandler(
+            log_dir / f"{name}.log", maxBytes=1_000_000, backupCount=3, encoding="utf-8", delay=True
         )
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
         handler.addFilter(_RedactFilter())

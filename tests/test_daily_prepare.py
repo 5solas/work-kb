@@ -1,7 +1,11 @@
 """daily_prepare: 뼈대, today 구역(merge), carryover(이월·[>] 표시), 사람 편집 보호, CRLF, 한글 경로."""
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -10,6 +14,33 @@ import daily_prepare
 from lib import config, core, managed, notes
 
 D05 = dt.date(2026, 11, 5)
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+LOCK_CHILD = r"""
+import sys
+sys.path.insert(0, sys.argv[1])
+from lib import core
+with core.kb_lock(sys.argv[2], "다른 작업"):
+    print("locked", flush=True)
+    sys.stdin.read()
+"""
+
+
+@contextlib.contextmanager
+def held_lock(root: Path):
+    """다른 프로세스가 `.state/kb.lock`을 잡고 있는 동안."""
+    child = subprocess.Popen(
+        [sys.executable, "-X", "utf8", "-c", LOCK_CHILD, str(SCRIPTS), str(root)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        yield
+    finally:
+        child.stdin.close()
+        child.wait(timeout=10)
 
 
 @pytest.fixture
@@ -50,7 +81,11 @@ def _view(vault: Path, name: str, rows: list[tuple[str, str, str, str]]) -> None
 
 def _region(data: bytes, name: str) -> list[str]:
     body = managed.read_region(data, name)
-    return body.decode("utf-8").splitlines() if body else []
+    return notes.split_lines(body.decode("utf-8")) if body else []
+
+
+def _set_region(path: Path, name: str, lines: list[str]) -> None:
+    path.write_bytes(managed.replace_region(path.read_bytes(), name, "\n".join(lines)))
 
 
 def _snapshot(vault: Path) -> dict[str, bytes]:
@@ -174,6 +209,69 @@ def test_key_in_both_views_rendered_once_as_blocked(cfg, vault):
     assert _region(_daily(vault, "2026-11-05").read_bytes(), "today") == ["- [ ] [[KB-12]] 제목 · 막힘 · 마감 11-06"]
 
 
+def test_today_merge_keeps_human_lines_verbatim_and_in_order(cfg, vault):
+    _view(vault, "today", [("KB-12", "제목", "In Progress", "2026-11-06")])
+    path = _daily(vault, "2026-11-05")
+    daily_prepare.run(cfg, D05, carryover=False)
+    assert _region(path.read_bytes(), "today") == ["- [ ] [[KB-12]] 제목 · In Progress · 마감 11-06"]
+    _set_region(path, "today", [
+        "- 사람이 맨 앞에 쓴 메모",
+        "- [x] [[KB-12]] 제목 · In Progress · 마감 11-06",
+        "- [ ] [[KB-12]] 리뷰 코멘트도 답하기 (사람이 쓴 할 일)",  # 같은 키의 둘째 줄
+        "- [x] [[KB-99]] 사람 메모: 어제 끝냄",  # 뷰에 없는 키의 사람 줄
+        "- [ ] [[KB-99]] 사람 메모 둘째 줄",  # 뷰에 없고 체크도 안 된 사람 줄
+        "그냥 글",
+    ])
+    _view(vault, "today", [("KB-12", "제목 v2", "In Review", "2026-11-06"), ("KB-7", "새 일감", "To Do", "")])
+    result = daily_prepare.run(cfg, D05, carryover=False)
+    assert _region(path.read_bytes(), "today") == [
+        "- 사람이 맨 앞에 쓴 메모",
+        "- [x] [[KB-12]] 제목 v2 · In Review · 마감 11-06",  # 도구 줄만 다시 그림(체크 유지)
+        "- [ ] [[KB-12]] 리뷰 코멘트도 답하기 (사람이 쓴 할 일)",
+        "- [x] [[KB-99]] 사람 메모: 어제 끝냄",
+        "- [ ] [[KB-99]] 사람 메모 둘째 줄",
+        "그냥 글",
+        "- [ ] [[KB-7]] 새 일감 · To Do",
+    ]
+    assert result.today_items == 2  # 도구가 그린 일감 줄 수(사람 줄 제외)
+    before = path.read_bytes()
+    daily_prepare.run(cfg, D05, carryover=False)
+    assert path.read_bytes() == before  # 멱등
+
+
+def test_today_line_with_human_annotation_is_kept_verbatim(cfg, vault):
+    _view(vault, "today", [("KB-12", "제목", "In Progress", ""), ("KB-7", "색인", "To Do", "")])
+    path = _daily(vault, "2026-11-05")
+    daily_prepare.run(cfg, D05, carryover=False)
+    _set_region(path, "today", [
+        "- [x] [[KB-12]] 제목 · In Progress — 오후에 확인함",  # 사람이 생성된 줄 끝에 덧붙임
+        "- [ ] [[KB-7]] 색인 · To Do",
+    ])
+    _view(vault, "today", [("KB-12", "제목 v2", "Done", ""), ("KB-7", "색인 v2", "To Do", "")])
+    daily_prepare.run(cfg, D05, carryover=False)
+    assert _region(path.read_bytes(), "today") == [
+        "- [x] [[KB-12]] 제목 · In Progress — 오후에 확인함",  # 덮지도 겹쳐 더하지도 않는다
+        "- [ ] [[KB-7]] 색인 v2 · To Do",
+    ]
+
+
+def test_merge_today_unit_rules():
+    items = [("KB-1", "[[KB-1]] 제목 · To Do")]
+    # 지금 뷰 본문과 같은 줄은 도구 줄: 체크 유지
+    assert daily_prepare.merge_today(["- [x] [[KB-1]] 제목 · To Do"], items) == ["- [x] [[KB-1]] 제목 · To Do"]
+    # 지난번 본문(previous)과 같으면 도구 줄로 보고 다시 그린다
+    assert daily_prepare.merge_today(
+        ["- [x] [[KB-1]] 옛 제목 · To Do"], items, previous={"KB-1": "[[KB-1]] 옛 제목 · To Do"}
+    ) == ["- [x] [[KB-1]] 제목 · To Do"]
+    # 기록이 없으면 사람 줄로 보고 그대로 둔다(지우지 않는다)
+    assert daily_prepare.merge_today(["- [x] [[KB-1]] 옛 제목 · To Do"], items) == ["- [x] [[KB-1]] 옛 제목 · To Do"]
+    # 뷰에서 빠진 도구 줄은 [x]만 남는다
+    assert daily_prepare.merge_today(["- [ ] [[KB-1]] 제목 · To Do", "- [x] [[KB-2]] 끝 · Done"], [],
+                                     previous={"KB-1": "[[KB-1]] 제목 · To Do", "KB-2": "[[KB-2]] 끝 · Done"}) == [
+        "- [x] [[KB-2]] 끝 · Done"
+    ]
+
+
 # ---------------------------------------------------------------- carryover
 
 
@@ -294,6 +392,68 @@ def test_project_keys_required_for_carryover(vault):
     assert not _daily(vault, "2026-11-05").exists()
     daily_prepare.run(cfg, D05, carryover=False)
     assert _daily(vault, "2026-11-05").exists()
+
+
+def test_carryover_keeps_separator_chars_inside_item(cfg, vault):
+    """\\u2028·\\x0c는 줄 끝이 아니다: 한 항목으로 옮기고, 원래 줄을 쪼개거나 순서를 바꾸지 않는다."""
+    src_path = _daily(vault, "2026-11-04")
+    _write(src_path, "## 기록\n- [ ] 보고서 초안 담당 확인 후 제출\n- [ ] 양식\x0c다음 장 \t\n- [ ] 끝에 폼피드\x0c\n- 10:00 끝\n")
+    result = daily_prepare.run(cfg, D05)
+    assert result.carried == 3 and result.marked == 3
+    assert src_path.read_text(encoding="utf-8") == (
+        "## 기록\n- [>] 보고서 초안 담당 확인 후 제출 (2026-11-05로 이월)\n"
+        "- [>] 양식\x0c다음 장 (2026-11-05로 이월)\n"
+        "- [>] 끝에 폼피드\x0c (2026-11-05로 이월)\n- 10:00 끝\n"  # 줄 끝의 공백·탭만 뗀다
+    )
+    carried = [
+        "- [ ] 보고서 초안 담당 확인 후 제출 (← 2026-11-04)",
+        "- [ ] 양식\x0c다음 장 (← 2026-11-04)",
+        "- [ ] 끝에 폼피드 (← 2026-11-04)",
+    ]
+    today = _daily(vault, "2026-11-05")
+    assert _region(today.read_bytes(), "carryover") == carried
+    snap = _snapshot(vault)
+    again = daily_prepare.run(cfg, D05)
+    assert _snapshot(vault) == snap and not again.changed
+    # 구역을 다시 쓸 때도  이 든 기존 항목을 쪼개지 않는다
+    with src_path.open("ab") as fh:
+        fh.write("- [ ] 새 할 일\n".encode("utf-8"))
+    daily_prepare.run(cfg, D05)
+    assert _region(today.read_bytes(), "carryover") == [*carried, "- [ ] 새 할 일 (← 2026-11-04)"]
+
+
+# ---------------------------------------------------------------- 잠금·동시 생성
+
+
+def test_lock_busy_when_another_process_holds_kb_lock(cfg, vault, run_kb, monkeypatch):
+    _write(_daily(vault, "2026-11-04"), "## 기록\n- [ ] 개인: 할 일\n")
+    monkeypatch.setenv("KB_LOCK_TIMEOUT", "0.3")
+    before = _snapshot(vault)
+    with held_lock(vault):
+        with pytest.raises(core.LockBusy, match="다른 작업"):
+            daily_prepare.run(cfg, D05)
+        proc = run_kb("today", "--date", "2026-11-05", env={"KB_LOCK_TIMEOUT": "0.3"})
+    assert proc.returncode == 6, proc.stderr
+    assert proc.stderr.startswith("오류: 다른 작업이 실행 중입니다")
+    assert _snapshot(vault) == before
+    assert not _daily(vault, "2026-11-05").exists()
+
+
+def test_today_file_created_during_write_is_not_overwritten(cfg, vault, monkeypatch):
+    """임시 파일을 쓰는 사이에 편집기가 오늘 파일을 먼저 저장하면 덮지 않는다(없을 때만 만들기)."""
+    path = _daily(vault, "2026-11-05")
+    human = "## 기록\n- 09:00 편집기에서 먼저 저장\n".encode("utf-8")
+    real_fsync = os.fsync
+
+    def fsync_then_editor_saves(fd):
+        real_fsync(fd)
+        if not path.exists():
+            path.write_bytes(human)
+
+    monkeypatch.setattr(core.os, "fsync", fsync_then_editor_saves)
+    result = daily_prepare.run(cfg, D05, carryover=False)
+    assert result.today_skipped and not result.created
+    assert path.read_bytes() == human
 
 
 # ---------------------------------------------------------------- 사람 편집 보호

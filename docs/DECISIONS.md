@@ -100,6 +100,19 @@ Opus 3명 독립 검토(지시서 대조 / Windows·인코딩·안전 / 거짓 �
   - search: 최신 daily부터, `--limit` 기본 100(0=무제한), 코드 블록·관리 구역을 걸러내지 않음, 줄 번호는 `\n` 기준(Emacs grep 버퍼와 일치). status는 아무것도 쓰지 않고 네트워크·keyring을 건드리지 않는다.
   - 샘플 볼트에는 `config.local.yaml` 대신 `config.local.example.yaml`(gitignore 때문). 사용: 임시 폴더로 복사 후 이름 변경.
 
+### Phase 1 검토·수정 라운드 (2026-11-05)
+
+Opus 3명 독립 검토 → 23건 → 전부 수정. 606개 통과 + 클립보드 2개 건너뜀(양쪽 venv). 추가 결정:
+
+- **`atomic_write`**: `expect_sha256`가 있으면 `os.replace` 시도 직전마다 다시 해시를 확인한다(다른 프로그램이 잡고 있는 동안 사람이 저장한 내용을 덮지 않음). `core.MUST_NOT_EXIST`("")는 "없을 때만 생성"(하드링크로 원자적 확인). `KB_LOCK_TIMEOUT`으로 잠금 대기 시간을 바꿀 수 있다(테스트용).
+- **link**: 언급 중복 제거는 (파일, 줄 해시) 기준(같은 문장이 다른 날에 있으면 각각 언급). `[[jira/KEY]]`·`[[jira/KEY.md]]`·`|별칭`·`#제목` 꼴도 키로 인식(Obsidian 절대 링크 형식). UTF-8이 아닌 원천은 stderr와 `skipped_files`에 이름을 보고하고 그 파일의 이전 언급은 그대로 둔다. 사람 페이지는 대소문자 무시로 합친다(NTFS). `--dry-run`·`search`는 `.state/logs`를 만들지 않는다(로거 지연 생성).
+- **daily_prepare `today` 병합**: 키마다 첫 줄이 현재 또는 이전 렌더링과 정확히 같을 때만 도구 줄로 보고 다시 쓴다. 그 밖의 줄(같은 키의 두 번째 줄, 뷰에서 빠진 미완료 키, 사람이 덧붙인 글)은 순서 그대로 보존. 이전 렌더링은 `.state/today.json`에 기록. 사람이 쓴 줄이 있는 키에는 새 줄을 추가하지 않는다.
+- **notes**: 줄 나누기는 `\n`과 홀로 있는 `\r`만(U+2028·`\x0c` 등은 줄 안의 문자). 인라인 코드는 CommonMark 규칙(같은 길이의 백틱 묶음). `core.link_safe_name`: 위키링크 안에 들어갈 이름은 `[ ] # ^ |`를 `-`로.
+- **Emacs**: 자산·inbox 이름에 같은 link-safe 규칙. UTF-8이 아닌 daily에는 캡처하지 않고 파일명을 알린다. `t`는 열린 버퍼의 미저장 변경을 먼저 저장하고, 실행 뒤 변경 없는 버퍼는 조용히 되읽는다. BOM으로 시작하는 `## 기록`도 인식. ERT가 두 콘솔 모드의 `locale-coding-system`(cp65001 / cp949)을 단언.
+- **status**: 미처리 이미지에 daily `## 기록`의 `![[raw/assets/…]]` 중 사이드카 없는 것도 센다.
+- **clip_image.ps1**: 테스트 전용 이음매 `-FromFile <그림>`으로 저장 경로(상대 `-Out`, 폴더 생성, PNG)를 클립보드 없이 검증. `KB_REQUIRE_CLIPBOARD=1`이면 "클립보드를 열 수 없음"이 건너뛰기 대신 실패(사용자 확인용).
+- 사용자 확인 대기(D31): Emacs 텍스트·클립보드·파일 캡처 각 1회, 접두 키 교체 1회. 자동 관문은 통과.
+
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 
 Repo root is `D:\work\work-kb`. Paths in sections 1 to 4 are repo-relative. Nothing was created or changed in this stage.

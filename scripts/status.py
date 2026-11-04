@@ -2,7 +2,8 @@
 
 한 줄에 한 항목, 한국어. 네트워크·비밀값 저장소는 쓰지 않고 파일만 읽는다. 아무것도 쓰지 않는다.
 항목: 환경, config.local.yaml, 오늘 daily, 마지막 동기화(.state/sync.json), outbox 대기·실패,
-미처리 제안(wiki/_proposals.md), 미처리 이미지(사이드카 없는 inbox 이미지), LLM 프로필과 탐지 결과,
+미처리 제안(wiki/_proposals.md), 미처리 이미지(사이드카 없는 inbox 이미지와 daily에 임베드된
+raw/assets 이미지), LLM 프로필과 탐지 결과,
 잠금 소유자(.state/kb.lock), KB_AGENT.
 `--json`이면 같은 내용을 JSON 객체로 낸다(키는 collect() 참고).
 """
@@ -89,16 +90,52 @@ def pending_proposals(cfg: Config, problems: list[str]) -> int:
     return sum(1 for line in text.splitlines() if _LIST_ITEM.match(line))
 
 
+def _embedded_assets(cfg: Config) -> set[str]:
+    """daily `## 기록`에 `![[raw/assets/…]]`(또는 이름만 `![[파일.png]]`, D64)로 임베드된 이미지 파일명."""
+    names: set[str] = set()
+    base = cfg.path("daily")
+    if not base.is_dir():
+        return names
+    for path in sorted(base.glob("*.md")):
+        if not core.is_scannable(path) or not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+            if b"![[" not in data:
+                continue
+            lines = notes.record_lines(f"daily/{path.name}", data)
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in lines:
+            if line.in_code or line.region is not None or "![[" not in line.text:
+                continue
+            for target in notes.image_embeds(line.text):
+                target = target.replace("\\", "/")
+                if target.startswith("raw/assets/"):
+                    target = target[len("raw/assets/"):]
+                if "/" not in target and Path(target).suffix.lower() in IMAGE_SUFFIXES:
+                    names.add(target)
+    return names
+
+
 def unprocessed_images(cfg: Config) -> int:
-    """사이드카(`inbox/<이미지 이름>.md`, D21)가 없는 `inbox/*.png|jpg|jpeg|webp` 수."""
-    inbox = cfg.path("inbox")
-    if not inbox.is_dir():
-        return 0
+    """사이드카(`inbox/<이미지 이름>.md`, D21)가 없는 이미지 수.
+
+    - `inbox/*.png|jpg|jpeg|webp`
+    - daily `## 기록`에 `![[raw/assets/…]]`로 임베드되었고 `raw/assets`에 있는 이미지(캡처 C·F의 결과, §6.5 T6)
+    """
     count = 0
-    for path in inbox.iterdir():
-        if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file() and core.is_scannable(path):
-            if not path.with_suffix(".md").exists():
-                count += 1
+    inbox = cfg.path("inbox")
+    if inbox.is_dir():
+        for path in inbox.iterdir():
+            if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file() and core.is_scannable(path):
+                if not path.with_suffix(".md").exists():
+                    count += 1
+    assets = cfg.path("raw", "assets")
+    for name in sorted(_embedded_assets(cfg)):
+        image = assets / name
+        if image.is_file() and not cfg.path("inbox", f"{Path(name).stem}.md").exists():
+            count += 1
     return count
 
 

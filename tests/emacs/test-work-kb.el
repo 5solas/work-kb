@@ -4,7 +4,8 @@
 ;;         -l tests/emacs/test-work-kb.el -f ert-run-tests-batch-and-exit
 ;; tests/test_emacs_ert.py가 콘솔 상속·CREATE_NO_WINDOW(cp949) 두 가지로 돌린다.
 ;; 환경변수: WORK_KB_TEST_TMP (ASCII 임시 폴더, 없으면 새로 만듦),
-;;           WORK_KB_TEST_EXPECT_KOREAN=1 (한국어 언어 환경이 켜졌는지 확인).
+;;           WORK_KB_TEST_EXPECT_KOREAN=1 (한국어 언어 환경이 켜졌는지 확인),
+;;           WORK_KB_TEST_EXPECT_LOCALE=cp949 등 (`locale-coding-system' 확인; 없으면 출력에 기록만).
 
 ;;; Code:
 
@@ -62,6 +63,26 @@
   (let ((coding-system-for-write 'no-conversion))
     (write-region (encode-coding-string text 'utf-8-unix) nil file nil 'silent)))
 
+(defun work-kb-test--write-raw (file bytes)
+  "유니바이트 BYTES를 그대로 FILE에 쓴다."
+  (make-directory (file-name-directory file) t)
+  (let ((coding-system-for-write 'no-conversion))
+    (write-region bytes nil file nil 'silent)))
+
+(defun work-kb-test--rewrite-on-disk (file text)
+  "다른 프로세스(link·daily_prepare)가 고친 것처럼 FILE을 TEXT로 다시 쓰고 수정 시각을 미룬다."
+  (work-kb-test--write-bytes file text)
+  (set-file-times file (time-add (current-time) 10)))
+
+(defmacro work-kb-test--no-prompts (&rest body)
+  "BODY 안에서 사용자에게 묻는 함수가 불리면 오류 (find-file의 \"changed on disk\" 등)."
+  (declare (indent 0))
+  `(cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest args) (error "물으면 안 됨: %S" args)))
+             ((symbol-function 'y-or-n-p) (lambda (&rest args) (error "물으면 안 됨: %S" args)))
+             ((symbol-function 'ask-user-about-supersession-threat)
+              (lambda (&rest args) (error "물으면 안 됨: %S" args))))
+     ,@body))
+
 (defun work-kb-test--bytes (file)
   (with-temp-buffer
     (set-buffer-multibyte nil)
@@ -97,6 +118,13 @@
   (skip-unless (getenv "WORK_KB_TEST_EXPECT_KOREAN"))
   (should (equal current-language-environment "Korean"))
   (should-not (eq (coding-system-base (default-value 'buffer-file-coding-system)) 'utf-8)))
+
+(ert-deftest work-kb-test-locale ()
+  "러너가 기대한 콘솔 로캘인지 (D65). 기대값이 없으면 출력에 기록만 한다 (러너가 읽는다)."
+  (message "WORK-KB-TEST-LOCALE: %s" locale-coding-system)
+  (let ((expected (getenv "WORK_KB_TEST_EXPECT_LOCALE")))
+    (when (and expected (not (string-empty-p expected)))
+      (should (eq locale-coding-system (intern expected))))))
 
 (ert-deftest work-kb-test-vault-coding ()
   "볼트 .md는 한국어 환경에서도 UTF-8로 읽히고, 새 파일은 utf-8-unix (D11)."
@@ -218,6 +246,73 @@
         (should (string-match-p "- 08:00 첫 기록\n- 09:12 열린 버퍼\n" (buffer-string))))
       (should (string-match-p (regexp-quote (work-kb-test--utf8 "- 09:12 열린 버퍼\n\n## 메모"))
                               (work-kb-test--bytes file))))))
+
+(ert-deftest work-kb-test-capture-stale-live-buffer ()
+  "열린 버퍼가 디스크보다 낡았으면: 수정이 없으면 다시 읽고 기록, 수정이 있으면 거부 (D26)."
+  (work-kb-test--with-vault vault
+    (let* ((file (expand-file-name "daily/2026-11-05.md" vault))
+           (create-lockfiles nil)
+           (disk (string-replace "- 08:00 첫 기록\n" "- 08:00 첫 기록 [[KB-12]]\n" work-kb-test--daily-lf)))
+      (work-kb-test--write-bytes file work-kb-test--daily-lf)
+      (let ((buf (let ((coding-system-for-read 'utf-8)) (find-file-noselect file))))
+        ;; link가 KB-12 → [[KB-12]]로 정규화한 것처럼 디스크만 바뀜
+        (work-kb-test--rewrite-on-disk file disk)
+        (should-not (verify-visited-file-modtime buf))
+        (work-kb-test--no-prompts (work-kb-capture "새 캡처"))
+        (should (equal (work-kb-test--bytes file)
+                       (work-kb-test--utf8
+                        (string-replace "[[KB-12]]\n" "[[KB-12]]\n- 09:12 새 캡처\n" disk))))
+        (with-current-buffer buf
+          (should-not (buffer-modified-p))
+          (should (string-match-p "\\[\\[KB-12\\]\\]\n- 09:12 새 캡처" (buffer-string))))
+        ;; 버퍼도 수정됨 + 디스크 변경: 거부, 디스크 바이트 그대로
+        (with-current-buffer buf (goto-char (point-max)) (insert "사람이 쓰는 중\n"))
+        (let ((disk2 (concat disk "외부 변경\n")))
+          (work-kb-test--rewrite-on-disk file disk2)
+          (should-error (work-kb-test--no-prompts (work-kb-capture "거부될 캡처")) :type 'user-error)
+          (should (equal (work-kb-test--bytes file) (work-kb-test--utf8 disk2)))
+          (with-current-buffer buf
+            (should (buffer-modified-p))
+            (should (string-match-p "사람이 쓰는 중" (buffer-string)))
+            (should-not (string-match-p "거부될 캡처" (buffer-string)))))))))
+
+(ert-deftest work-kb-test-capture-refuses-non-utf-8 ()
+  "cp949 daily에는 아무것도 붙이지 않고 파일 이름을 담은 사용자 오류를 낸다 (D11)."
+  (work-kb-test--with-vault vault
+    (let* ((file (expand-file-name "daily/2026-11-05.md" vault))
+           (cp949 (encode-coding-string "## 기록\n- 09:00 한글 cp949\n" 'cp949)))
+      (work-kb-test--write-raw file cp949)
+      ;; 열린 버퍼 없음
+      (let ((err (should-error (work-kb-test--no-prompts (work-kb-capture "새 줄")) :type 'user-error)))
+        (should (string-match-p "UTF-8이 아닙니다" (cadr err)))
+        (should (string-match-p (regexp-quote "2026-11-05.md") (cadr err))))
+      (should (equal (work-kb-test--bytes file) cp949))
+      (should-not (find-buffer-visiting file))
+      ;; cp949로 열린 버퍼
+      (let ((buf (let ((coding-system-for-read 'cp949)) (find-file-noselect file))))
+        (let ((err (should-error (work-kb-test--no-prompts (work-kb-capture "라이브")) :type 'user-error)))
+          (should (string-match-p "UTF-8이 아닙니다" (cadr err))))
+        (should (equal (work-kb-test--bytes file) cp949))
+        (with-current-buffer buf
+          (should-not (buffer-modified-p))
+          (should (eq (coding-system-base buffer-file-coding-system) (coding-system-base 'cp949)))
+          (should (string-match-p "한글 cp949" (buffer-string)))
+          (should-not (string-match-p "라이브" (buffer-string))))
+        (kill-buffer buf))
+      ;; UTF-8로 열려 날 바이트가 보이는 버퍼
+      (let ((buf (let ((coding-system-for-read 'utf-8)) (find-file-noselect file))))
+        (should-error (work-kb-test--no-prompts (work-kb-capture "라이브 2")) :type 'user-error)
+        (should (equal (work-kb-test--bytes file) cp949))
+        (with-current-buffer buf (should-not (buffer-modified-p)))))))
+
+(ert-deftest work-kb-test-capture-bom-daily ()
+  "BOM으로 시작하는 `## 기록' 첫 줄도 제목으로 본다: 두 번째 `## 기록'을 만들지 않는다."
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "daily/2026-11-05.md" vault)))
+      (work-kb-test--write-bytes file "\ufeff## 기록\n- 09:00 첫 줄\n")
+      (work-kb-capture "BOM 캡처")
+      (should (equal (work-kb-test--bytes file)
+                     (work-kb-test--utf8 "\ufeff## 기록\n- 09:00 첫 줄\n- 09:12 BOM 캡처\n"))))))
 
 (ert-deftest work-kb-test-capture-missing-today ()
   "오늘 파일이 없으면 `kb.py today --date'를 부르고, 실패하면 뼈대를 직접 만든다."
@@ -343,20 +438,106 @@
     (make-directory bin t)
     (work-kb-test--write-bytes (expand-file-name "python.exe" store) "")
     (work-kb-test--write-bytes (expand-file-name "python.exe" bin) "")
+    ;; `py -3'은 늘 된다고 가정한다: 순서가 틀리면(py가 .venv나 PATH보다 먼저) 이 기계와 상관없이 드러난다.
+    (let ((launcher t))
+      (cl-letf (((symbol-function 'call-process) (lambda (&rest _) (error "py -3를 시험하면 안 됨")))
+                ((symbol-function 'work-kb--py-launcher-works-p) (lambda () launcher)))
+        ;; .venv 없음: PATH의 python, WindowsApps 별칭은 건너뜀
+        (let ((exec-path (list store bin)))
+          (should (equal (work-kb--python-command) (list (expand-file-name "python.exe" bin)))))
+        ;; PATH에 별칭뿐이거나 아무것도 없음: 마지막 수단 py -3
+        (let ((exec-path (list store)))
+          (should (equal (work-kb--python-command) '("py" "-3"))))
+        (let ((exec-path nil))
+          (should (equal (work-kb--python-command) '("py" "-3"))))
+        ;; py -3도 안 됨: 사용자 오류
+        (setq launcher nil)
+        (let ((exec-path nil))
+          (should-error (work-kb--python-command) :type 'user-error))
+        (setq launcher t)
+        ;; .venv 있음: 상대 경로 (PATH python·py -3보다 먼저)
+        (make-directory (expand-file-name ".venv/Scripts" base) t)
+        (work-kb-test--write-bytes (expand-file-name ".venv/Scripts/python.exe" base) "")
+        (let ((exec-path (list store bin)))
+          (should (equal (work-kb--python-command) '(".venv/Scripts/python.exe"))))
+        (let ((exec-path nil))
+          (should (equal (work-kb--python-command) '(".venv/Scripts/python.exe"))))))
     (cl-letf (((symbol-function 'call-process) (lambda (&rest _) (error "py -3를 시험하면 안 됨"))))
-      ;; .venv 없음: PATH의 python, WindowsApps 별칭은 건너뜀
-      (let ((exec-path (list store bin)))
-        (should (equal (work-kb--python-command) (list (expand-file-name "python.exe" bin)))))
-      ;; .venv 있음: 상대 경로
-      (make-directory (expand-file-name ".venv/Scripts" base) t)
-      (work-kb-test--write-bytes (expand-file-name ".venv/Scripts/python.exe" base) "")
-      (let ((exec-path (list store bin)))
-        (should (equal (work-kb--python-command) '(".venv/Scripts/python.exe"))))
       ;; 직접 지정이 우선
       (let ((work-kb-python '("py" "-3")))
         (should (equal (work-kb--python-command) '("py" "-3"))))
       (let ((work-kb-python "C:/Python/python.exe"))
         (should (equal (work-kb--python-command) '("C:/Python/python.exe")))))))
+
+;;;; 오늘 (t)
+
+(ert-deftest work-kb-test-today-forces-prepare ()
+  "`t'는 파일이 있어도 `kb.py today --date'를 부르고(오늘·이월 구역 갱신) 그 파일을 연다."
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "daily/2026-11-05.md" vault))
+          calls)
+      (work-kb-test--write-bytes file work-kb-test--daily-lf)
+      (cl-letf (((symbol-function 'work-kb--run-sync)
+                 (lambda (args &rest _) (push args calls) 0)))
+        (save-window-excursion
+          (work-kb-test--no-prompts (work-kb-today))
+          (should (buffer-file-name))
+          (should (file-equal-p (buffer-file-name) file))))
+      (should (equal calls (list (list "today" "--root" (directory-file-name vault) "--date" "2026-11-05")))))))
+
+(ert-deftest work-kb-test-today-live-buffer ()
+  "열린 오늘 버퍼: 수정 없으면 묻지 않고 새 내용, 수정 있으면 먼저 저장해 잃지 않는다,
+버퍼와 파일이 모두 바뀌었으면 준비를 건너뛴다."
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "daily/2026-11-05.md" vault))
+          (create-lockfiles nil)
+          (make-backup-files nil)
+          seen)
+      (work-kb-test--write-bytes file work-kb-test--daily-lf)
+      (cl-letf (((symbol-function 'work-kb--run-sync)
+                 ;; daily_prepare 흉내: 디스크 내용을 읽어 오늘 구역에 한 줄을 넣고 다시 쓴다.
+                 (lambda (_args &rest _)
+                   (let ((text (decode-coding-string (work-kb-test--bytes file) 'utf-8)))
+                     (push text seen)
+                     (work-kb-test--rewrite-on-disk
+                      file (string-replace "<!-- kb:today:start -->\n"
+                                           "<!-- kb:today:start -->\n- [ ] KB-1 준비됨\n" text)))
+                   0)))
+        (let ((buf (let ((coding-system-for-read 'utf-8)) (find-file-noselect file))))
+          ;; 1) 수정 없음: 묻지 않고 다시 읽는다
+          (save-window-excursion
+            (work-kb-test--no-prompts (work-kb-today))
+            (should (eq (current-buffer) buf)))
+          (should (= 1 (length seen)))
+          (with-current-buffer buf
+            (should-not (buffer-modified-p))
+            (should (string-match-p "KB-1 준비됨" (buffer-string))))
+          ;; 2) 저장 안 한 수정: 준비 전에 저장되어 daily_prepare가 보고, 버퍼에도 남는다
+          (with-current-buffer buf (goto-char (point-max)) (insert "저장 안 한 글\n"))
+          (save-window-excursion
+            (work-kb-test--no-prompts (work-kb-today)))
+          (should (= 2 (length seen)))
+          (should (string-match-p "저장 안 한 글" (car seen)))
+          (should (string-match-p (regexp-quote (work-kb-test--utf8 "저장 안 한 글\n"))
+                                  (work-kb-test--bytes file)))
+          (with-current-buffer buf
+            (should-not (buffer-modified-p))
+            (should (string-match-p "저장 안 한 글" (buffer-string)))
+            (should (= 2 (how-many "KB-1 준비됨" (point-min) (point-max)))))
+          ;; 3) 버퍼도 수정, 디스크도 바뀜: 준비를 건너뛰고 둘 다 그대로
+          (with-current-buffer buf (goto-char (point-max)) (insert "둘 다 바뀜\n"))
+          (let ((disk (concat (decode-coding-string (work-kb-test--bytes file) 'utf-8) "외부 변경\n")))
+            (work-kb-test--rewrite-on-disk file disk)
+            (work-kb-test--capturing-messages msgs
+              (save-window-excursion
+                (work-kb-test--no-prompts (work-kb-today))
+                (should (eq (current-buffer) buf)))
+              (should (cl-some (lambda (m) (string-match-p "건너뜁니다" m)) msgs)))
+            (should (= 2 (length seen)))
+            (should (equal (work-kb-test--bytes file) (work-kb-test--utf8 disk)))
+            (with-current-buffer buf
+              (should (buffer-modified-p))
+              (should (string-match-p "둘 다 바뀜" (buffer-string))))))))))
 
 ;;;; 이미지
 
@@ -408,6 +589,80 @@
       (should (string-match-p
                (regexp-quote (work-kb-test--utf8 "- 09:12 ![[raw/assets/2026-11-05-0912-회의 화이트보드.png]] 회의 화이트보드\n"))
                (work-kb-test--bytes file))))))
+
+(defun work-kb-test--fake-clip (code &optional output)
+  "clip_image.ps1 대신: -Out 경로에 가짜 PNG를 만들고 OUTPUT을 출력한 뒤 CODE로 끝난다."
+  (lambda (_program &optional _infile _dest _display &rest args)
+    (let ((out (expand-file-name (car (last args)) default-directory)))
+      (make-directory (file-name-directory out) t)
+      (let ((coding-system-for-write 'no-conversion))
+        (write-region "\x89PNG\r\n\x1a\nfake" nil out nil 'silent)))
+    (when output (insert output))
+    code))
+
+(ert-deftest work-kb-test-clipboard-empty-name ()
+  "이름을 비우면 capture (D16)."
+  (skip-unless (eq system-type 'windows-nt))
+  (work-kb-test--with-vault vault
+    (let ((work-kb-root vault)
+          (file (expand-file-name "daily/2026-11-05.md" vault)))
+      (work-kb-test--write-bytes file work-kb-test--daily-lf)
+      (cl-letf (((symbol-function 'call-process) (work-kb-test--fake-clip 0)))
+        (let ((asset (work-kb-capture-clipboard-image "")))
+          (should (equal (file-name-nondirectory asset) "2026-11-05-0912-capture.png"))
+          (should (file-exists-p asset))))
+      (should (string-match-p
+               (regexp-quote (work-kb-test--utf8 "- 09:12 ![[raw/assets/2026-11-05-0912-capture.png]]\n"))
+               (work-kb-test--bytes file))))))
+
+(ert-deftest work-kb-test-clipboard-error-cleans-temp ()
+  "종료 3 → 임시 PNG를 지우고 F(파일) 캡처를 안내, daily·assets 변화 없음."
+  (skip-unless (eq system-type 'windows-nt))
+  (work-kb-test--with-vault vault
+    (let ((work-kb-root vault)
+          (file (expand-file-name "daily/2026-11-05.md" vault)))
+      (work-kb-test--write-bytes file work-kb-test--daily-lf)
+      (work-kb-test--capturing-messages msgs
+        (cl-letf (((symbol-function 'call-process) (work-kb-test--fake-clip 3 "clip_image: boom"))
+                  ((symbol-function 'read-string) (lambda (&rest _) (error "물으면 안 됨"))))
+          (should-not (work-kb-capture-clipboard-image)))
+        (should (cl-some (lambda (m) (and (string-match-p "F(파일)" m) (string-match-p "종료 3" m)
+                                          (string-match-p "clip_image: boom" m)))
+                         msgs)))
+      (should-not (directory-files (expand-file-name ".state/tmp" vault) nil "\\`[^.]"))
+      (should-not (directory-files (expand-file-name "raw/assets" vault) nil "\\`[^.]"))
+      (should (equal (work-kb-test--bytes file) (work-kb-test--utf8 work-kb-test--daily-lf))))))
+
+(ert-deftest work-kb-test-link-safe-asset-and-inbox ()
+  "링크 대상이 되는 이름(이미지·inbox)은 `[ ] # ^ |'를 `-'로 바꿔 `![[…]]'·`[[…]]'가 깨지지 않는다."
+  (should (equal (work-kb--link-safe-name "회의 [초안] #2") "회의 -초안- -2"))
+  (should (equal (work-kb--link-safe-name "a^b|c]") "a-bc-"))
+  (should (equal (work-kb--link-safe-name "CON") "_CON"))
+  (should (equal (work-kb--link-safe-name " . ") "_"))
+  ;; core.safe_name과 같은 규칙은 그대로 (사람 페이지 등)
+  (should (equal (work-kb--safe-name "이슈 #12 [a]") "이슈 #12 [a]"))
+  (work-kb-test--with-vault vault
+    (let ((file (expand-file-name "daily/2026-11-05.md" vault))
+          (src (expand-file-name "inbox/회의 [초안] #2.png" vault)))
+      (work-kb-test--write-bytes file work-kb-test--daily-lf)
+      (work-kb-test--write-bytes src "png")
+      (let* ((asset (work-kb-capture-image-file src "설명"))
+             (daily (decode-coding-string (work-kb-test--bytes file) 'utf-8)))
+        (should (equal (file-name-nondirectory asset) "2026-11-05-0912-회의 -초안- -2.png"))
+        ;; notes.image_embeds와 같은 꼴: ![[ 다음 ] 또는 | 앞까지가 대상
+        (should (string-match "!\\[\\[\\([^]|]+\\)\\]\\]" daily))
+        (let ((target (match-string 1 daily)))
+          (should (equal target "raw/assets/2026-11-05-0912-회의 -초안- -2.png"))
+          (should-not (string-match-p "#" target))
+          (should (file-equal-p (expand-file-name target vault) asset))))
+      (let* ((note (work-kb-capture-inbox "회의 [초안] #2" "본문"))
+             (stem (file-name-base note))
+             (link (concat "[[inbox/" stem "]]")))
+        (should (equal (file-name-nondirectory note) "20261105-0912-회의 -초안- -2.md"))
+        (should-not (string-match-p "[][#^|]" stem))
+        ;; notes.wikilinks와 같은 꼴: `#'·`|'·`]' 앞에서 끊긴다
+        (should (string-match "\\[\\[\\([^]|#]+\\)" link))
+        (should (equal (match-string 1 link) (concat "inbox/" stem)))))))
 
 (ert-deftest work-kb-test-image-file-never-overwrites ()
   (work-kb-test--with-vault vault

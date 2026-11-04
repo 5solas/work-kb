@@ -185,6 +185,111 @@ def test_atomic_write_retries_while_handle_is_held(tmp_path):
     assert path.read_bytes() == b"new"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows 공유 위반만 해당")
+def test_atomic_write_rechecks_hash_before_every_replace(tmp_path):
+    """편집기가 저장하느라 파일을 잡고 있던 사이에 바뀐 내용을, 기다린 뒤에 덮지 않는다."""
+    path = tmp_path / "한글 폴더" / "2026-11-04.md"
+    path.parent.mkdir()
+    original = "## 기록\n- 09:00 KB-1 a\n".encode("utf-8")
+    path.write_bytes(original)
+    human = original + "- 09:05 사람이 저장 중이던 줄\n".encode("utf-8")
+    opened = threading.Event()
+
+    def editor_save():
+        with open(path, "r+b") as fh:  # 저장 중인 편집기처럼 쓰기 핸들을 잡는다
+            opened.set()
+            time.sleep(0.3)
+            fh.seek(0)
+            fh.write(human)
+            fh.truncate()
+            fh.flush()
+
+    thread = threading.Thread(target=editor_save)
+    thread.start()
+    assert opened.wait(10), "도우미 스레드가 파일을 열지 못함"
+    with pytest.raises(core.ConcurrentEdit):
+        core.atomic_write(path, "## 기록\n- 09:00 [[KB-1]] a\n".encode("utf-8"), expect_sha256=core.sha256_hex(original))
+    thread.join(10)
+    assert path.read_bytes() == human
+    assert not list(path.parent.glob(".*.tmp"))
+
+
+def test_atomic_write_must_not_exist(tmp_path):
+    path = tmp_path / "새 파일.md"
+    core.atomic_write(path, b"first", expect_sha256=core.MUST_NOT_EXIST)
+    assert path.read_bytes() == b"first"
+    with pytest.raises(core.ConcurrentEdit):
+        core.atomic_write(path, b"second", expect_sha256=core.MUST_NOT_EXIST)
+    assert path.read_bytes() == b"first"
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_atomic_write_must_not_exist_checks_at_the_last_moment(tmp_path, monkeypatch):
+    """임시 파일을 쓰는 사이에 누가 만들면(편집기 저장) 덮지 않는다. 하드 링크가 안 되면 교체 직전 확인."""
+    for use_link in (True, False):
+        path = tmp_path / f"오늘-{use_link}.md"
+        real_fsync = os.fsync
+
+        def fsync_then_human_creates(fd, path=path):
+            real_fsync(fd)
+            if not path.exists():
+                path.write_bytes("사람이 먼저 만듦".encode("utf-8"))
+
+        monkeypatch.setattr(core.os, "fsync", fsync_then_human_creates)
+        if not use_link:
+            def no_link(src, dst):
+                raise OSError("하드 링크를 지원하지 않음")
+
+            monkeypatch.setattr(core.os, "link", no_link)
+        with pytest.raises(core.ConcurrentEdit):
+            core.atomic_write(path, b"tool", expect_sha256=core.MUST_NOT_EXIST)
+        assert path.read_bytes() == "사람이 먼저 만듦".encode("utf-8")
+        monkeypatch.undo()
+    assert not list(tmp_path.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("회의 [초안] #1 ^블록", "회의 -초안- -1 -블록"),
+        ("a|b", "ab"),  # |는 safe_name이 이미 지운다
+        ("보통 이름", "보통 이름"),
+        ("CON", "_CON"),
+        ("", "_"),
+        ("[[KB-1]]", "--KB-1--"),
+    ],
+)
+def test_link_safe_name(raw, expected):
+    assert core.link_safe_name(raw) == expected
+    assert not any(ch in core.link_safe_name(raw) for ch in "[]#^|")
+
+
+def test_get_logger_creates_nothing_until_first_record(tmp_path):
+    root = tmp_path / "로그 볼트"
+    root.mkdir()
+    logger = core.get_logger(root)
+    assert not (root / ".state").exists()  # 얻기만 해서는 폴더도 파일도 없다
+    logger.warning("첫 기록 한글")
+    for handler in logger.handlers:
+        handler.flush()
+    assert "첫 기록 한글" in (root / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+
+
+def test_kb_lock_timeout_override(tmp_path, monkeypatch):
+    child = _child(tmp_path, hold=3, timeout=1)
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        monkeypatch.setenv("KB_LOCK_TIMEOUT", "0.2")
+        started = time.monotonic()
+        with pytest.raises(core.LockBusy):
+            with core.kb_lock(tmp_path, "test"):  # 기본 60초 대신 0.2초
+                pass
+        assert time.monotonic() - started < 2
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
 CHILD = r"""
 import sys, time
 sys.path.insert(0, sys.argv[1])

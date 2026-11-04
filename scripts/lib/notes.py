@@ -22,7 +22,13 @@ TIME_PREFIX = re.compile(r"^- (?:\[[ xX>]\] )?(\d{2}:\d{2})(?:\s|$)")
 HEADING2 = re.compile(r"^## +(.+?)\s*$")
 FENCE = re.compile(r"^(```|~~~)")
 URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
-INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+# CommonMark 코드 스팬: 같은 길이의 백틱 줄로 열고 닫는다(``KB-5``, ```a `b` c```).
+INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
+# 줄 나누기: `\n`과 홀로 선 CR(뒤에 \r·\n이 없는 \r)만. str.splitlines는 \x0c·\x1c·  같은
+# 문자에서도 끊어서 사람이 붙여 넣은 줄을 둘로 쪼갠다(managed._marker_lines와 같은 규칙).
+_LINE_BREAK = re.compile(r"(?<=\n)|(?<=\r)(?![\r\n])")
+# Obsidian 절대 경로 링크 `[[jira/KEY-1]]`(D64)의 키 앞부분
+_JIRA_PATH_PREFIX = "[[jira/"
 WIKILINK_RE = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|[^\]]*)?\]\]")
 IMAGE_EMBED_RE = re.compile(r"!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]")
 
@@ -61,6 +67,12 @@ class NoteLine:
     offset: int = 0  # 줄 시작의 바이트 위치(BOM 포함 원본 기준)
 
 
+def split_lines(text: str, *, keepends: bool = False) -> list[str]:
+    """`\\n`과 홀로 선 CR에서만 줄을 나눈다. keepends=False면 줄끝 CR·LF를 뗀다."""
+    parts = [part for part in _LINE_BREAK.split(text) if part]
+    return parts if keepends else [part.rstrip("\r\n") for part in parts]
+
+
 def decode(data: bytes) -> str:
     """BOM을 떼고 UTF-8로 해독한다. 실패하면 UnicodeDecodeError."""
     if data.startswith(BOM):
@@ -94,7 +106,7 @@ def iter_lines(rel: str, data: bytes) -> Iterator[NoteLine]:
     in_fence = False
     in_front = False
     fence_mark = ""
-    for lineno, raw in enumerate(text.splitlines(keepends=True), start=1):
+    for lineno, raw in enumerate(split_lines(text, keepends=True), start=1):
         line = raw.rstrip("\r\n")
         stripped = line.strip()
         region = next((name for name, start, end in spans if start <= offset < end), None)
@@ -139,7 +151,7 @@ def section_span(data: bytes, heading: str) -> tuple[int, int] | None:
     start: int | None = None
     end: int | None = None
     last_nonblank_end: int | None = None
-    for raw in text.splitlines(keepends=True):
+    for raw in split_lines(text, keepends=True):
         line = raw.rstrip("\r\n")
         match = HEADING2.match(line)
         if match:
@@ -199,8 +211,16 @@ def key_pattern(project_keys: list[str] | tuple[str, ...]) -> re.Pattern[str] | 
     return re.compile(rf"(?<![A-Za-z0-9_\-])(?:{alternation})-\d+(?![A-Za-z0-9_])")
 
 
+def _closes_link(after: str) -> bool:
+    return after.startswith(("]]", "|", "#"))
+
+
 def find_keys(text: str, project_keys: list[str] | tuple[str, ...]) -> list[KeyMatch]:
-    """프로젝트 키의 Jira 키를 찾는다. URL·인라인 코드 안은 제외. `[[KEY-1]]`·`[[KEY-1|별칭]]`은 bracketed."""
+    """프로젝트 키의 Jira 키를 찾는다. URL·인라인 코드 안은 제외.
+
+    bracketed: `[[KEY-1]]`·`[[KEY-1|별칭]]`·`[[KEY-1#제목]]`, 그리고 Obsidian 절대 경로 링크
+    `[[jira/KEY-1]]`·`[[jira/KEY-1.md]]`(뒤에 `|별칭`·`#제목` 가능, D64).
+    """
     pattern = key_pattern(project_keys)
     if pattern is None:
         return []
@@ -208,9 +228,13 @@ def find_keys(text: str, project_keys: list[str] | tuple[str, ...]) -> list[KeyM
     found: list[KeyMatch] = []
     for match in pattern.finditer(masked):
         start, end = match.start(), match.end()
-        before = masked[max(0, start - 2):start]
-        after = masked[end:end + 2]
-        bracketed = before == "[[" and (after.startswith("]]") or after.startswith("|") or after.startswith("#"))
+        after = masked[end:end + 5]
+        if masked[max(0, start - 2):start] == "[[":
+            bracketed = _closes_link(after)
+        elif masked[max(0, start - len(_JIRA_PATH_PREFIX)):start] == _JIRA_PATH_PREFIX:
+            bracketed = _closes_link(after[3:] if after.startswith(".md") else after)
+        else:
+            bracketed = False
         found.append(KeyMatch(start, end, match.group(0), bracketed))
     return found
 
@@ -245,9 +269,17 @@ def daily_path(cfg: Config, day: dt.date) -> Path:
     return cfg.path("daily", f"{day.isoformat()}.md")
 
 
-def iter_sources(cfg: Config) -> Iterator[tuple[Path, bytes]]:
-    """daily/*.md와 inbox/*.md(사이드카 포함)를 정렬해 낸다. 해독 못 하는 파일은 로그에 남기고 건너뛴다."""
-    logger = core.get_logger(cfg.root)
+NOT_UTF8 = "UTF-8이 아니라 건너뜀"
+
+
+def iter_sources(
+    cfg: Config, *, skipped: list[tuple[str, str]] | None = None, log: bool = True
+) -> Iterator[tuple[Path, bytes]]:
+    """daily/*.md와 inbox/*.md(사이드카 포함)를 정렬해 낸다. 해독 못 하는 파일은 건너뛴다.
+
+    건너뛴 파일은 skipped에 (볼트 기준 경로, 이유)로 더하고, log=True면 로그에도 남긴다.
+    읽기 전용 명령(search)은 log=False로 불러 `.state/logs`를 만들지 않는다.
+    """
     for folder in ("daily", "inbox"):
         base = cfg.path(folder)
         if not base.is_dir():
@@ -259,7 +291,10 @@ def iter_sources(cfg: Config) -> Iterator[tuple[Path, bytes]]:
             try:
                 decode(data)
             except UnicodeDecodeError as exc:
-                logger.warning("UTF-8이 아니라 건너뜀: %s (%s)", path, exc)
+                if skipped is not None:
+                    skipped.append((f"{folder}/{path.name}", NOT_UTF8))
+                if log:
+                    core.get_logger(cfg.root).warning("%s: %s (%s)", NOT_UTF8, path, exc)
                 continue
             yield path, data
 

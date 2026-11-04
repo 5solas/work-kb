@@ -8,12 +8,18 @@
   `.state/links_cache.json`(파일 sha256별 추출 결과)은 다시 만들 수 있는 캐시일 뿐이고,
   구역 내용은 캐시 이력에 기대지 않는다. 크기·수정 시각이 캐시와 같은 원천은 열지 않고(웜 실행 예산),
   다르면 읽어서 sha256으로 확인한다. 의심스러우면 `--rebuild`.
+- 구역 안 중복은 (원천, 줄 해시)로만 뺀다: 같은 문장이라도 다른 날·다른 파일이면 별개의 언급이다.
+- `[[jira/KEY-1]]`(Obsidian 절대 경로 링크, D64)도 `[[KEY-1]]`처럼 언급으로 친다.
+- UTF-8이 아닌 원천은 건너뛰고 알리며(skipped_files·stderr), 지난 캐시에 그 파일의 항목이 있으면 그대로 둔다.
+- 사람 페이지는 Windows에서 대소문자만 다른 이름(`@Kim`·`@kim`)을 한 페이지로 모은다(디스크의 이름 우선).
+- `--dry-run`은 로그를 포함해 아무것도 쓰지 않는다.
 - `normalize_keys`면 daily `## 기록`의 맨 글자 키를 `[[KEY-1]]`로 바꾼다. link가 daily를 고치는
   유일한 경우이며 expect_sha256으로 써서 사람이 고친 파일은 건너뛰고 알린다.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import stat
 import sys
@@ -81,6 +87,7 @@ class Source:
     entries: list[Entry] = field(default_factory=list)
     cacheable: bool = True
     from_cache: bool = False
+    cache_item: dict | None = None  # 캐시에 그대로 다시 적을 이전 항목(UTF-8이 아닌 원천)
 
 
 @dataclass
@@ -413,15 +420,46 @@ def _template_for(rel: str) -> tuple[str, str]:
     return "person", stem
 
 
+def _entry_id(entry: Entry) -> tuple[str, str]:
+    """중복 판정 키 (원천, 줄 해시). 같은 문장이라도 다른 날·다른 파일이면 별개의 언급이다."""
+    return (entry.rel, entry.hash)
+
+
 def _render_region(entries: list[Entry]) -> str:
-    seen: set[str] = set()
+    seen: set[tuple[str, str]] = set()
     lines: list[str] = []
     for entry in sorted(entries, key=Entry.sort_key):
-        if entry.hash in seen:
+        ident = _entry_id(entry)
+        if ident in seen:
             continue
-        seen.add(entry.hash)
+        seen.add(ident)
         lines.append(entry.text)
     return "\n".join(lines)
+
+
+def _fold_rel(rel: str) -> str:
+    """파일 시스템이 같은 파일로 보는 경로끼리 같은 값(Windows: 대소문자 무시)."""
+    return os.path.normcase(rel)
+
+
+def _people_aliases(targets: Iterable[str], existing: Iterable[str]) -> dict[str, str]:
+    """사람 페이지 대상 → 실제로 쓸 경로. `@Kim`·`@kim`처럼 대소문자만 다른 이름은 Windows에서
+    같은 파일이므로 한 페이지로 모은다. 디스크에 있는 이름을 먼저, 없으면 정렬상 처음 이름을 쓴다."""
+    groups: dict[str, list[str]] = {}
+    on_disk: dict[str, str] = {}
+    for rel in existing:
+        if rel.startswith("wiki/people/"):
+            on_disk[_fold_rel(rel)] = rel
+    for rel in targets:
+        if rel.startswith("wiki/people/"):
+            groups.setdefault(_fold_rel(rel), []).append(rel)
+    aliases: dict[str, str] = {}
+    for folded, rels in groups.items():
+        canonical = on_disk.get(folded) or min(rels)
+        for rel in rels:
+            if rel != canonical:
+                aliases[rel] = canonical
+    return aliases
 
 
 def _person_name(stem: str) -> str:
@@ -441,7 +479,7 @@ def _index_body(ctx: _Ctx, sources: list[Source], pages: dict[str, list[Entry]],
     topics = sorted(p.stem for p in topics_dir.glob("*.md") if p.is_file() and core.is_scannable(p)) if topics_dir.is_dir() else []
 
     def count(rel: str) -> int:
-        return len({e.hash for e in pages.get(rel, [])})
+        return len({_entry_id(e) for e in pages.get(rel, [])})
 
     keys_by_project: dict[str, int] = {}
     for rel in all_pages:
@@ -472,8 +510,20 @@ def _index_body(ctx: _Ctx, sources: list[Source], pages: dict[str, list[Entry]],
     return "\n".join(lines)
 
 
-def _read_source(rel: str, path: Path, key: list[int], cached_files: dict, ctx: _Ctx, skipped: list[tuple[str, str]]) -> Source | None:
-    """원천 하나. 크기·수정 시각이 캐시와 같으면 열지 않고, 다르면 읽어서 sha256으로 다시 확인한다."""
+def _read_source(
+    rel: str,
+    path: Path,
+    key: list[int],
+    cached_files: dict,
+    ctx: _Ctx,
+    skipped: list[tuple[str, str]],
+    previous: dict | None = None,
+) -> Source | None:
+    """원천 하나. 크기·수정 시각이 캐시와 같으면 열지 않고, 다르면 읽어서 sha256으로 다시 확인한다.
+
+    UTF-8이 아닌 원천은 skipped에 알리고, 이전 실행의 항목(previous: --rebuild여도 쓰는 지난 캐시)이
+    있으면 그대로 둔다. 메모장 등이 cp949로 저장했다고 그 파일의 언급이 모든 페이지에서 사라지지 않게.
+    """
     item = cached_files.get(rel)
     if isinstance(item, dict) and item.get("stat") == key and isinstance(item.get("sha256"), str):
         cached = _cached_entries(item, rel)
@@ -481,13 +531,19 @@ def _read_source(rel: str, path: Path, key: list[int], cached_files: dict, ctx: 
             return Source(rel, path, None, item["sha256"], key, entries=cached, from_cache=True)
     try:
         data = path.read_bytes()
-        notes.decode(data)
     except OSError as exc:
         skipped.append((rel, f"읽지 못함: {exc}"))
         return None
-    except UnicodeDecodeError as exc:
-        core.get_logger(ctx.cfg.root).warning("UTF-8이 아니라 건너뜀: %s (%s)", path, exc)
-        return None
+    try:
+        notes.decode(data)
+    except UnicodeDecodeError:
+        old = (previous or {}).get(rel)
+        kept = _cached_entries(old, rel) if isinstance(old, dict) and isinstance(old.get("sha256"), str) else None
+        if not kept:
+            skipped.append((rel, f"{notes.NOT_UTF8}(UTF-8로 다시 저장하세요)"))
+            return None
+        skipped.append((rel, f"{notes.NOT_UTF8}, 이전 언급 {len(kept)}건은 그대로 둠(UTF-8로 다시 저장하세요)"))
+        return Source(rel, path, None, core.sha256_hex(data), key, entries=kept, from_cache=True, cache_item=old)
     source = Source(rel, path, data, core.sha256_hex(data), key)
     if isinstance(item, dict) and item.get("sha256") == source.sha256:
         cached = _cached_entries(item, rel)
@@ -511,6 +567,7 @@ def _plan(ctx: _Ctx, *, rebuild: bool) -> Plan:
     cache = _load_json_state(cfg.root, CACHE)
     old_ledger = _load_json_state(cfg.root, LEDGER)
     cached_files, page_cache = _usable_cache(cache, ctx, rebuild)
+    previous_files, _ = _usable_cache(cache, ctx, False)  # UTF-8이 아닌 원천의 이전 항목용
     new_page_cache: dict[str, list[Any]] = {}
     skipped: list[tuple[str, str]] = []
     sources: list[Source] = []
@@ -518,20 +575,30 @@ def _plan(ctx: _Ctx, *, rebuild: bool) -> Plan:
         key = _stat_key(path)  # 읽기 전에 잰다: 그사이 바뀌면 다음 실행이 다시 읽는다
         if key is None:
             continue
-        source = _read_source(rel, path, key, cached_files, ctx, skipped)
+        source = _read_source(rel, path, key, cached_files, ctx, skipped, previous_files)
         if source is not None:
             sources.append(source)
+
+    existing = _existing_pages(cfg)
+    aliases = _people_aliases((t for s in sources for e in s.entries for t in e.targets), existing)
+
+    def _resolved(targets: Iterable[str]) -> list[str]:
+        out: list[str] = []
+        for target in targets:
+            target = aliases.get(target, target)
+            if target not in out:
+                out.append(target)
+        return out
 
     # 대상별 항목
     entries_by_page: dict[str, list[Entry]] = {}
     mentions = 0
     for source in sources:
         for entry in source.entries:
-            for target in entry.targets:
+            for target in _resolved(entry.targets):
                 entries_by_page.setdefault(target, []).append(entry)
                 mentions += 1
 
-    existing = _existing_pages(cfg)
     pages: list[PageWrite] = []
     all_pages = set(existing) | set(entries_by_page)
     for rel in sorted(all_pages):
@@ -604,10 +671,12 @@ def _plan(ctx: _Ctx, *, rebuild: bool) -> Plan:
         lines: dict[str, list[str]] = {}
         for entry in source.entries:
             bucket = lines.setdefault(entry.hash, [])
-            bucket.extend(t for t in entry.targets if t not in bucket)
+            bucket.extend(t for t in _resolved(entry.targets) if t not in bucket)
         if lines:
             ledger[source.rel] = lines
-        if source.cacheable:
+        if source.cache_item is not None:
+            files[source.rel] = source.cache_item
+        elif source.cacheable:
             sha = core.sha256_hex(source.new_data) if source.new_data is not None else source.sha256
             # 정규화로 바뀔 파일의 stat은 쓴 뒤 _apply가 채운다
             stat_key = None if source.new_data is not None else source.stat
@@ -669,10 +738,11 @@ def _apply(ctx: _Ctx, plan: Plan) -> tuple[int, int, int, list[str]]:
     for page in plan.pages:
         try:
             if page.expect is None:
-                if page.path.exists():
+                try:
+                    core.atomic_write(page.path, page.new, expect_sha256=core.MUST_NOT_EXIST)
+                except core.ConcurrentEdit:
                     plan.skipped.append((page.rel, "그사이 다른 곳에서 만들어져 건너뜀"))
                     continue
-                core.atomic_write(page.path, page.new)
                 created += 1
             else:
                 core.atomic_write(page.path, page.new, expect_sha256=page.expect)
@@ -725,7 +795,11 @@ def create_stubs(cfg: Config, keys: Iterable[str], *, dry_run: bool = False) -> 
                 if path.exists():
                     existing.append(rel.as_posix())
                     continue
-                core.atomic_write(path, body.encode("utf-8"))
+                try:
+                    core.atomic_write(path, body.encode("utf-8"), expect_sha256=core.MUST_NOT_EXIST)
+                except core.ConcurrentEdit:
+                    existing.append(rel.as_posix())
+                    continue
                 created.append(rel.as_posix())
     return {
         "files_scanned": 0,

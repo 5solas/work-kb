@@ -103,6 +103,24 @@ def test_skips_non_utf8_and_editor_temp_files(notes_vault):
     assert {p for p, _, _ in _hits(notes_vault, "김철수")} == {"daily/2026-11-04.md", INBOX_NOTE}
 
 
+def test_search_with_non_utf8_source_writes_nothing(tmp_path, run_kb):
+    """검색은 읽기 전용: UTF-8이 아닌 파일이 있어도 `.state/logs`를 만들지 않는다."""
+    root = tmp_path / "읽기 전용 볼트"
+    (root / "daily").mkdir(parents=True)
+    shutil.copy(ROOT / "config.yaml", root / "config.yaml")
+    (root / "daily" / "2026-11-04.md").write_bytes("- 김철수 UTF-8\n".encode("utf-8"))
+    (root / "daily" / "2026-11-05.md").write_bytes("- 김철수 cp949\n".encode("cp949"))
+    before = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    assert _hits(root, "김철수") == [("daily/2026-11-04.md", 1, "- 김철수 UTF-8")]
+    result = run_kb("search", "김철수", root=root)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["daily/2026-11-04.md:1: - 김철수 UTF-8"]
+    assert result.stderr.splitlines() == ["건너뜀: daily/2026-11-05.md: UTF-8이 아니라 건너뜀"]  # D11: 이름을 알린다
+    after = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    assert after == before
+    assert not (root / ".state").exists()
+
+
 def test_bom_file_first_line(vault):
     (vault / "inbox" / "bom.md").write_bytes(b"\xef\xbb\xbf" + "첫 줄 검색어\n둘째 줄\n".encode("utf-8"))
     assert _hits(vault, "첫") == [("inbox/bom.md", 1, "첫 줄 검색어")]

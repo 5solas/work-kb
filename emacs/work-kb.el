@@ -211,6 +211,11 @@
       (concat "_" text))
      (t text))))
 
+(defun work-kb--link-safe-name (name &optional max-len)
+  "`work-kb--safe-name' 결과에서 위키링크 안에서 뜻이 있는 `[ ] # ^ |'를 `-'로 바꾼다.
+`![[raw/assets/…]]'·`[[inbox/…]]'처럼 링크 대상이 되는 이름(이미지·inbox 파일)에 쓴다."
+  (replace-regexp-in-string "[][#^|]" "-" (work-kb--safe-name name max-len) t t))
+
 (defun work-kb--unique-path (path)
   "PATH가 있으면 이름-2.ext, 이름-3.ext … 절대 덮어쓰지 않는다."
   (if (not (file-exists-p path))
@@ -391,7 +396,8 @@ JSON 배열로 보낸다. 출력은 BUFFER(기본 *work-kb*, 실행 전에 비�
       (widen)
       (goto-char (point-min))
       (let ((case-fold-search nil))
-        (when (re-search-forward "^## +기록[ \t\r]*$" nil t)
+        ;; 첫 줄 앞의 BOM(U+FEFF)은 utf-8로 읽으면 글자로 남는다: 있어도 제목으로 본다.
+        (when (re-search-forward "^\ufeff?## +기록[ \t\r]*$" nil t)
           (let ((last (line-end-position)))
             (forward-line 1)
             (while (and (not (eobp)) (not (looking-at "## +[^ \t\r\n]")))
@@ -419,11 +425,28 @@ JSON 배열로 보낸다. 출력은 BUFFER(기본 *work-kb*, 실행 전에 비�
           (unless (bobp) (insert "\n"))
           (insert "## 기록\n" entry "\n"))))))
 
+(defun work-kb--raw-byte-position ()
+  "현재 버퍼에서 UTF-8로 풀리지 않은 바이트(eight-bit 글자)의 첫 위치. 없으면 nil."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (goto-char (point-min))
+      ;; [[:nonascii:]]는 날 바이트를 건너뛰므로 ASCII를 넘기며 한 글자씩 본다.
+      (let (found)
+        (while (and (not found) (progn (skip-chars-forward "\0-\177") (not (eobp))))
+          (if (eq (char-charset (char-after)) 'eight-bit)
+              (setq found (point))
+            (forward-char 1)))
+        found))))
+
 (defun work-kb--ensure-utf-8-buffer ()
-  "버퍼가 UTF-8로 읽혔는지 확인한다. ASCII뿐이면 UTF-8로 바꾸고, 아니면 다시 읽거나 거부한다."
+  "버퍼가 UTF-8로 읽혔는지 확인한다. ASCII뿐이면 UTF-8로 바꾸고, 아니면 다시 읽거나 거부한다.
+UTF-8로 읽었는데 풀리지 않은 바이트가 있으면(cp949 파일 등) 아무것도 고치지 않고
+사용자 오류를 낸다 (D11). 버퍼를 UTF-8로 다시 읽었다면 원래 인코딩으로 되돌린다."
   (let* ((cs (or buffer-file-coding-system 'undecided))
          (base (coding-system-base cs))
-         (eol (coding-system-eol-type cs)))
+         (eol (coding-system-eol-type cs))
+         (reverted-from nil))
     (unless (memq base '(utf-8 utf-8-with-signature utf-8-auto prefer-utf-8 utf-8-emacs))
       (cond
        ((memq base '(undecided us-ascii))
@@ -431,9 +454,16 @@ JSON 배열로 보낸다. 출력은 BUFFER(기본 *work-kb*, 실행 전에 비�
               (coding-system-change-eol-conversion 'utf-8 (if (integerp eol) eol 0))))
        ((not (buffer-modified-p))
         (let ((coding-system-for-read 'utf-8))
-          (revert-buffer t t t)))
+          (revert-buffer t t t))
+        (setq reverted-from cs))
        (t (user-error "%s: UTF-8이 아닌 인코딩(%s)으로 열려 있습니다. 저장 후 다시 여세요"
                       (buffer-name) cs))))
+    (when (work-kb--raw-byte-position)
+      (when (and reverted-from (not (buffer-modified-p)))
+        (let ((coding-system-for-read reverted-from))
+          (revert-buffer t t t)))
+      (user-error "UTF-8이 아닙니다: %s (UTF-8로 바꿔 저장한 뒤 다시 캡처하세요)"
+                  (or buffer-file-name (buffer-name))))
     ;; 줄바꿈이 하나도 없던 파일은 EOL을 알 수 없다: 시스템 기본(CRLF) 대신 LF (D25, 새 파일과 같게).
     (unless (save-excursion (save-restriction (widen) (goto-char (point-min)) (search-forward "\n" nil t)))
       (setq buffer-file-coding-system
@@ -541,7 +571,8 @@ TEXT가 있으면 바로 추가하고, 없으면 캡처 버퍼를 연다 (C-c C-
   (work-kb--unique-path
    (expand-file-name (format "raw/assets/%s-%s.%s"
                              (format-time-string "%Y-%m-%d-%H%M" time)
-                             (work-kb--safe-name (if (string-empty-p (string-trim (or name ""))) "capture" name))
+                             (work-kb--link-safe-name
+                              (if (string-empty-p (string-trim (or name ""))) "capture" name))
                              (downcase ext))
                      (work-kb--vault))))
 
@@ -637,7 +668,7 @@ TEXT가 있으면 바로 추가하고, 없으면 캡처 버퍼를 연다 (C-c C-
 (defun work-kb--inbox-file-name (title &optional time)
   "inbox 파일 이름: YYYYMMDD-HHMM-<안전한 제목>.md"
   (format "%s-%s.md" (format-time-string "%Y%m%d-%H%M" (or time (work-kb--now)))
-          (work-kb--safe-name title)))
+          (work-kb--link-safe-name title)))
 
 (defun work-kb--yaml-quote (text)
   (concat "\"" (replace-regexp-in-string
@@ -672,10 +703,36 @@ TEXT가 있으면 바로 추가하고, 없으면 캡처 버퍼를 연다 (C-c C-
 
 ;;;; 오늘·검색·열기·link·status
 
+(defun work-kb--utf-8-coding-p (cs)
+  (and cs (memq (coding-system-base cs) '(utf-8 utf-8-with-signature utf-8-auto prefer-utf-8 utf-8-emacs))))
+
 (defun work-kb-today ()
-  "오늘 daily를 준비(`kb.py today')하고 연다. 실패해도 뼈대를 만들어 연다."
+  "오늘 daily를 준비(`kb.py today')하고 연다. 실패해도 뼈대를 만들어 연다.
+오늘 파일을 연 버퍼에 저장하지 않은 수정이 있으면 먼저 저장한다 (캡처와 같은 규칙, D26).
+버퍼와 파일이 모두 바뀌었으면 준비를 건너뛰고 버퍼만 보여 준다. 준비 뒤 수정 없는 버퍼는
+묻지 않고 다시 읽는다."
   (interactive)
-  (find-file (work-kb--ensure-today t)))
+  (let* ((file (work-kb--today-file))
+         (live (find-buffer-visiting file))
+         (skip nil))
+    (when (and live (buffer-modified-p live))
+      (with-current-buffer live
+        (if (and (file-exists-p file) (not (verify-visited-file-modtime live)))
+            (setq skip t)
+          (save-buffer))))
+    (if skip
+        (message "work-kb: %s 버퍼와 파일이 모두 바뀌어 today 준비를 건너뜁니다. 먼저 정리하세요"
+                 (buffer-name live))
+      (setq file (work-kb--ensure-today t)))
+    (when (and (buffer-live-p live)
+               (not (buffer-modified-p live))
+               (not (verify-visited-file-modtime live)))
+      (with-current-buffer live
+        (let ((coding-system-for-read (and (work-kb--utf-8-coding-p buffer-file-coding-system) 'utf-8)))
+          (revert-buffer t t t))))
+    (if (buffer-live-p live)
+        (pop-to-buffer-same-window live)
+      (find-file file))))
 
 (defun work-kb--search-dirs (vault)
   (cl-remove-if-not (lambda (d) (file-directory-p (expand-file-name d vault)))

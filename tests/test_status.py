@@ -210,6 +210,29 @@ def test_broken_state_files_are_reported_not_fatal(vault, capsys):
     assert problems[1].startswith("주의: wiki/_proposals.md를 읽지 못했습니다")
 
 
+def test_unprocessed_images_include_embedded_raw_assets_without_sidecar(vault):
+    """캡처 C·F는 이미지를 raw/assets에 두고 daily `## 기록`에 임베드한다(§6.5 T6). 사이드카가 없으면 미처리."""
+    _write_local(vault, {"environment": "home"})
+    assets = vault / "raw" / "assets"
+    for name in ("2026-11-05-1420-화이트보드.png", "2026-11-05-1500-처리됨.jpg", "2026-11-05-1600-코드.png", "이름만.webp"):
+        (assets / name).write_bytes(b"\x89PNG")
+    (vault / "inbox" / "2026-11-05-1500-처리됨.md").write_text("---\nsource_image: raw/assets/2026-11-05-1500-처리됨.jpg\n---\n", encoding="utf-8")
+    (vault / "daily" / "2026-11-05.md").write_text(
+        "## 오늘\n- ![[raw/assets/2026-11-05-1600-코드.png]] 기록 절 밖\n"
+        "## 기록\n"
+        "- 14:20 ![[raw/assets/2026-11-05-1420-화이트보드.png]] 회의\n"
+        "- 14:21 ![[raw/assets/2026-11-05-1420-화이트보드.png|300]] 같은 그림 다시\n"
+        "- 15:00 ![[raw/assets/2026-11-05-1500-처리됨.jpg]] 사이드카 있음\n"
+        "- 15:10 ![[raw/assets/없는 그림.png]] 파일 없음\n"
+        "- 15:20 ![[이름만.webp]] 이름만 쓴 임베드(D64)\n"
+        "```\n![[raw/assets/2026-11-05-1600-코드.png]]\n```\n",
+        encoding="utf-8",
+    )
+    assert status.unprocessed_images(config.load(vault)) == 2  # 화이트보드, 이름만
+    (vault / "inbox" / "화이트보드.png").write_bytes(b"\x89PNG")  # inbox 드롭도 그대로 센다
+    assert status.unprocessed_images(config.load(vault)) == 3
+
+
 def test_summarize_detected():
     assert status.summarize_detected(None) == "탐지 안 됨"
     assert status.summarize_detected({}) == "탐지 안 됨"

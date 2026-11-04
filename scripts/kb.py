@@ -55,9 +55,11 @@ COMMANDS: dict[str, Command] = {
     "link": Command("link", help="A단계: Jira 키·@이름을 엔티티 페이지에 연결 (LLM 없음)"),
     "status": Command("status", help="상태 요약"),
     "search": Command("search", help='검색: kb.py search "질의"'),
+    # Phase 2
+    "sync": Command("jira_sync", help="Jira 일감 캐시 동기화 (--full, --key, --jql)"),
 }
 
-ALIASES: dict[str, str] = {}
+ALIASES: dict[str, str] = {"jira_sync": "sync"}
 
 
 def usage() -> str:
