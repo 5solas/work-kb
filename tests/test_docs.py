@@ -244,7 +244,7 @@ def _doc_problems(name: str, text: str) -> list[str]:
 
 def test_doc_problem_rule_self_check():
     assert not _doc_problems("x.md", "http://jira.example.invalid/a http://127.0.0.1:8081 http://localhost/x")
-    assert _doc_problems("x.md", "https://jira.realcorp.co.kr/browse/KB-1")
+    assert _doc_problems("x.md", "https://jira.example.com/browse/KB-1")  # 문서용 예약 도메인: 규칙이 거부해야 한다
     assert _doc_problems("x.md", "https://api.deepinfra.com/v1/openai")
     assert _doc_problems("x.md", "Authorization: Bearer abc")
     assert _doc_problems("x.md", "Kq7" * 11)
