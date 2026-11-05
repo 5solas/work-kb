@@ -276,7 +276,7 @@ def test_setup_md_checklist():
     block = re.search(r"제외할 폴더:\s*```\n(.*?)```", text, re.S)
     assert block, "제외 폴더 블록 없음"
     excluded = {ln.strip().rstrip("/") for ln in block.group(1).splitlines() if ln.strip()}
-    assert {"examples", "tests", "scripts", "emacs", "docs", "prompts", "obsidian", "_trash", "wheels"} <= excluded
+    assert {"examples", "tests", "scripts", "nvim", "docs", "prompts", "obsidian", "_trash", "wheels"} <= excluded
     assert any(e.startswith(".venv") for e in excluded)
     assert not {"daily", "inbox", "raw", "jira", "wiki"} & excluded
 

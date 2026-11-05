@@ -74,7 +74,7 @@ CODE_DEFAULTS: dict[str, Any] = {
 _SECTIONS = frozenset(k for k, v in CODE_DEFAULTS.items() if isinstance(v, dict))
 _TOP_LEVEL_ENV_KEYS = frozenset(k for k, v in CODE_DEFAULTS.items() if not isinstance(v, dict)) - {"kb_root"}
 _RESERVED_ENV = frozenset(
-    {"KB_AGENT", "KB_ROOT", "KB_REQUIRE_LIVE", "KB_SKIP_EMACS", "KB_FAKE_NOW", "KB_ENVIRONMENT"}
+    {"KB_AGENT", "KB_ROOT", "KB_REQUIRE_LIVE", "KB_SKIP_NVIM", "KB_FAKE_NOW", "KB_ENVIRONMENT"}
 )
 _RESERVED_ENV_PREFIXES = ("KB_INIT_", "KB_FAKE_")
 
@@ -413,7 +413,7 @@ def _parse_env_value(name: str, value: str) -> Any:
 def parse_env_overrides(environ: Mapping[str, str]) -> dict:
     """`KB_<SECTION>_<KEY>`를 {section: {key: 값}}으로 바꾼다. 값은 YAML 스칼라로 읽는다.
 
-    예약된 이름(KB_AGENT, KB_ROOT, KB_REQUIRE_LIVE, KB_SKIP_EMACS, KB_FAKE_*, KB_INIT_*,
+    예약된 이름(KB_AGENT, KB_ROOT, KB_REQUIRE_LIVE, KB_SKIP_NVIM, KB_FAKE_*, KB_INIT_*,
     KB_ENVIRONMENT)과 모르는 구역은 무시한다. 구역 없는 이름은 최상위 단일 값(timezone 등)만 받는다.
     """
     out: dict[str, Any] = {}

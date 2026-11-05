@@ -1,6 +1,6 @@
 # Obsidian 설정
 
-Obsidian은 **열람 창**이다. 쓰기는 Emacs와 `kb.py`가 한다. `jira/`와 `wiki/`의 관리 구역은 기계가 다시 쓰므로 Obsidian에서 고치지 않는다(`AGENTS.md`).
+Obsidian은 **열람 창**이다. 쓰기는 Neovim과 `kb.py`가 한다(Neovim/Neovide 사용법: `docs/USER-GUIDE.md`). `jira/`와 `wiki/`의 관리 구역은 기계가 다시 쓰므로 Obsidian에서 고치지 않는다(`AGENTS.md`).
 
 `.obsidian/` 폴더는 커밋하지 않는다(`.gitignore`에 있음). 아래 설정은 볼트마다 한 번 한다. 확인한 버전은 Obsidian 1.15.0이다(`docs/DECISIONS.md` D64).
 
@@ -8,7 +8,7 @@ Obsidian은 **열람 창**이다. 쓰기는 Emacs와 `kb.py`가 한다. `jira/`�
 
 - **볼트 루트 = 저장소 루트**(`work-kb/`, `AGENTS.md`가 있는 폴더). "폴더를 볼트로 열기"로 연다.
 - 기존 개인 볼트(OneDrive 등)와 섞지 말고 새 볼트로 연다.
-- `KB_ROOT`(Emacs는 `work-kb-vault`)로 볼트를 저장소와 다른 곳에 두었다면 그 폴더를 연다. 이때 저장소의 두 `.base` 파일 `jira/_views/일감.base`와 `wiki/엔티티.base`를 볼트의 같은 경로로 손으로 복사한다. `sync`·`link`는 `.base` 파일을 만들지 않는다(표 내용만 채운다).
+- `KB_ROOT`(Neovim 쪽은 `work-kb` 설정의 `vault`)로 볼트를 저장소와 다른 곳에 두었다면 그 폴더를 연다. 이때 저장소의 두 `.base` 파일 `jira/_views/일감.base`와 `wiki/엔티티.base`를 볼트의 같은 경로로 손으로 복사한다. `sync`·`link`는 `.base` 파일을 만들지 않는다(표 내용만 채운다).
 
 ## 2. 폴더
 
@@ -16,7 +16,7 @@ Obsidian은 **열람 창**이다. 쓰기는 Emacs와 `kb.py`가 한다. `jira/`�
 
 | 폴더 | 누가 쓰나 | 내용 |
 |---|---|---|
-| `daily/` | 사람(Emacs 캡처) | `YYYY-MM-DD.md`. `## 오늘`·`## 이월`은 `kb.py today`가, `## 기록`은 사람이 쓴다 |
+| `daily/` | 사람(Neovim 캡처) | `YYYY-MM-DD.md`. `## 오늘`·`## 이월`은 `kb.py today`가, `## 기록`은 사람이 쓴다 |
 | `inbox/` | 사람 | 제목 있는 긴 글, 끌어다 놓은 이미지. 이미지 사이드카(`.md`)는 `kb.py ingest`가 만든다 |
 | `raw/assets/` | 사람·도구 | 이미지·첨부(Obsidian 첨부 폴더) |
 | `jira/` | 기계(`kb.py sync`) | 일감 캐시 `KEY-123.md`, `_views/` 결과표와 `일감.base` |
@@ -54,7 +54,7 @@ Daily notes 파일 이름은 `daily/2026-11-05.md` 꼴이어야 한다. 뼈대�
 examples/
 tests/
 scripts/
-emacs/
+nvim/
 docs/
 prompts/
 obsidian/

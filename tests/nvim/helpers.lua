@@ -8,6 +8,10 @@ local uv = vim.uv
 
 H.repo = vim.fs.normalize(vim.g.work_kb_test_repo or vim.fn.getcwd())
 
+---플러그인 폴더 (저장소 기준 상대 경로와 절대 경로). minimal_init.lua의 PLUGIN_REL이 정한다.
+H.PLUGIN_REL = vim.g.work_kb_test_plugin_rel or "nvim"
+H.plugin = H.repo .. "/" .. H.PLUGIN_REL
+
 ---고정 시각: 2026-11-05 09:12:00 (로컬).
 H.TIME = os.time({ year = 2026, month = 11, day = 5, hour = 9, min = 12, sec = 0 })
 
@@ -110,18 +114,38 @@ end
 local tmp_root
 local counter = 0
 
----ASCII 임시 폴더 (WORK_KB_TEST_TMP, 없으면 새로 만듦).
+---이번 실행의 ASCII 임시 폴더: WORK_KB_TEST_TMP(없으면 Neovim 임시 폴더) 아래 새 폴더 run-<pid>-<시각>.
+---러너가 끝날 때 H.cleanup_tmp()가 통째로 지운다 (WORK_KB_TEST_KEEP=1이면 남긴다).
 function H.tmp()
   if not tmp_root then
     local env = vim.env.WORK_KB_TEST_TMP
+    local base
     if env and env ~= "" then
-      tmp_root = vim.fs.normalize(env)
+      base = vim.fs.normalize(env)
     else
-      tmp_root = vim.fs.normalize(vim.fn.tempname())
+      base = vim.fs.normalize(vim.fn.tempname())
     end
+    tmp_root = string.format("%s/run-%d-%d", base, vim.fn.getpid(), vim.uv.hrtime() % 1000000000)
     H.mkdir_p(tmp_root)
   end
   return tmp_root
+end
+
+---이번 실행의 임시 폴더를 지운다. 지웠거나 지울 것이 없으면 nil, 남았으면 그 경로.
+function H.cleanup_tmp()
+  if not tmp_root or vim.env.WORK_KB_TEST_KEEP == "1" then
+    return nil
+  end
+  local dir = tmp_root
+  for _ = 1, 3 do
+    vim.fn.delete(dir, "rf")
+    if not H.exists(dir) then
+      tmp_root = nil
+      return nil
+    end
+    vim.wait(500) -- 방금 끝난 프로세스가 파일을 아직 잡고 있을 수 있다
+  end
+  return dir
 end
 
 ---한글·공백 경로의 빈 볼트 (슬래시, 끝 슬래시 없음).
@@ -311,6 +335,10 @@ function H.reset()
     entry.tbl[entry.key] = entry.value
   end
   saved = {}
+  local proc = package.loaded["work-kb.proc"]
+  if proc then
+    proc._py_cache = nil
+  end
   local config = package.loaded["work-kb.config"]
   if config then
     config.setup({ server = { enable = false }, prefix = false })

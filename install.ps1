@@ -1,65 +1,67 @@
 <#
 .SYNOPSIS
-  work-kb Neovim/Neovide installer for Windows (PowerShell 5.1 and 7).
+  work-kb installer for Windows (PowerShell 5.1 and 7): Python venv, the WORK_KB_ROOT user
+  environment variable, and a read-only check of the Neovim side.
 
 .DESCRIPTION
-  This file is ASCII-only on purpose: Windows PowerShell 5.1 reads a BOM-less
-  script in the ANSI code page (cp949 on Korean Windows). Non-ASCII output is
-  produced at run time with [char].
+  This file is ASCII-only on purpose: Windows PowerShell 5.1 reads a BOM-less script in the
+  ANSI code page (cp949 on Korean Windows). Korean text is kept as \uXXXX escapes and decoded
+  at run time ([regex]::Unescape).
+
+  The general Neovim setup (Neovim itself, Neovide, fonts, plugin manager, LSP, the "nvd"
+  background daemon) is NOT installed here. It belongs to the separate nvim-config repository
+  (https://github.com/5solas/nvim-config). Its lua\plugins\work-kb.lua loads this repository's
+  nvim folder as a plugin when the user environment variable WORK_KB_ROOT names this clone.
 
   Steps, in order (select with -Only / -Skip, comma separated):
-    scoop     check git, neovim, ripgrep, fd, fzf, uv, nodejs-lts, neovide and the
-              fonts JetBrainsMono-NF and SarasaGothic-K; scoop-install what is missing.
-              Never installs scoop itself.
-    link      %LOCALAPPDATA%\nvim -> <repo>\nvim as a directory junction. Anything
-              else already there (a real folder, a file, or a junction/symlink to
-              another place) is RENAMED to nvim.bak-<yyyyMMdd-HHmmss>; nothing is deleted.
-    local     create nvim\lua\local.lua from local.example.lua if it is missing
-              (vault from -VaultPath or a prompt; UTF-8 without BOM).
-    neovide   generate %APPDATA%\neovide\config.toml from nvim\neovide\config.toml.in
-              (an existing different file is backed up first).
-    venv      keep a Python 3.13/3.14 .venv or create one (uv, then py -3.14, then
-              python 3.13/3.14), install requirements.txt (offline from -WheelsDir
-              when -Offline or when the online install fails), check kb.py --help.
-    plugins   install plugins at the lazy-lock.json commits with headless nvim,
-              then the vim.loader warm pass.
-    tools     install the mason tools pinned in nvim\tools.lock.json.
-    doctor    nvim --headless "+lua require('config.health').cli()".
-    prestart  only with -PreStart (create) or -NoPreStart (remove): a Startup-folder
-              shortcut that starts nvim\bin\nvim-server.ps1 at logon (a headless
-              nvim listening on \\.\pipe\work-kb-nvim that Neovide attaches to).
+    venv   keep a Python 3.13/3.14 .venv or create one (uv, then py -3.14, then python
+           3.13/3.14), install requirements.txt (offline from -WheelsDir when -Offline or
+           when the online install fails), check kb.py --help.
+    env    set the user environment variable WORK_KB_ROOT = <this repository>
+           ([Environment]::SetEnvironmentVariable(..., 'User'), i.e. HKCU\Environment).
+           The previous value is recorded in the manifest. An existing different value
+           is replaced only with -Yes (or a yes at the prompt).
+    check  read-only: Neovim (>= 0.11) on PATH; a Neovim config that loads work-kb
+           (<config>\lua\plugins\work-kb.lua; <config> = %LOCALAPPDATA%\<NVIM_APPNAME or nvim>,
+           or %XDG_CONFIG_HOME%\<...>); nvd on PATH; WORK_KB_ROOT; leftovers of the old
+           installer; then ".venv\Scripts\python.exe scripts\kb.py doctor" if the venv exists.
+           It prints the commands to get nvim-config but never clones or runs anything there.
 
-  Every step prints one line "STEP <name> <ok|changed|skipped|failed|whatif> <detail>",
-  and a summary follows. Exit code 0, or 1 if any step failed.
-  -WhatIf prints every action ("WHATIF <step> <action>") and changes nothing: no
-  file is written and no external program is started.
+  Never written: %LOCALAPPDATA%\nvim*, %APPDATA%\neovide, the nvim-config clone, PATH,
+  the Startup folder, fonts, scoop. The only things created are .venv (venv step), the
+  WORK_KB_ROOT user variable (env step) and the manifest
+  %LOCALAPPDATA%\work-kb\install-manifest.json that lets uninstall.ps1 undo exactly that.
 
-  The plugin and tool steps set XDG_CONFIG_HOME=<repo> for the child nvim, so they
-  use <repo>\nvim as the config whether or not the junction exists yet.
+  Every step prints one line "STEP <name> <ok|changed|warn|skipped|failed|whatif> <detail>",
+  then a summary and the next steps. Exit code 0, or 1 if any step failed (warn is not a
+  failure), 2 for bad arguments.
+  -WhatIf prints every action ("WHATIF <step> <action>") and changes nothing: no file or
+  variable is written and no external program is started.
+
+  Seams for tests and unusual profiles:
+    -LocalAppData   folder for the manifest and the default Neovim config location
+    -AppData, -StartupDir   where the check step looks for old-installer leftovers
+    -UserEnvFile    (or env WORK_KB_INSTALL_USER_ENV_FILE) a JSON file used as the user
+                    environment store instead of HKCU\Environment
 
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -WhatIf
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Yes -VaultPath D:\notes\vault -PreStart
+  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 .EXAMPLE
-  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Only link,local,neovide
+  powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Only venv -Offline
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string]$VaultPath = '',
+    [string[]]$Only = @(),
+    [string[]]$Skip = @(),
     [switch]$Yes,
     [switch]$Offline,
     [string]$WheelsDir = '',
-    [string[]]$Only = @(),
-    [string[]]$Skip = @(),
-    [double]$FontSize = 0,
-    [switch]$PreStart,
-    [switch]$NoPreStart,
-    # Overrides for tests and unusual profiles. Defaults: the current user's folders.
     [string]$LocalAppData = '',
     [string]$AppData = '',
     [string]$StartupDir = '',
-    [string]$NvimExe = ''
+    [string]$UserEnvFile = ''
 )
 
 Set-StrictMode -Version 2.0
@@ -68,23 +70,60 @@ $script:Cmdlet = $PSCmdlet
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding $false
 try { [Console]::OutputEncoding = $script:Utf8NoBom } catch { }
 
-$AllSteps = @('scoop', 'link', 'local', 'neovide', 'venv', 'plugins', 'tools', 'doctor', 'prestart')
-$PipeName = '\\.\pipe\work-kb-nvim'
-$ShortcutName = 'work-kb-nvim-server.lnk'
-$ConfigMarker = '# work-kb: generated by install.ps1 from nvim/neovide/config.toml.in (rerunning it overwrites this file; edit the template)'
+$AllSteps = @('venv', 'env', 'check')
+$EnvName = 'WORK_KB_ROOT'
+$MinNvim = [version]'0.11'
+$NvimConfigUrl = 'https://github.com/5solas/nvim-config'
+$OldConfigMarker = '# work-kb: generated by install.ps1'
+$OldShortcutName = 'work-kb-nvim-server.lnk'
+$NvimVersionTimeoutMs = 15000
+$DoctorTimeoutMs = 180000
 
 # ---------------------------------------------------------------- paths
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$NvimDir = Join-Path $RepoRoot 'nvim'
 if (-not $LocalAppData) { $LocalAppData = $env:LOCALAPPDATA }
 if (-not $AppData) { $AppData = $env:APPDATA }
 if (-not $StartupDir) { $StartupDir = [Environment]::GetFolderPath('Startup') }
+if (-not $UserEnvFile) { $UserEnvFile = $env:WORK_KB_INSTALL_USER_ENV_FILE }
 if (-not $WheelsDir) { $WheelsDir = Join-Path $RepoRoot 'wheels' }
 $WheelsDir = $WheelsDir.TrimEnd('\')
-if ($env:XDG_DATA_HOME) { $DataDir = Join-Path $env:XDG_DATA_HOME 'nvim-data' } else { $DataDir = Join-Path $LocalAppData 'nvim-data' }
+$VenvDir = Join-Path $RepoRoot '.venv'
+$VenvPython = Join-Path $VenvDir 'Scripts\python.exe'
+$KbPy = Join-Path $RepoRoot 'scripts\kb.py'
+
+# ---------------------------------------------------------------- messages (Korean, \uXXXX)
+$Msg = @{
+    NextTitle = '\uB2E4\uC74C \uB2E8\uACC4'
+    Next1 = '1. \uC0C8 \uD130\uBBF8\uB110\uC744 \uC5EC\uC138\uC694. \uC0AC\uC6A9\uC790 \uD658\uACBD \uBCC0\uC218\uB294 \uADF8 \uB4A4\uC5D0 \uC2DC\uC791\uD55C \uD504\uB85C\uADF8\uB7A8\uC5D0\uB9CC \uBCF4\uC785\uB2C8\uB2E4.'
+    Next2 = '2. nvd --restart \uB85C Neovim \uB370\uBAAC\uC744 \uB2E4\uC2DC \uC2DC\uC791\uD558\uC138\uC694. \uB370\uBAAC\uC758 \uD658\uACBD \uBCC0\uC218\uB294 \uC2DC\uC791\uD560 \uB54C \uACE0\uC815\uB429\uB2C8\uB2E4. \uC218\uC815\uD55C \uBC84\uD37C\uAC00 \uC788\uC73C\uBA74 \uAC70\uBD80\uD558\uBBC0\uB85C \uBA3C\uC800 :wa \uB85C \uC800\uC7A5\uD558\uC138\uC694.'
+    Next3 = '3. \uC5F0\uACB0 \uC124\uC815: {0}'
+    Next4 = '4. nvd \uB85C \uCC3D\uC744 \uC5F4\uACE0 <Space>kc (\uCEA1\uCC98)\uB97C \uB20C\uB7EC \uBCF4\uC138\uC694. \uC0C1\uD0DC\uB294 :checkhealth work-kb \uB85C \uBD05\uB2C8\uB2E4.'
+    PlacedTitle = '\uB193\uC740 \uAC83'
+    PlacedNone = '  (\uC774\uBC88 \uC2E4\uD589\uC5D0\uC11C \uBC14\uAFBC \uAC83 \uC5C6\uC74C)'
+    NoConfig = 'work-kb\uB97C \uBD88\uB7EC\uC624\uB294 Neovim \uC124\uC815\uC774 \uC5C6\uC2B5\uB2C8\uB2E4: {0}. nvim-config\uB97C \uBC1B\uC544 \uC124\uCE58\uD558\uC138\uC694 (\uC774 \uC2A4\uD06C\uB9BD\uD2B8\uB294 \uBC1B\uAC70\uB098 \uC2E4\uD589\uD558\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4):'
+    ConfigNoSpec = 'Neovim \uC124\uC815 {0}\uC5D0 lua\\plugins\\work-kb.lua\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4. nvim-config\uB77C\uBA74 \uCD5C\uC2E0\uC73C\uB85C \uBC1B\uC73C\uC138\uC694:'
+    LegacyJunction = '{0}\uC740(\uB294) \uC608\uC804 work-kb \uC124\uCE58\uAC00 \uB9CC\uB4E0 \uC815\uC158\uC785\uB2C8\uB2E4 ({1}). \uADF8 \uD3F4\uB354\uC5D0\uB294 \uC774\uC81C \uC124\uC815\uC774 \uC5C6\uC2B5\uB2C8\uB2E4. \uC815\uC158\uB9CC \uC9C0\uC6B0\uACE0(\uB300\uC0C1 \uD3F4\uB354\uB294 \uB0A8\uC74C) nvim-config\uB97C \uC124\uCE58\uD558\uC138\uC694:'
+    NoNvd = 'nvd\uAC00 PATH\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4. nvim-config\uC758 install.ps1\uC774 bin \uD3F4\uB354\uB97C \uC0AC\uC6A9\uC790 PATH\uC5D0 \uB123\uC2B5\uB2C8\uB2E4. \uC774\uBBF8 \uC124\uCE58\uD588\uB2E4\uBA74 \uC0C8 \uD130\uBBF8\uB110\uC5D0\uC11C \uB2E4\uC2DC \uD655\uC778\uD558\uC138\uC694.'
+    NoNvim = 'nvim\uC774 PATH\uC5D0 \uC5C6\uC2B5\uB2C8\uB2E4. nvim-config\uC758 install.ps1\uC774 scoop\uC73C\uB85C \uC124\uCE58\uD569\uB2C8\uB2E4.'
+    OldNvim = 'Neovim {0}\uC740(\uB294) \uC624\uB798\uB418\uC5C8\uC2B5\uB2C8\uB2E4. {1} \uC774\uC0C1\uC774 \uD544\uC694\uD569\uB2C8\uB2E4.'
+    DoctorFail = 'kb.py doctor\uAC00 \uBB38\uC81C\uB97C \uBCF4\uACE0\uD588\uC2B5\uB2C8\uB2E4 (\uC704 \uCD9C\uB825). \uCC98\uC74C \uC124\uCE58\uB77C\uBA74 kb.py init \uB4A4\uC5D0 \uB2E4\uC2DC \uD655\uC778\uD558\uC138\uC694.'
+    NoVenv = '.venv\uAC00 \uC5C6\uC5B4 kb.py doctor\uB97C \uAC74\uB108\uB701\uB2C8\uB2E4 (install.ps1 -Only venv).'
+    EnvOther = '\uC0AC\uC6A9\uC790 \uD658\uACBD \uBCC0\uC218 WORK_KB_ROOT\uAC00 \uC9C0\uAE08 \uB2E4\uB978 \uD3F4\uB354\uB97C \uAC00\uB9AC\uD0B5\uB2C8\uB2E4: {0}'
+    EnvNotOurs = '\uC0AC\uC6A9\uC790 \uD658\uACBD \uBCC0\uC218 WORK_KB_ROOT\uAC00 \uC774 \uC800\uC7A5\uC18C\uAC00 \uC544\uB2D9\uB2C8\uB2E4: {0} (install.ps1 -Only env)'
+    LegacyNeovide = '\uC608\uC804 work-kb \uC124\uCE58\uAC00 \uB9CC\uB4E0 Neovide \uC124\uC815\uC774 \uB0A8\uC544 \uC788\uC2B5\uB2C8\uB2E4: {0}. nvim-config\uB97C \uC4F0\uBA74 \uC9C0\uC6B0\uC138\uC694:'
+    LegacyShortcut = '\uC608\uC804 work-kb \uC124\uCE58\uAC00 \uB9CC\uB4E0 \uB85C\uADF8\uC628 \uBC14\uB85C \uAC00\uAE30\uAC00 \uB0A8\uC544 \uC788\uC2B5\uB2C8\uB2E4: {0}. \uC9C0\uC6B0\uC138\uC694:'
+}
+
+function Get-Msg([string]$Key) {
+    $args0 = @($args)
+    $text = [regex]::Unescape($Msg[$Key])
+    if ($args0.Count -gt 0) { $text = $text -f $args0 }
+    return $text
+}
 
 # ---------------------------------------------------------------- output
 $script:Results = New-Object System.Collections.ArrayList
+$script:Placed = New-Object System.Collections.ArrayList
 
 function Out-Line([string]$Text) { [Console]::Out.WriteLine($Text) }
 
@@ -112,14 +151,9 @@ function Format-Command([string]$Exe, [string[]]$Arguments) {
     return ($parts -join ' ')
 }
 
-# Runs a native program, echoes its output indented, returns @{ Code; Output }.
-# $EnvVars: name -> value for the child only ($null removes the variable).
-function Invoke-Native([string]$Exe, [string[]]$Arguments, [hashtable]$EnvVars = @{}) {
-    $saved = @{}
-    foreach ($k in @($EnvVars.Keys)) {
-        $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
-        [Environment]::SetEnvironmentVariable($k, $EnvVars[$k], 'Process')
-    }
+# Runs a native program, echoes its output indented, returns @{ Code; Output }. (venv step: pip may
+# take minutes and shows progress, so it is not time-limited; uv/py/pip end on their own.)
+function Invoke-Native([string]$Exe, [string[]]$Arguments) {
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
     $out = New-Object System.Collections.ArrayList
@@ -142,9 +176,58 @@ function Invoke-Native([string]$Exe, [string[]]$Arguments, [hashtable]$EnvVars =
         $code = 1
     } finally {
         $ErrorActionPreference = $prev
-        foreach ($k in @($saved.Keys)) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
     }
     return @{ Code = $code; Output = $out }
+}
+
+# One argument for ProcessStartInfo.Arguments (CommandLineToArgvW rules).
+function ConvertTo-ArgString([string]$Arg) {
+    if ($Arg -ne '' -and $Arg -notmatch '[\s"]') { return $Arg }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('"')
+    $bs = 0
+    foreach ($c in $Arg.ToCharArray()) {
+        if ($c -eq '\') { $bs++; continue }
+        if ($c -eq '"') { [void]$sb.Append('\' * (2 * $bs + 1)); [void]$sb.Append('"'); $bs = 0; continue }
+        if ($bs -gt 0) { [void]$sb.Append('\' * $bs); $bs = 0 }
+        [void]$sb.Append($c)
+    }
+    if ($bs -gt 0) { [void]$sb.Append('\' * (2 * $bs)) }
+    [void]$sb.Append('"')
+    return $sb.ToString()
+}
+
+# Runs a program with a hard time limit: stdin closed, output captured (UTF-8), the whole process
+# tree killed (taskkill /T /F) on timeout, and the output readers abandoned after 5 s so that a
+# grandchild still holding the pipe cannot block this script. Returns @{ Code; Output; TimedOut }.
+function Invoke-Bounded([string]$Exe, [string[]]$Arguments, [int]$TimeoutMs) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = ((@($Arguments) | ForEach-Object { ConvertTo-ArgString $_ }) -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = $script:Utf8NoBom
+    $psi.StandardErrorEncoding = $script:Utf8NoBom
+    $psi.WorkingDirectory = $RepoRoot
+    try { $p = [System.Diagnostics.Process]::Start($psi) } catch { return @{ Code = 1; Output = @($_.Exception.Message); TimedOut = $false } }
+    try { $p.StandardInput.Close() } catch { }
+    $outTask = $p.StandardOutput.ReadToEndAsync()
+    $errTask = $p.StandardError.ReadToEndAsync()
+    $timedOut = -not $p.WaitForExit($TimeoutMs)
+    if ($timedOut) {
+        try { & "$env:SystemRoot\System32\taskkill.exe" /T /F /PID $p.Id 2>&1 | Out-Null } catch { }
+        try { $p.Kill() } catch { }
+    }
+    $text = ''
+    if ($outTask.Wait(5000)) { $text += $outTask.Result }
+    if ($errTask.Wait(1000)) { $text += $errTask.Result }
+    $code = 1
+    if (-not $timedOut) { try { $code = $p.ExitCode } catch { $code = 1 } }
+    $lines = @($text -split "`r?`n" | Where-Object { $_ -ne '' })
+    return @{ Code = $code; Output = $lines; TimedOut = $timedOut }
 }
 
 function Ask([string]$Question) {
@@ -170,6 +253,17 @@ function Get-NormPath([string]$Path) {
     return ([IO.Path]::GetFullPath($Path)).TrimEnd('\')
 }
 
+function Test-SamePath([string]$A, [string]$B) {
+    if (-not $A -or -not $B) { return $false }
+    try { return ((Get-NormPath $A) -ieq (Get-NormPath $B)) } catch { return ($A -ieq $B) }
+}
+
+function Get-CommandPath([string]$Name) {
+    $cmd = Get-Command $Name -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { return $cmd.Path }
+    return $null
+}
+
 function Test-ReparsePoint([string]$Path) {
     $item = Get-Item -LiteralPath $Path -Force
     return (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
@@ -185,349 +279,80 @@ function Get-LinkTarget([string]$Path) {
     return $t
 }
 
-# First matching application on PATH; follows a scoop shim (<name>.shim next to it) to the real file.
-function Resolve-RealExe([string]$Name) {
-    $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $cmd) { return $null }
-    $dir = Split-Path -Parent $cmd.Path
-    $shim = Join-Path $dir ($Name + '.shim')
-    if (Test-Path -LiteralPath $shim -PathType Leaf) {
-        foreach ($line in [IO.File]::ReadAllLines($shim)) {
-            if ($line -match '^\s*path\s*=\s*"?(.+?)"?\s*$') {
-                if (Test-Path -LiteralPath $matches[1] -PathType Leaf) { return $matches[1] }
+# ---------------------------------------------------------------- user environment store
+# HKCU\Environment through [Environment], or a JSON file (-UserEnvFile) for tests.
+function Read-EnvFile {
+    $h = @{}
+    if ((Test-Path -LiteralPath $UserEnvFile -PathType Leaf)) {
+        $text = Read-Utf8 $UserEnvFile
+        if ($text.Trim()) {
+            $obj = $text | ConvertFrom-Json
+            foreach ($p in $obj.PSObject.Properties) { $h[$p.Name] = [string]$p.Value }
+        }
+    }
+    return $h
+}
+
+function Get-UserEnv([string]$Name) {
+    if ($UserEnvFile) {
+        $h = Read-EnvFile
+        if ($h.ContainsKey($Name)) { return $h[$Name] }
+        return $null
+    }
+    return [Environment]::GetEnvironmentVariable($Name, 'User')
+}
+
+# $Value $null removes the variable.
+function Set-UserEnv([string]$Name, $Value) {
+    if ($UserEnvFile) {
+        $h = Read-EnvFile
+        if ($null -eq $Value) { [void]$h.Remove($Name) } else { $h[$Name] = [string]$Value }
+        $dir = Split-Path -Parent $UserEnvFile
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+        Write-Utf8 $UserEnvFile (ConvertTo-Json -InputObject $h -Depth 3)
+        return
+    }
+    [Environment]::SetEnvironmentVariable($Name, $Value, 'User')
+}
+
+function Get-EnvStoreLabel {
+    if ($UserEnvFile) { return 'fake user environment ' + $UserEnvFile }
+    return 'HKCU\Environment'
+}
+
+# ---------------------------------------------------------------- manifest
+$ManifestDir = Join-Path $LocalAppData 'work-kb'
+$ManifestPath = Join-Path $ManifestDir 'install-manifest.json'
+
+function Read-Manifest {
+    $m = @{ env = @{}; venvs = @() }
+    if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
+        $obj = (Read-Utf8 $ManifestPath) | ConvertFrom-Json
+        if ($obj.PSObject.Properties['env'] -and $obj.env) {
+            foreach ($p in $obj.env.PSObject.Properties) {
+                $e = $p.Value
+                $m.env[$p.Name] = @{ value = [string]$e.value; hadPrevious = [bool]$e.hadPrevious; previous = $e.previous }
             }
         }
+        if ($obj.PSObject.Properties['venvs'] -and $obj.venvs) { $m.venvs = @($obj.venvs | ForEach-Object { [string]$_ }) }
     }
-    return $cmd.Path
+    return $m
 }
 
-function Get-CommandPath([string]$Name) {
-    $cmd = Get-Command $Name -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($cmd) { return $cmd.Path }
-    return $null
-}
-
-function Get-ScoopRoot {
-    if ($env:SCOOP) { return $env:SCOOP }
-    $s = Get-CommandPath 'scoop'
-    if ($s) { return (Split-Path -Parent (Split-Path -Parent $s)) }
-    return (Join-Path $env:USERPROFILE 'scoop')
-}
-
-function Get-RealNvim {
-    if ($NvimExe) { return $NvimExe }
-    $p = Resolve-RealExe 'nvim'
-    if ($p -and $p.ToLower().EndsWith('.exe') -and (Split-Path -Leaf (Split-Path -Parent $p)) -ne 'shims') { return $p }
-    $guess = Join-Path (Get-ScoopRoot) 'apps\neovim\current\bin\nvim.exe'
-    if (Test-Path -LiteralPath $guess -PathType Leaf) { return $guess }
-    return $p
-}
-
-# Program to run headless nvim with: -NvimExe, else whatever "nvim" is on PATH (a scoop shim is fine here).
-function Get-NvimRunner {
-    if ($NvimExe) { return $NvimExe }
-    return (Get-CommandPath 'nvim')
-}
-
-# Child environment for headless nvim. GIT_CONFIG_* (git >= 2.31) turns on core.longpaths for the git
-# processes lazy.nvim starts: mini.nvim and fzf-lua have test files whose paths pass MAX_PATH (260) under
-# a deep data folder, and the clone then fails with "Filename too long" (seen in a trial run).
-function Get-NvimChildEnv {
-    return @{ XDG_CONFIG_HOME = $RepoRoot; LOCALAPPDATA = $LocalAppData; NVIM_APPNAME = $null; VIMINIT = $null; MYVIMRC = $null; NVIM = $null;
-        GIT_CONFIG_COUNT = '1'; GIT_CONFIG_KEY_0 = 'core.longpaths'; GIT_CONFIG_VALUE_0 = 'true' }
-}
-
-function Read-Json([string]$Path) {
-    return (Read-Utf8 $Path | ConvertFrom-Json)
-}
-
-function Get-GitHead([string]$Dir) {
-    $git = Join-Path $Dir '.git'
-    $head = Join-Path $git 'HEAD'
-    if (-not (Test-Path -LiteralPath $head -PathType Leaf)) { return $null }
-    $h = ([IO.File]::ReadAllText($head)).Trim()
-    if ($h -match '^[0-9a-f]{40}$') { return $h }
-    if ($h -match '^ref:\s*(\S+)$') {
-        $ref = $matches[1]
-        $rp = Join-Path $git ($ref -replace '/', '\')
-        if (Test-Path -LiteralPath $rp -PathType Leaf) { return ([IO.File]::ReadAllText($rp)).Trim() }
-        $packed = Join-Path $git 'packed-refs'
-        if (Test-Path -LiteralPath $packed -PathType Leaf) {
-            foreach ($l in [IO.File]::ReadAllLines($packed)) {
-                if ($l -match ('^([0-9a-f]{40}) ' + [regex]::Escape($ref) + '$')) { return $matches[1] }
-            }
-        }
+function Write-Manifest($M) {
+    if (-not (Test-Path -LiteralPath $ManifestDir)) { New-Item -ItemType Directory -Path $ManifestDir | Out-Null }
+    $doc = [ordered]@{
+        tool = 'work-kb install.ps1'
+        version = 1
+        repo = $RepoRoot
+        updated = (Get-Date -Format 's')
+        env = $M.env
+        venvs = @($M.venvs)
     }
-    return $null
-}
-
-# lazy-lock.json -> list of @{ Name; Commit }
-function Get-LockedPlugins {
-    $lock = Join-Path $NvimDir 'lazy-lock.json'
-    $data = Read-Json $lock
-    $list = @()
-    foreach ($p in $data.PSObject.Properties) {
-        $commit = $null
-        if ($p.Value -and $p.Value.PSObject.Properties['commit']) { $commit = [string]$p.Value.commit }
-        $list += @{ Name = $p.Name; Commit = $commit }
-    }
-    return $list
-}
-
-# tools.lock.json -> list of @{ Name; Version }. Accepts {"name": "ver"}, {"name": {"version": "ver"}},
-# ["name@ver", ...], or any of those under a "tools" key. Keys starting with _ or $ are ignored.
-function Get-LockedTools {
-    $data = Read-Json (Join-Path $NvimDir 'tools.lock.json')
-    if ($data -isnot [array] -and $data.PSObject.Properties['tools']) { $data = $data.tools }
-    $list = @()
-    if ($data -is [array]) {
-        foreach ($s in $data) {
-            $s = [string]$s
-            $i = $s.LastIndexOf('@')
-            if ($i -gt 0) { $list += @{ Name = $s.Substring(0, $i); Version = $s.Substring($i + 1) } }
-            else { $list += @{ Name = $s; Version = '' } }
-        }
-        return $list
-    }
-    foreach ($p in $data.PSObject.Properties) {
-        if ($p.Name.StartsWith('_') -or $p.Name.StartsWith('$')) { continue }
-        $v = $p.Value
-        if ($v -is [string]) { $ver = $v }
-        elseif ($v -and $v.PSObject.Properties['version']) { $ver = [string]$v.version }
-        else { $ver = '' }
-        $list += @{ Name = $p.Name; Version = $ver }
-    }
-    return $list
-}
-
-function Get-MasonVersion([string]$Name) {
-    $receipt = Join-Path $DataDir ('mason\packages\' + $Name + '\mason-receipt.json')
-    if (-not (Test-Path -LiteralPath $receipt -PathType Leaf)) { return $null }
-    try {
-        $r = Read-Json $receipt
-        $id = [string]$r.source.id
-        $i = $id.LastIndexOf('@')
-        if ($i -ge 0) { return $id.Substring($i + 1) }
-    } catch { }
-    return ''
-}
-
-function Test-SameVersion([string]$A, [string]$B) {
-    return ($A.TrimStart('v') -eq $B.TrimStart('v'))
-}
-
-function ConvertTo-LuaLongString([string]$Text) {
-    $level = 0
-    while ($true) {
-        $close = ']' + ('=' * $level) + ']'
-        if (($Text + $close).IndexOf($close) -eq $Text.Length) { break }
-        $level++
-    }
-    $eq = '=' * $level
-    return '[' + $eq + '[' + $Text + ']' + $eq + ']'
+    Write-Utf8 $ManifestPath (ConvertTo-Json -InputObject $doc -Depth 5)
 }
 
 # ---------------------------------------------------------------- steps
-function Step-scoop {
-    $packages = @(
-        @{ Name = 'git'; Bucket = 'main'; Command = 'git' },
-        @{ Name = 'neovim'; Bucket = 'main'; Command = 'nvim' },
-        @{ Name = 'ripgrep'; Bucket = 'main'; Command = 'rg' },
-        @{ Name = 'fd'; Bucket = 'main'; Command = 'fd' },
-        @{ Name = 'fzf'; Bucket = 'main'; Command = 'fzf' },
-        @{ Name = 'uv'; Bucket = 'main'; Command = 'uv' },
-        @{ Name = 'nodejs-lts'; Bucket = 'main'; Command = 'node' },
-        @{ Name = 'neovide'; Bucket = 'extras'; Command = 'neovide' },
-        @{ Name = 'JetBrainsMono-NF'; Bucket = 'nerd-fonts'; Font = 'JetBrainsMono\s*(Nerd\s*Font|NF)' },
-        @{ Name = 'SarasaGothic-K'; Bucket = 'nerd-fonts'; Font = 'Sarasa (Fixed|Mono|Term|Gothic) K\b' }
-    )
-    $root = Get-ScoopRoot
-    $fontNames = @()
-    foreach ($key in 'HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts', 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts') {
-        try { $fontNames += @((Get-ItemProperty -LiteralPath $key -ErrorAction Stop).PSObject.Properties | ForEach-Object { $_.Name }) } catch { }
-    }
-    $missing = @()
-    foreach ($p in $packages) {
-        $present = $false
-        if (Test-Path -LiteralPath (Join-Path $root ('apps\' + $p.Name + '\current'))) { $present = $true }
-        elseif ($p.ContainsKey('Command')) { $present = [bool](Get-CommandPath $p.Command) }
-        else { $present = [bool]($fontNames | Where-Object { $_ -match $p.Font } | Select-Object -First 1) }
-        if (-not $present) { $missing += $p }
-    }
-    if ($missing.Count -eq 0) { Report 'scoop' 'ok' 'all packages present'; return }
-    $names = ($missing | ForEach-Object { $_.Name }) -join ', '
-    $scoop = Get-CommandPath 'scoop'
-    if (-not $scoop) {
-        Report 'scoop' 'failed' ('missing: ' + $names + '; scoop is not installed (see scoop.sh), install it and rerun')
-        return
-    }
-    $failed = @()
-    $did = $false
-    foreach ($bucket in @($missing | ForEach-Object { $_.Bucket } | Where-Object { $_ -ne 'main' } | Select-Object -Unique)) {
-        if (-not (Test-Path -LiteralPath (Join-Path $root ('buckets\' + $bucket)))) {
-            $script:StepFailed = $false
-            $ran = Invoke-Action 'scoop' (Format-Command 'scoop' @('bucket', 'add', $bucket)) {
-                $r = Invoke-Native $scoop @('bucket', 'add', $bucket)
-                if ($r.Code -ne 0) { $script:StepFailed = $true }
-            }
-            if ($ran) { $did = $true; if ($script:StepFailed) { $failed += ('bucket ' + $bucket) } }
-        }
-    }
-    foreach ($p in $missing) {
-        if ($p.Bucket -eq 'main') { $spec = $p.Name } else { $spec = $p.Bucket + '/' + $p.Name }
-        $script:StepFailed = $false
-        $ran = Invoke-Action 'scoop' (Format-Command 'scoop' @('install', $spec)) {
-            $r = Invoke-Native $scoop @('install', $spec)
-            if ($r.Code -ne 0) { $script:StepFailed = $true }
-        }
-        if ($ran) { $did = $true; if ($script:StepFailed) { $failed += $p.Name } }
-    }
-    if (Test-WhatIf) { Report 'scoop' 'whatif' ('would install: ' + $names); return }
-    if ($failed.Count -gt 0) { Report 'scoop' 'failed' ('scoop install failed: ' + ($failed -join ', ')); return }
-    if ($did) { Report 'scoop' 'changed' ('installed: ' + $names) } else { Report 'scoop' 'skipped' ('not installed (declined): ' + $names) }
-}
-
-function New-Junction([string]$Link, [string]$Target) {
-    New-Item -ItemType Junction -Path $Link -Target $Target | Out-Null
-}
-
-function Step-link {
-    $link = Join-Path $LocalAppData 'nvim'
-    $target = $NvimDir
-    if (-not (Test-Path -LiteralPath (Join-Path $target 'init.lua') -PathType Leaf) -and -not (Test-Path -LiteralPath $target -PathType Container)) {
-        Report 'link' 'failed' ('config folder not found: ' + $target); return
-    }
-    if (-not (Test-Path -LiteralPath $LocalAppData -PathType Container)) {
-        Report 'link' 'failed' ('LOCALAPPDATA folder not found: ' + $LocalAppData); return
-    }
-    $exists = Test-Path -LiteralPath $link
-    if ($exists) {
-        $isLink = Test-ReparsePoint $link
-        if ($isLink) {
-            $current = Get-LinkTarget $link
-            if ($current -and ((Get-NormPath $current) -ieq (Get-NormPath $target))) {
-                Report 'link' 'ok' ($link + ' -> ' + $target); return
-            }
-            $what = 'link to ' + $current
-        } elseif (Test-Path -LiteralPath $link -PathType Container) {
-            if ((Get-NormPath $link) -ieq (Get-NormPath $target)) { Report 'link' 'ok' ($link + ' is the config folder'); return }
-            $what = 'folder'
-        } else {
-            $what = 'file'
-        }
-        $backup = Get-FreeBackupPath $link
-        if (-not (Test-WhatIf) -and -not (Ask ('Rename the existing ' + $what + ' ' + $link + ' to ' + $backup + '?'))) {
-            Report 'link' 'failed' ($link + ' exists (' + $what + '); rerun with -Yes to back it up'); return
-        }
-        $moved = Invoke-Action 'link' ('rename ' + $what + ' ' + $link + ' -> ' + $backup) {
-            if ($isLink -or (Test-Path -LiteralPath $link -PathType Container)) { [IO.Directory]::Move($link, $backup) }
-            else { [IO.File]::Move($link, $backup) }
-        }
-        if (-not $moved -and -not (Test-WhatIf)) { Report 'link' 'skipped' 'declined'; return }
-    }
-    $made = Invoke-Action 'link' ('junction ' + $link + ' -> ' + $target) { New-Junction $link $target }
-    if (Test-WhatIf) { Report 'link' 'whatif' ($link + ' -> ' + $target); return }
-    if (-not $made) { Report 'link' 'skipped' 'declined'; return }
-    $now = Get-LinkTarget $link
-    if (-not $now -or ((Get-NormPath $now) -ine (Get-NormPath $target))) { Report 'link' 'failed' ('junction does not resolve to ' + $target); return }
-    if ($exists) { Report 'link' 'changed' ($link + ' -> ' + $target + ' (old one kept as ' + $backup + ')') }
-    else { Report 'link' 'changed' ($link + ' -> ' + $target) }
-}
-
-function Step-local {
-    $dest = Join-Path $NvimDir 'lua\local.lua'
-    $example = Join-Path $NvimDir 'lua\local.example.lua'
-    if (Test-Path -LiteralPath $dest) {
-        $note = ''
-        if ($VaultPath) { $note = '; -VaultPath ignored, edit the file to change it' }
-        Report 'local' 'ok' ($dest + ' exists' + $note); return
-    }
-    if (-not (Test-Path -LiteralPath $example -PathType Leaf)) { Report 'local' 'failed' ('example not found: ' + $example); return }
-    $vault = $VaultPath
-    if (-not $vault -and -not $Yes -and -not (Test-WhatIf)) {
-        try { $vault = Read-Host 'Vault folder (empty = the repository root)' } catch { $vault = '' }
-    }
-    if ($vault) { $vault = $vault.Trim().Trim('"') }
-    if ($vault -match '[\r\n]') { Report 'local' 'failed' 'vault path contains a line break'; return }
-    if ($vault -and $vault.Length -gt 3) { $vault = $vault.TrimEnd('\', '/') }
-    $text = Read-Utf8 $example
-    if ($vault) {
-        $pattern = '(?m)^(\s*)vault(\s*)=(\s*)nil\b'
-        if (-not [regex]::IsMatch($text, $pattern)) { Report 'local' 'failed' ('no "vault = nil" line in ' + $example); return }
-        $lua = ConvertTo-LuaLongString $vault
-        $text = [regex]::Replace($text, $pattern, { param($m) $m.Groups[1].Value + 'vault = ' + $lua }, 'None', [TimeSpan]::FromSeconds(5))
-    }
-    $label = 'vault = nil (repository root)'
-    if ($vault) { $label = 'vault = ' + $vault }
-    $done = Invoke-Action 'local' ('write ' + $dest + ' (' + $label + ')') { Write-Utf8 $dest $text }
-    if (Test-WhatIf) { Report 'local' 'whatif' $dest; return }
-    if (-not $done) { Report 'local' 'skipped' 'declined'; return }
-    $note = ''
-    if ($vault -and -not (Test-Path -LiteralPath $vault)) { $note = ' (vault folder does not exist yet)' }
-    Report 'local' 'changed' ($dest + ': ' + $label + $note)
-}
-
-function Get-NeovideConfigText([string]$Nvim) {
-    $template = Join-Path $NvimDir 'neovide\config.toml.in'
-    $text = Read-Utf8 $template
-    $text = $text.Replace('@NVIM_EXE@', $Nvim)
-    $size = '12.0'
-    if ($FontSize -gt 0) { $size = $FontSize.ToString('0.0###', [Globalization.CultureInfo]::InvariantCulture) }
-    if ($text.Contains('@FONT_SIZE@')) {
-        $text = $text.Replace('@FONT_SIZE@', $size)
-    } elseif ($FontSize -gt 0) {
-        $lines = $text -split "`n", -1
-        $inFont = $false
-        $done = $false
-        for ($i = 0; $i -lt $lines.Count; $i++) {
-            $l = $lines[$i]
-            if ($l -match '^\s*\[') { $inFont = ($l -match '^\s*\[font\]\s*$'); continue }
-            if ($inFont -and -not $done -and $l -match '^(\s*size\s*=\s*)[0-9.]+(.*)$') {
-                $lines[$i] = $matches[1] + $size + $matches[2]
-                $done = $true
-            }
-        }
-        if (-not $done) { throw 'template has no size line in its [font] table for -FontSize' }
-        $text = $lines -join "`n"
-    }
-    $left = [regex]::Match($text, '@[A-Z_]+@')
-    if ($left.Success) { throw ('unknown placeholder ' + $left.Value + ' in ' + $template) }
-    $nl = "`n"
-    if ($text.Contains("`r`n")) { $nl = "`r`n" }
-    return $ConfigMarker + $nl + $text
-}
-
-function Step-neovide {
-    $template = Join-Path $NvimDir 'neovide\config.toml.in'
-    if (-not (Test-Path -LiteralPath $template -PathType Leaf)) { Report 'neovide' 'failed' ('template not found: ' + $template); return }
-    $nvim = Get-RealNvim
-    if (-not $nvim -or -not (Test-Path -LiteralPath $nvim -PathType Leaf)) { Report 'neovide' 'failed' 'real nvim.exe not found (install neovim or pass -NvimExe)'; return }
-    if ($nvim.Contains("'")) { Report 'neovide' 'failed' ('nvim path contains a quote: ' + $nvim); return }
-    try { $text = Get-NeovideConfigText $nvim } catch { Report 'neovide' 'failed' $_.Exception.Message; return }
-    $dir = Join-Path $AppData 'neovide'
-    $dest = Join-Path $dir 'config.toml'
-    $backup = $null
-    if (Test-Path -LiteralPath $dest -PathType Leaf) {
-        $old = Read-Utf8 $dest
-        if ($old -ceq $text) { Report 'neovide' 'ok' ($dest + ' is current (neovim-bin = ' + $nvim + ')'); return }
-        if ($old.StartsWith($ConfigMarker)) {
-            Out-Line ('  ' + $dest + ' was generated by this installer; regenerating it')
-        } else {
-            $backup = Get-FreeBackupPath $dest
-            [void](Invoke-Action 'neovide' ('back up ' + $dest + ' -> ' + $backup) { [IO.File]::Move($dest, $backup) })
-        }
-    }
-    $done = Invoke-Action 'neovide' ('write ' + $dest + ' (neovim-bin = ' + $nvim + ')') {
-        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
-        Write-Utf8 $dest $text
-    }
-    if (Test-WhatIf) { Report 'neovide' 'whatif' $dest; return }
-    if (-not $done) { Report 'neovide' 'skipped' 'declined'; return }
-    $detail = $dest + ' (neovim-bin = ' + $nvim + ')'
-    if ($backup) { $detail += '; previous file kept as ' + $backup }
-    Report 'neovide' 'changed' $detail
-}
-
 function Get-VenvVersion([string]$Venv) {
     $cfg = Join-Path $Venv 'pyvenv.cfg'
     if (-not (Test-Path -LiteralPath $cfg -PathType Leaf)) { return $null }
@@ -538,10 +363,9 @@ function Get-VenvVersion([string]$Venv) {
 }
 
 function Step-venv {
-    $venv = Join-Path $RepoRoot '.venv'
-    $py = Join-Path $venv 'Scripts\python.exe'
+    $venv = $VenvDir
+    $py = $VenvPython
     $req = Join-Path $RepoRoot 'requirements.txt'
-    $kb = Join-Path $RepoRoot 'scripts\kb.py'
     $good = @('3.13', '3.14')
     $created = $false
     $version = Get-VenvVersion $venv
@@ -556,11 +380,17 @@ function Step-venv {
         }
         $candidates = @()
         $uv = Get-CommandPath 'uv'
-        if ($uv) { $candidates += , @($uv, @('venv', '--seed', '--python', '3.14', $venv)) }
+        if ($uv) {
+            $candidates += , @($uv, @('venv', '--seed', '--python', '3.14', $venv))
+            $candidates += , @($uv, @('venv', '--seed', '--python', '3.13', $venv))
+        }
         $pyl = Get-CommandPath 'py'
-        if ($pyl) { $candidates += , @($pyl, @('-3.14', '-m', 'venv', $venv)) }
+        if ($pyl) {
+            $candidates += , @($pyl, @('-3.14', '-X', 'utf8', '-m', 'venv', $venv))
+            $candidates += , @($pyl, @('-3.13', '-X', 'utf8', '-m', 'venv', $venv))
+        }
         $python = Get-CommandPath 'python'
-        if ($python) { $candidates += , @($python, @('-m', 'venv', $venv)) }
+        if ($python) { $candidates += , @($python, @('-X', 'utf8', '-m', 'venv', $venv)) }
         if ($candidates.Count -eq 0) { Report 'venv' 'failed' 'none of uv, py, python found'; return }
         if (Test-WhatIf) {
             [void](Invoke-Action 'venv' (Format-Command $candidates[0][0] $candidates[0][1]) { })
@@ -578,20 +408,31 @@ function Step-venv {
                 if ($script:VenvOk) { $created = $true; break }
             }
             if (-not $created) { Report 'venv' 'failed' 'could not create .venv with Python 3.13/3.14'; return }
+            # recorded at once, so that uninstall -RemoveVenv knows it even if pip fails below
+            $m = Read-Manifest
+            if (-not (@($m.venvs) | Where-Object { Test-SamePath $_ $venv })) { $m.venvs = @($m.venvs) + @($venv) }
+            Write-Manifest $m
+            [void]$script:Placed.Add('.venv ' + $venv + ' (created; recorded in ' + $ManifestPath + ')')
         }
     }
-    $verifyArgs = @('-X', 'utf8', $kb, '--help')
+    $verifyArgs = @('-X', 'utf8', $KbPy, '--help')
     # (names must not collide with the -Offline switch: PowerShell variable names ignore case)
-    $pipOnline = @('-m', 'pip', 'install', '-r', $req)
-    $pipOffline = @('-m', 'pip', 'install', '--no-index', '--find-links', $WheelsDir, '-r', $req)
+    $pipOnline = @('-X', 'utf8', '-m', 'pip', 'install', '-r', $req)
+    $pipOffline = @('-X', 'utf8', '-m', 'pip', 'install', '--no-index', '--find-links', $WheelsDir, '-r', $req)
+    # Exit 0 only when every requirement is already installed: --no-index gives pip nowhere to fetch a missing
+    # one from, so this never downloads or changes anything. kb.py --help alone does not import every package,
+    # and requirements.txt may have grown since the venv was made (git pull, then install.ps1 again).
+    $pipSatisfied = @('-X', 'utf8', '-m', 'pip', 'install', '--no-index', '--quiet', '--disable-pip-version-check', '-r', $req)
     if ($haveGood) {
         if (Test-WhatIf) {
-            Out-Line ('WHATIF venv keep ' + $venv + ' (Python ' + $version + '); check ' + (Format-Command $py $verifyArgs) + '; pip install -r requirements.txt only if that fails')
+            Out-Line ('WHATIF venv keep ' + $venv + ' (Python ' + $version + '); check ' + (Format-Command $py $verifyArgs) + ' and that requirements.txt is satisfied; pip install -r requirements.txt only if either fails')
             Report 'venv' 'whatif' $venv
             return
         }
         $r = Invoke-Native $py $verifyArgs
-        if ($r.Code -eq 0) { Report 'venv' 'ok' ($venv + ' (Python ' + $version + ', kb.py --help works)'); return }
+        if ($r.Code -eq 0 -and (Invoke-Native $py $pipSatisfied).Code -eq 0) {
+            Report 'venv' 'ok' ($venv + ' (Python ' + $version + ', kb.py --help works, requirements satisfied)'); return
+        }
     }
     $script:PipOk = $false
     $script:VerifyOk = $false
@@ -612,159 +453,188 @@ function Step-venv {
     if (Test-WhatIf) { Report 'venv' 'whatif' $venv; return }
     if (-not $script:PipOk) { Report 'venv' 'failed' 'pip install failed'; return }
     if (-not $script:VerifyOk) { Report 'venv' 'failed' 'kb.py --help failed after install'; return }
+    if ($haveGood) { [void]$script:Placed.Add('.venv ' + $venv + ' (requirements reinstalled)') }
     Report 'venv' 'changed' ($venv + ' ready')
 }
 
-function Test-NvimConfig([string]$Step) {
-    foreach ($f in 'init.lua', 'lazy-lock.json') {
-        if (-not (Test-Path -LiteralPath (Join-Path $NvimDir $f) -PathType Leaf)) { Report $Step 'failed' ('missing ' + (Join-Path $NvimDir $f)); return $false }
-    }
-    if (-not (Get-NvimRunner)) { Report $Step 'failed' 'nvim not found'; return $false }
-    return $true
-}
-
-# config.lazy.install() (N4a) runs lazy's install with lockfile=true and then restore, and returns the
-# plugins still off their lockfile commit. ":Lazy! install" is NOT used: it clones the default branch tip
-# and then rewrites lazy-lock.json with those commits (checked in lazy.nvim 306a055, manage/init.lua).
-$LazyInstallLua = "lua local ok, r = pcall(function() return require('config.lazy').install() end) if not ok then io.stderr:write(tostring(r) .. '\n') vim.cmd('cquit 1') elseif type(r) == 'table' and #r > 0 then io.stderr:write('not at the lockfile commit: ' .. table.concat(r, ', ') .. '\n') vim.cmd('cquit 1') end"
-$WarmLua = "lua local ok, e = pcall(function() require('config.background').warm_all({ sync = true }) end) if not ok then io.stderr:write(tostring(e) .. '\n') vim.cmd('cquit 1') end"
-
-# A plugin is current when its folder has no "<name>.cloning" marker (lazy leaves one after a failed
-# clone) and its git HEAD is the lockfile commit.
-function Test-PluginCurrent($Plugin) {
-    $dir = Join-Path $DataDir ('lazy\' + $Plugin.Name)
-    if (Test-Path -LiteralPath ($dir + '.cloning')) { return $false }
-    $head = Get-GitHead $dir
-    if (-not $head) { return $false }
-    return (-not $Plugin.Commit -or $head -eq $Plugin.Commit)
-}
-
-function Step-plugins {
-    if (-not (Test-NvimConfig 'plugins')) { return }
-    $nvim = Get-NvimRunner
-    try { $plugins = @(Get-LockedPlugins) } catch { Report 'plugins' 'failed' ('cannot read lazy-lock.json: ' + $_.Exception.Message); return }
-    $stale = @($plugins | Where-Object { -not (Test-PluginCurrent $_) } | ForEach-Object { $_.Name })
-    if ($stale.Count -eq 0) { Report 'plugins' 'ok' ('' + $plugins.Count + ' plugins at the lockfile commits'); return }
-    Out-Line ('  not at the lockfile commit: ' + ($stale -join ', '))
-    $install = @('--headless', ('+' + $LazyInstallLua), '+qa')
-    $warm = @('--headless', ('+' + $WarmLua), '+qa')
-    $childEnv = Get-NvimChildEnv
-    # lazy rewrites lazy-lock.json after installing and drops plugins whose clone failed; the committed
-    # lockfile is the source of truth, so its bytes are put back afterwards.
-    $lockPath = Join-Path $NvimDir 'lazy-lock.json'
-    $lockBytes = [IO.File]::ReadAllBytes($lockPath)
-    $script:PluginsOk = $false
-    $script:WarmOk = $true
-    $script:LockRestored = $false
-    $putBack = {
-        $now = [IO.File]::ReadAllBytes($lockPath)
-        if ([Convert]::ToBase64String($now) -ne [Convert]::ToBase64String($lockBytes)) {
-            [IO.File]::WriteAllBytes($lockPath, $lockBytes)
-            $script:LockRestored = $true
-            Out-Line '  lazy rewrote lazy-lock.json; the committed version was put back'
-        }
-    }
-    [void](Invoke-Action 'plugins' (Format-Command $nvim $install) {
-        try { $script:PluginsOk = ((Invoke-Native $nvim $install $childEnv).Code -eq 0) } finally { & $putBack }
-    })
-    if ($script:PluginsOk -or (Test-WhatIf)) {
-        [void](Invoke-Action 'plugins' (Format-Command $nvim $warm) {
-            try { $script:WarmOk = ((Invoke-Native $nvim $warm $childEnv).Code -eq 0) } finally { & $putBack }
-        })
-    }
-    if (Test-WhatIf) { Report 'plugins' 'whatif' ('install/restore ' + $stale.Count + ' plugins, then the warm pass'); return }
-    $left = @($plugins | Where-Object { -not (Test-PluginCurrent $_) } | ForEach-Object { $_.Name })
-    if (-not $script:PluginsOk -or $left.Count -gt 0) {
-        $detail = 'lazy install/restore failed (see output above)'
-        if ($left.Count -gt 0) { $detail += '; still not at the lockfile commit: ' + ($left -join ', ') }
-        if ($script:LockRestored) { $detail += '; lazy-lock.json restored' }
-        Report 'plugins' 'failed' $detail
+function Step-env {
+    $want = $RepoRoot
+    $store = Get-EnvStoreLabel
+    $cur = Get-UserEnv $EnvName
+    $m = Read-Manifest
+    $entry = $null
+    if ($m.env.ContainsKey($EnvName)) { $entry = $m.env[$EnvName] }
+    if ($cur -and (Test-SamePath $cur $want)) {
+        $note = ''
+        if (-not $entry) { $note = ' (already set, not by install.ps1; uninstall.ps1 leaves it)' }
+        Report 'env' 'ok' ($EnvName + ' = ' + $cur + ' in ' + $store + $note)
         return
     }
-    $detail = 'installed/restored: ' + ($stale -join ', ')
-    if (-not $script:WarmOk) { $detail += '; WARNING: warm pass failed (startup cache not prewarmed)' }
-    Report 'plugins' 'changed' $detail
-}
-
-function Step-tools {
-    if (-not (Test-NvimConfig 'tools')) { return }
-    $lockPath = Join-Path $NvimDir 'tools.lock.json'
-    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf)) { Report 'tools' 'failed' ('missing ' + $lockPath); return }
-    try { $tools = @(Get-LockedTools) } catch { Report 'tools' 'failed' ('cannot read tools.lock.json: ' + $_.Exception.Message); return }
-    $todo = @()
-    foreach ($t in $tools) {
-        $have = Get-MasonVersion $t.Name
-        if ($null -eq $have -or ($t.Version -and -not (Test-SameVersion $have $t.Version))) {
-            if ($t.Version) { $todo += ($t.Name + '@' + $t.Version) } else { $todo += $t.Name }
+    # The value we are about to replace is ours if the manifest says we set exactly that.
+    $ours = $entry -and $cur -and ($entry.value -ceq $cur)
+    if ($cur -and -not $ours) {
+        Out-Line ('  ' + (Get-Msg 'EnvOther' $cur))
+        if (-not (Test-WhatIf) -and -not (Ask ('Replace user variable ' + $EnvName + ' = ' + $cur + ' with ' + $want + '?'))) {
+            Report 'env' 'failed' ($EnvName + ' is ' + $cur + '; rerun with -Yes to point it at ' + $want); return
         }
     }
-    if ($todo.Count -eq 0) { Report 'tools' 'ok' ('' + $tools.Count + ' tools at the pinned versions'); return }
-    $nvim = Get-NvimRunner
-    $argv = @('--headless', ('+MasonInstall ' + ($todo -join ' ')), '+qa')
-    $script:ToolsOk = $false
-    [void](Invoke-Action 'tools' (Format-Command $nvim $argv) { $script:ToolsOk = ((Invoke-Native $nvim $argv (Get-NvimChildEnv)).Code -eq 0) })
-    if (Test-WhatIf) { Report 'tools' 'whatif' ('install ' + ($todo -join ' ')); return }
-    if (-not $script:ToolsOk) { Report 'tools' 'failed' ('MasonInstall failed: ' + ($todo -join ' ')); return }
-    $left = @($tools | Where-Object { $have = Get-MasonVersion $_.Name; $null -eq $have -or ($_.Version -and -not (Test-SameVersion $have $_.Version)) } | ForEach-Object { $_.Name })
-    if ($left.Count -gt 0) { Report 'tools' 'failed' ('still missing or at another version: ' + ($left -join ', ')); return }
-    Report 'tools' 'changed' ('installed ' + ($todo -join ' '))
-}
-
-function Step-doctor {
-    if (-not (Test-NvimConfig 'doctor')) { return }
-    $nvim = Get-NvimRunner
-    $argv = @('--headless', "+lua require('config.health').cli()", '+qa')
-    $script:DoctorResult = $null
-    [void](Invoke-Action 'doctor' (Format-Command $nvim $argv) { $script:DoctorResult = Invoke-Native $nvim $argv (Get-NvimChildEnv) })
-    if (Test-WhatIf) { Report 'doctor' 'whatif' 'config.health.cli()'; return }
-    $r = $script:DoctorResult
-    if ($null -eq $r) { Report 'doctor' 'skipped' 'declined'; return }
-    $fails = @($r.Output | Where-Object { $_ -match '^\s*FAIL' })
-    if ($r.Code -ne 0 -or $fails.Count -gt 0) { Report 'doctor' 'failed' ('exit ' + $r.Code + ', ' + $fails.Count + ' FAIL line(s)'); return }
-    Report 'doctor' 'ok' 'all checks passed'
-}
-
-function Get-ShortcutInfo([string]$Path) {
-    $shell = New-Object -ComObject WScript.Shell
-    $s = $shell.CreateShortcut($Path)
-    return @{ Target = [string]$s.TargetPath; Arguments = [string]$s.Arguments }
-}
-
-function Step-prestart {
-    $lnk = Join-Path $StartupDir $ShortcutName
-    $launcher = Join-Path $NvimDir 'bin\nvim-server.ps1'
-    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    $arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcher + '"'
-    if ($PreStart -and $NoPreStart) { Report 'prestart' 'failed' 'use -PreStart or -NoPreStart, not both'; return }
-    if (-not $PreStart -and -not $NoPreStart) { Report 'prestart' 'skipped' 'opt-in: -PreStart creates the logon shortcut, -NoPreStart removes it'; return }
-    $exists = Test-Path -LiteralPath $lnk
-    $info = $null
-    if ($exists) { $info = Get-ShortcutInfo $lnk }
-    $ours = $exists -and ($info.Arguments -match 'nvim-server\.ps1')
-    if ($NoPreStart) {
-        if (-not $exists) { Report 'prestart' 'ok' ('no shortcut at ' + $lnk); return }
-        if (-not $ours) { Report 'prestart' 'failed' ($lnk + ' was not created by this installer; left alone'); return }
-        $done = Invoke-Action 'prestart' ('remove ' + $lnk) { [IO.File]::Delete($lnk) }
-        if (Test-WhatIf) { Report 'prestart' 'whatif' ('remove ' + $lnk); return }
-        if ($done) { Report 'prestart' 'changed' ('removed ' + $lnk) } else { Report 'prestart' 'skipped' 'declined' }
-        return
+    if ($ours) { $hadPrevious = [bool]$entry.hadPrevious; $previous = $entry.previous }
+    elseif ($cur) { $hadPrevious = $true; $previous = $cur }
+    else { $hadPrevious = $false; $previous = $null }
+    $was = '(not set)'
+    if ($cur) { $was = $cur }
+    $done = Invoke-Action 'env' ('set user environment variable ' + $EnvName + ' = ' + $want + ' in ' + $store + ' (was ' + $was + ')') {
+        Set-UserEnv $EnvName $want
+        $m.env[$EnvName] = @{ value = $want; hadPrevious = $hadPrevious; previous = $previous }
+        Write-Manifest $m
     }
-    if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { Report 'prestart' 'failed' ('launcher not found: ' + $launcher); return }
-    if ($exists -and -not $ours) { Report 'prestart' 'failed' ($lnk + ' exists and was not created by this installer'); return }
-    if ($ours -and $info.Target -ieq $ps -and $info.Arguments -ceq $arguments) { Report 'prestart' 'ok' ($lnk + ' -> ' + $launcher); return }
-    $done = Invoke-Action 'prestart' ('shortcut ' + $lnk + ' -> ' + $ps + ' ' + $arguments) {
-        if (-not (Test-Path -LiteralPath $StartupDir)) { New-Item -ItemType Directory -Path $StartupDir | Out-Null }
-        $shell = New-Object -ComObject WScript.Shell
-        $s = $shell.CreateShortcut($lnk)
-        $s.TargetPath = $ps
-        $s.Arguments = $arguments
-        $s.WorkingDirectory = $env:USERPROFILE
-        $s.WindowStyle = 7
-        $s.Description = 'work-kb: headless Neovim server on ' + $PipeName
-        $s.Save()
+    if (Test-WhatIf) { Report 'env' 'whatif' ($EnvName + ' = ' + $want); return }
+    if (-not $done) { Report 'env' 'skipped' 'declined'; return }
+    $now = Get-UserEnv $EnvName
+    if (-not (Test-SamePath $now $want)) { Report 'env' 'failed' ($EnvName + ' reads back as ' + $now); return }
+    [void]$script:Placed.Add('user environment variable ' + $EnvName + ' = ' + $want + ' (' + $store + '; previous value recorded in ' + $ManifestPath + ')')
+    Report 'env' 'changed' ($EnvName + ' = ' + $want + ' (was ' + $was + ')')
+}
+
+# Neovim's config folder the way Neovim finds it: XDG_CONFIG_HOME, else LOCALAPPDATA; NVIM_APPNAME, else nvim.
+function Get-NvimConfigDir {
+    $app = $env:NVIM_APPNAME
+    if (-not $app) { $app = 'nvim' }
+    if ($env:XDG_CONFIG_HOME) { return (Join-Path $env:XDG_CONFIG_HOME $app) }
+    return (Join-Path $LocalAppData $app)
+}
+
+function Get-NvimVersion([string]$Exe) {
+    $r = Invoke-Bounded $Exe @('--version') $NvimVersionTimeoutMs
+    if ($r.TimedOut) { return @{ Version = $null; Error = 'nvim --version did not finish in ' + ($NvimVersionTimeoutMs / 1000) + ' s' } }
+    $first = @($r.Output | Where-Object { $_ -match 'NVIM v\d+\.\d+' } | Select-Object -First 1)
+    if ($first.Count -eq 0 -or -not ($first[0] -match 'NVIM v(\d+)\.(\d+)\.(\d+)')) { return @{ Version = $null; Error = 'could not read nvim --version' } }
+    return @{ Version = [version]('{0}.{1}.{2}' -f $matches[1], $matches[2], $matches[3]); Error = $null }
+}
+
+function Step-check {
+    $warn = New-Object System.Collections.ArrayList
+    function Show-Hint([string]$Text) { Out-Line ('  ' + $Text) }
+    function Show-Cmd([string]$Text) { Out-Line ('      ' + $Text) }
+
+    # 1. Neovim
+    $nvim = Get-CommandPath 'nvim'
+    if (-not $nvim) {
+        Out-Line '  nvim: not found on PATH'
+        Show-Hint (Get-Msg 'NoNvim')
+        [void]$warn.Add('nvim missing')
+    } elseif (Test-WhatIf) {
+        Out-Line ('  nvim: ' + $nvim)
+        Out-Line ('WHATIF check ' + (Format-Command $nvim @('--version')) + ' (needs >= ' + $MinNvim + ')')
+    } else {
+        $v = Get-NvimVersion $nvim
+        if ($v.Error) {
+            Out-Line ('  nvim: ' + $nvim + ' (' + $v.Error + ')')
+            [void]$warn.Add('nvim version unknown')
+        } elseif ($v.Version -lt $MinNvim) {
+            Out-Line ('  nvim: ' + $nvim + ' v' + $v.Version)
+            Show-Hint (Get-Msg 'OldNvim' $v.Version $MinNvim)
+            [void]$warn.Add('nvim ' + $v.Version + ' < ' + $MinNvim)
+        } else {
+            Out-Line ('  nvim: ' + $nvim + ' v' + $v.Version)
+        }
     }
-    if (Test-WhatIf) { Report 'prestart' 'whatif' $lnk; return }
-    if ($done) { Report 'prestart' 'changed' ($lnk + ' -> ' + $launcher + ' (starts at next logon)') } else { Report 'prestart' 'skipped' 'declined' }
+
+    # 2. a Neovim config that loads work-kb (nvim-config). Read only.
+    $config = Get-NvimConfigDir
+    $spec = Join-Path $config 'lua\plugins\work-kb.lua'
+    $clone = Join-Path (Split-Path -Parent $RepoRoot) 'nvim-config'
+    $legacyTarget = $null
+    if ((Test-Path -LiteralPath $config) -and (Test-ReparsePoint $config)) {
+        $t = Get-LinkTarget $config
+        if ($t -and (Test-SamePath $t (Join-Path $RepoRoot 'nvim'))) { $legacyTarget = $t }
+    }
+    if ($legacyTarget) {
+        Out-Line ('  nvim config: ' + $config + ' -> ' + $legacyTarget + ' (old work-kb junction)')
+        Show-Hint (Get-Msg 'LegacyJunction' $config $legacyTarget)
+        Show-Cmd ('cmd /c rmdir "' + $config + '"')
+        Show-Cmd ('git clone ' + $NvimConfigUrl + ' "' + $clone + '"')
+        Show-Cmd ('pwsh -File "' + $clone + '\scripts\install.ps1"')
+        [void]$warn.Add('old junction at ' + $config)
+    } elseif (Test-Path -LiteralPath $spec -PathType Leaf) {
+        Out-Line ('  nvim config: ' + $config + ' (lua\plugins\work-kb.lua found)')
+    } elseif (Test-Path -LiteralPath $config) {
+        $real = $config
+        if (Test-ReparsePoint $config) { $t = Get-LinkTarget $config; if ($t) { $real = $t } }
+        Out-Line ('  nvim config: ' + $config + ' (no lua\plugins\work-kb.lua)')
+        Show-Hint (Get-Msg 'ConfigNoSpec' $config)
+        Show-Cmd ('git -C "' + $real + '" pull')
+        Show-Cmd 'nvd --restart'
+        [void]$warn.Add('config does not load work-kb')
+    } else {
+        Out-Line ('  nvim config: ' + $config + ' (missing)')
+        Show-Hint (Get-Msg 'NoConfig' $config)
+        Show-Cmd ('git clone ' + $NvimConfigUrl + ' "' + $clone + '"')
+        Show-Cmd ('pwsh -File "' + $clone + '\scripts\install.ps1"')
+        [void]$warn.Add('nvim-config missing')
+    }
+
+    # 3. nvd (nvim-config's daemon client)
+    $nvd = Get-CommandPath 'nvd'
+    if ($nvd) { Out-Line ('  nvd: ' + $nvd) }
+    else {
+        Out-Line '  nvd: not found on PATH'
+        Show-Hint (Get-Msg 'NoNvd')
+        [void]$warn.Add('nvd missing')
+    }
+
+    # 4. WORK_KB_ROOT (the env step may have been skipped)
+    $cur = Get-UserEnv $EnvName
+    if ($cur -and (Test-SamePath $cur $RepoRoot)) { Out-Line ('  ' + $EnvName + ': ' + $cur) }
+    elseif ((Test-WhatIf) -and ($script:Selected -contains 'env')) { Out-Line ('  ' + $EnvName + ': (env step would set it)') }
+    else {
+        $shown = '(not set)'
+        if ($cur) { $shown = $cur }
+        Out-Line ('  ' + $EnvName + ': ' + $shown)
+        Show-Hint (Get-Msg 'EnvNotOurs' $shown)
+        [void]$warn.Add($EnvName + ' not this repository')
+    }
+
+    # 5. leftovers of the old installer (it wrote these; this one never does). Hints only.
+    if ($AppData) {
+        $toml = Join-Path $AppData 'neovide\config.toml'
+        if (Test-Path -LiteralPath $toml -PathType Leaf) {
+            $head = ''
+            try { $head = (Read-Utf8 $toml) } catch { }
+            if ($head.StartsWith($OldConfigMarker)) {
+                Show-Hint (Get-Msg 'LegacyNeovide' $toml)
+                Show-Cmd ('Remove-Item -LiteralPath "' + $toml + '"')
+                [void]$warn.Add('old Neovide config')
+            }
+        }
+    }
+    if ($StartupDir) {
+        $lnk = Join-Path $StartupDir $OldShortcutName
+        if (Test-Path -LiteralPath $lnk) {
+            Show-Hint (Get-Msg 'LegacyShortcut' $lnk)
+            Show-Cmd ('Remove-Item -LiteralPath "' + $lnk + '"')
+            [void]$warn.Add('old logon shortcut')
+        }
+    }
+
+    # 6. kb.py doctor
+    $doctorArgs = @('-X', 'utf8', $KbPy, 'doctor')
+    if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+        if ((Test-WhatIf) -and ($script:Selected -contains 'venv')) { Out-Line ('WHATIF check ' + (Format-Command $VenvPython $doctorArgs) + ' (after the venv step)') }
+        else { Show-Hint (Get-Msg 'NoVenv'); [void]$warn.Add('no .venv') }
+    } elseif (Test-WhatIf) {
+        Out-Line ('WHATIF check ' + (Format-Command $VenvPython $doctorArgs))
+    } else {
+        Out-Line ('  run: ' + (Format-Command $VenvPython $doctorArgs))
+        $r = Invoke-Bounded $VenvPython $doctorArgs $DoctorTimeoutMs
+        foreach ($line in $r.Output) { Out-Line ('    ' + $line) }
+        if ($r.TimedOut) { Out-Line ('    (stopped after ' + ($DoctorTimeoutMs / 1000) + ' s)'); [void]$warn.Add('kb.py doctor timed out') }
+        elseif ($r.Code -ne 0) { Show-Hint (Get-Msg 'DoctorFail'); [void]$warn.Add('kb.py doctor exit ' + $r.Code) }
+    }
+
+    if (Test-WhatIf) { Report 'check' 'whatif' 'read-only checks; nvim --version and kb.py doctor not run'; return }
+    if ($warn.Count -gt 0) { Report 'check' 'warn' ($warn -join '; '); return }
+    Report 'check' 'ok' 'nvim, nvim-config with work-kb, nvd, WORK_KB_ROOT, kb.py doctor'
 }
 
 # ---------------------------------------------------------------- main
@@ -779,14 +649,14 @@ if ($unknown.Count -gt 0) {
     Out-Line ('unknown step(s): ' + ($unknown -join ', ') + '; valid: ' + ($AllSteps -join ', '))
     exit 2
 }
-if (-not $LocalAppData -or -not $AppData) { Out-Line 'LOCALAPPDATA/APPDATA not set'; exit 2 }
+if (-not $LocalAppData) { Out-Line 'LOCALAPPDATA not set'; exit 2 }
 
-$selected = @($AllSteps | Where-Object { ($Only.Count -eq 0 -or $Only -contains $_) -and ($Skip -notcontains $_) })
+$script:Selected = @($AllSteps | Where-Object { ($Only.Count -eq 0 -or $Only -contains $_) -and ($Skip -notcontains $_) })
 Out-Line ('work-kb install: repo ' + $RepoRoot)
-Out-Line ('  LOCALAPPDATA ' + $LocalAppData + ' | APPDATA ' + $AppData + ' | steps ' + ($selected -join ','))
+Out-Line ('  steps ' + ($script:Selected -join ',') + ' | manifest ' + $ManifestPath + ' | user environment: ' + (Get-EnvStoreLabel))
 if (Test-WhatIf) { Out-Line '  -WhatIf: nothing will be changed' }
 
-foreach ($step in $selected) {
+foreach ($step in $script:Selected) {
     try {
         & ('Step-' + $step)
     } catch {
@@ -800,8 +670,18 @@ Out-Line ''
 Out-Line 'Summary'
 foreach ($r in $script:Results) {
     if ($r.Status -eq 'failed') { $mark = $cross } elseif ($r.Status -eq 'ok' -or $r.Status -eq 'changed') { $mark = $check } else { $mark = '-' }
-    Out-Line ('  {0} {1,-9} {2,-8} {3}' -f $mark, $r.Step, $r.Status, $r.Detail)
+    Out-Line ('  {0} {1,-6} {2,-8} {3}' -f $mark, $r.Step, $r.Status, $r.Detail)
 }
+Out-Line ''
+Out-Line (Get-Msg 'PlacedTitle')
+if ($script:Placed.Count -eq 0) { Out-Line (Get-Msg 'PlacedNone') }
+foreach ($p in $script:Placed) { Out-Line ('  ' + $p) }
+Out-Line ''
+Out-Line (Get-Msg 'NextTitle')
+Out-Line ('  ' + (Get-Msg 'Next1'))
+Out-Line ('  ' + (Get-Msg 'Next2'))
+Out-Line ('  ' + (Get-Msg 'Next3' ('cd "' + $RepoRoot + '"; .venv\Scripts\python.exe scripts\kb.py init')))
+Out-Line ('  ' + (Get-Msg 'Next4'))
 $failedCount = @($script:Results | Where-Object { $_.Status -eq 'failed' }).Count
 if ($failedCount -gt 0) { exit 1 }
 exit 0

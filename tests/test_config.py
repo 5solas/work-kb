@@ -112,7 +112,7 @@ def test_parse_env_overrides():
         "KB_AGENT": "1",
         "KB_ROOT": "C:/x",
         "KB_REQUIRE_LIVE": "1",
-        "KB_SKIP_EMACS": "1",
+        "KB_SKIP_NVIM": "1",
         "KB_FAKE_NOW": "2026-11-05T09:00:00",
         "KB_FAKE_KEYRING_FILE": "x.json",
         "KB_INIT_JIRA_URL": "http://127.0.0.1:1",

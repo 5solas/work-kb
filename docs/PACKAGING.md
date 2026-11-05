@@ -84,7 +84,7 @@ PyPI에 PyYAML의 cp315 wheel이 없다. 3.15 venv에서는 `kb.py`의 사전 �
 `tests/`가 빠지므로 복사본에서 `kb.py demo`는 종료 4다(집 전용).
 
 복사가 끝나면 파일 수·크기(최상위 폴더별)를 보여 주고, 제외 대상이 하나도 없는지와 필수 파일
-(`scripts/kb.py`, `config.yaml`, `requirements.txt`, `AGENTS.md`, `emacs/work-kb.el` 등)이 있는지를
+(`scripts/kb.py`, `config.yaml`, `requirements.txt`, `AGENTS.md`, `install.ps1` 등)이 있는지를
 별도 목록으로 다시 확인한다. 문제가 있으면 `✗` 줄과 함께 종료 1이다.
 
 ## 4. 테스트

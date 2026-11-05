@@ -1,4 +1,4 @@
-# Save the clipboard image as PNG. ASCII only; the caller (Emacs) owns user messages.
+# Save the clipboard image as PNG. ASCII only; the caller (Neovim) owns user messages.
 # Exit codes: 0 ok (or image present with -Probe), 2 no image on clipboard, 3 error.
 # -FromFile <image> is a test-only seam: it loads the bitmap from that file instead of
 # the clipboard (the clipboard is never touched) and then takes the same save path.

@@ -37,9 +37,9 @@
 
 ### `py -3`이 동작하지 않는다 / 잘못된 Python
 
-- 증상: `py -3`이 오류, 또는 Emacs `g`·스케줄이 Python을 못 찾는다. Microsoft Store 별칭(`WindowsApps\python.exe`)이 열린다.
+- 증상: `py -3`이 오류, 또는 Neovim `g`·스케줄이 Python을 못 찾는다. Microsoft Store 별칭(`WindowsApps\python.exe`)이 열린다.
 - 원인: `py` 런처가 설치돼 있지 않거나 Store 별칭이 PATH를 가린다.
-- 명령: `.venv`를 만들어 `.venv\Scripts\python.exe`를 쓴다(DEPLOY 2단계). Emacs는 `.venv`가 있으면 자동으로 쓰고, 아니면 `(setq work-kb-python '("C:/…/python.exe"))`로 지정한다.
+- 명령: `.venv`를 만들어 `.venv\Scripts\python.exe`를 쓴다(DEPLOY 2단계). Neovim 플러그인은 `.venv`가 있으면 자동으로 쓰고, 아니면 nvim-config의 `lua\plugins\work-kb.lua`에 있는 `opts`에 `python = { "C:/…/python.exe" }`를 더해 지정한다. Neovim 사용법: `docs/USER-GUIDE.md`.
 
 ### Python 3.15에서 PyYAML 설치 실패 / `kb.py`가 패키지 없음을 알림 (종료 4)
 
@@ -52,13 +52,13 @@
 
 - 증상: 터미널 출력이 깨지거나 파일을 읽다 `UnicodeDecodeError`.
 - 원인: 콘솔·편집기가 cp949(기본 ANSI)로 읽고 쓴다. 이 저장소의 파일은 모두 UTF-8이다.
-- 명령: `setx PYTHONUTF8 1` 후 새 터미널. 콘솔은 `chcp 65001`. 메모장 대신 Emacs·Obsidian으로 편집(메모장 저장은 BOM·cp949를 만들 수 있다). Emacs는 `work-kb.el`이 코드 루트·볼트 아래 `.md`를 UTF-8로 읽게 등록한다 — 경로가 다르면 `work-kb-root`/`work-kb-vault`를 확인한다. init 파일에서 `(setq work-kb-vault …)`는 `(load …work-kb.el)`보다 **먼저** 두고, load 뒤에 바꿀 때는 `setopt`(또는 `customize-set-variable`)를 쓴다(`docs/README.md` 6절).
+- 명령: `setx PYTHONUTF8 1` 후 새 터미널. 콘솔은 `chcp 65001`. 메모장 대신 Neovim·Obsidian으로 편집(메모장 저장은 BOM·cp949를 만들 수 있다). Neovim/Neovide 사용법: `docs/USER-GUIDE.md`.
 
 ### 한글 경로에서 도구가 실패
 
 - 증상: 경로에 한글·공백이 있으면 실패하는 외부 도구가 있다.
 - 원인: 외부 프로그램이 인수를 ANSI로 받는 경우. `kb.py`는 한글 경로를 처리하지만 `doctor`는 `- 볼트 경로` 참고 줄로 알린다.
-- 명령: `python scripts/kb.py doctor`. 문제가 되는 도구만 ASCII 경로로 우회한다. (Emacs 호출은 인수를 stdin JSON으로 넘겨 한글 인수에 안전하다.)
+- 명령: `python scripts/kb.py doctor`. 문제가 되는 도구만 ASCII 경로로 우회한다. (Neovim 호출은 인수를 stdin JSON으로 넘겨 한글 인수에 안전하다.)
 
 ## 클립보드·PowerShell
 
@@ -74,12 +74,34 @@
 - 원인: 클립보드에 텍스트·파일 복사본만 있다(파일 탐색기의 복사는 이미지가 아니다).
 - 명령: 캡처 도구로 영역을 클립보드에 복사한 뒤 `C`. 파일이면 `F`.
 
+## Neovim
+
+### `<leader>k` 키나 `:WorkKb`가 없다
+
+- 증상: Space k c를 눌러도 반응이 없고 `:WorkKb`가 "Not an editor command"로 나온다.
+- 원인: nvim-config는 사용자 환경 변수 `WORK_KB_ROOT`가 없거나 `<값>\nvim\lua\work-kb\init.lua`가 없으면 work-kb를 아예 불러오지 않는다. 데몬은 시작할 때 환경이 고정되므로, 변수를 정하기 전에 뜬 데몬에는 값이 없다.
+- 명령: 새 터미널에서 `echo $env:WORK_KB_ROOT`로 저장소 폴더가 나오는지 본다. 비었으면 저장소 폴더에서 `install.ps1`(`-Only env`)을 실행한다. 그다음 `nvd --restart`(수정한 버퍼가 있으면 먼저 `:wa`).
+
+### 상태를 한 번에 보고 싶다
+
+- 명령: Neovim에서 `:checkhealth work-kb`. 코드 루트, 볼트, 접두 키, Python, 상주 서버(`kb.py serve`) 상태가 나온다. Neovim 0.12 미만이면 오류로 표시된다.
+
+### `nvd`가 "daemon is not responding"
+
+- 원인: 데몬이 질문(스왑 파일 등)에서 입력을 기다린다. 개발 중에는 gitsigns 플러그인이 `git`을 시작하는 순간 헤드리스 Neovim이 멈춘 적도 있다(원인 미확인).
+- 명령: `nvd`로 창을 열어 질문에 답한다. 안 되면 `nvd --stop --force`(저장하지 않은 수정은 사라진다) 후 `nvd`. 자세한 설명은 nvim-config의 `docs\USER_GUIDE.md` 7절.
+
+### Python을 찾지 못한다 (`Python을 찾지 못했습니다`)
+
+- 원인: 저장소 폴더에 `.venv`가 없고 PATH의 `python`도 쓸 수 없다.
+- 명령: 저장소 폴더에서 `install.ps1`(`-Only venv`)로 `.venv`를 만든다. 위 "`py -3`이 동작하지 않는다" 항목도 본다.
+
 ## 잠금·캐시
 
 ### 잠금 중 (종료 6, "다른 프로세스가 잡고 있음")
 
 - 증상: `link`·`sync`·`act`가 종료 6.
-- 원인: 같은 볼트에서 다른 명령(스케줄 작업, Emacs 호출)이 실행 중이거나, Obsidian·백신·동기화 프로그램이 파일을 잡고 있다.
+- 원인: 같은 볼트에서 다른 명령(스케줄 작업, Neovim 호출)이 실행 중이거나, Obsidian·백신·동기화 프로그램이 파일을 잡고 있다.
 - 명령: 잠시(수십 초) 뒤 다시 실행. 계속되면 `python scripts/kb.py status`로 상태를 보고 실행 중인 `pythonw.exe`/`python.exe`를 작업 관리자에서 확인한다. 스케줄 작업은 겹치면 새 실행을 건너뛴다(IgnoreNew).
 
 ### 캐시 잠김 (`jira/.cache.sqlite` 사용 중)

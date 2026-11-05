@@ -48,7 +48,7 @@ FORBIDDEN_GLOBS = (
 )  # fmt: skip
 REQUIRED = (
     "scripts/kb.py", "scripts/lib/core.py", "config.yaml", "config.local.example.yaml",
-    "requirements.txt", "AGENTS.md", "emacs/work-kb.el", "obsidian/setup.md", "prompts",
+    "requirements.txt", "AGENTS.md", "install.ps1", "obsidian/setup.md", "prompts",
 )  # fmt: skip
 
 

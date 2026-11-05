@@ -1,5 +1,5 @@
--- j: Jira 메뉴 (ERT work-kb-test-jira-* 17개). open.lua는 다른 작업이 쓰는 중이라
--- package.loaded["work-kb.open"]에 가짜를 넣는다 (thing_at_point·link_key는 Emacs 규칙을 줄여 옮김).
+-- j: Jira 메뉴 (ERT work-kb-test-jira-* 17개). package.loaded["work-kb.open"]에 부분 가짜를 넣는다:
+-- 커서 위치 읽기는 실제 open.lua, 파일 열기(open_key·open_at_point)만 기록.
 local H = require("helpers")
 
 local KEY = "[A-Z][A-Z0-9_]+%-[0-9]+"
@@ -20,42 +20,12 @@ local function key_char(b)
   return b ~= nil and string.char(b):match("[A-Za-z0-9_%-]") ~= nil
 end
 
----가짜 open 모듈. thing_at_point는 현재 줄·커서(바이트 열)로 링크 → 키 → @이름을 찾는다.
+---open 모듈의 부분 가짜: 커서 위치 읽기(thing_at_point·link_key·key_on_line …)는 실제 open.lua를 쓰고,
+---파일을 여는 open_key·open_at_point만 기록으로 바꾼다.
 local function stub_open()
   local s = { opened = {}, at_point = 0 }
-  local function link_key(target)
-    local name = trim(target):gsub("^[jJ][iI][rR][aA]/", ""):gsub("%.[mM][dD]$", "")
-    return name:match("^" .. KEY .. "$") and name or nil
-  end
-  local function thing_at_point()
-    local line = vim.api.nvim_get_current_line()
-    local col = vim.api.nvim_win_get_cursor(0)[2]
-    for s0, inner, e0 in line:gmatch("()%[%[([^%]]-)%]%]()") do
-      local target = inner:match("^([^|#]+)")
-      if target and s0 - 1 <= col and col <= e0 - 1 then
-        target = trim(target)
-        if target:match("^" .. KEY .. "$") then
-          return { kind = "key", value = target }
-        end
-        return { kind = "link", value = target }
-      end
-    end
-    local init = 1
-    while true do
-      local s1, e1 = line:find(KEY, init)
-      if not s1 then
-        break
-      end
-      if s1 - 1 <= col and col <= e1 and not key_char(line:byte(s1 - 1)) and not key_char(line:byte(e1 + 1)) then
-        return { kind = "key", value = line:sub(s1, e1) }
-      end
-      init = e1 + 1
-    end
-    return nil
-  end
-  s.mod = {
-    thing_at_point = thing_at_point,
-    link_key = link_key,
+  local real = package.loaded["work-kb.open"] or require("work-kb.open")
+  s.mod = setmetatable({
     open_key = function(key)
       table.insert(s.opened, key)
       return "opened"
@@ -63,7 +33,7 @@ local function stub_open()
     open_at_point = function()
       s.at_point = s.at_point + 1
     end,
-  }
+  }, { __index = real })
   H.patch(package.loaded, "work-kb.open", s.mod)
   return s
 end
@@ -264,7 +234,7 @@ describe("jira", function()
     end, "work-kb: 알 수 없는 Jira 작업: 없음")
   end)
 
-  it("메뉴 키 읽기: 화면도 미리 넣은 키도 없으면 읽지 않고 사용자 오류 (헤드리스가 끝나지 않게)", function()
+  it("메뉴 키 읽기: 화면이 없으면 읽지 않고 사용자 오류 (헤드리스가 끝나지 않게)", function()
     fresh()
     local j = jira()
     H.eq(#vim.api.nvim_list_uis(), 0, "이 시험은 헤드리스 전용")
@@ -272,6 +242,10 @@ describe("jira", function()
       j._read_key()
     end, "work-kb: 화면이 없어 Jira 메뉴 키를 읽을 수 없습니다")
     H.ok(require("work-kb.ui").is_user_error(err))
+    -- 화면이 있으면 (이음매) 키 하나를 읽는다
+    H.patch(require("work-kb.ui"), "_can_prompt", function()
+      return true
+    end)
     vim.api.nvim_feedkeys("S", "t", false)
     H.eq(j._read_key(), "S")
   end)

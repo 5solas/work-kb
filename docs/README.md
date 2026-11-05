@@ -1,7 +1,7 @@
 # work-kb
 
 업무 메모·지식·Jira 일감을 **평범한 마크다운 폴더 하나**에서 다루는 도구 묶음이다.
-Obsidian은 열람 창, Emacs는 입력·명령 창, 폴더는 그대로 마크다운이다.
+Obsidian은 열람 창, Neovim(Neovide)은 입력·명령 창, 폴더는 그대로 마크다운이다.
 
 - 설치·이식: `docs/DEPLOY.md` · 스케줄: `docs/SCHEDULING.md` · 문제 해결: `docs/TROUBLESHOOTING.md`
 - 설계 결정과 사용자 확인 대기 목록: `docs/DECISIONS.md` · 실 모델 검증 기록: `docs/LIVE.md`
@@ -36,7 +36,7 @@ work-kb/
 ├── .state/                       원장·동기화 시각·로그 (git 제외)
 ├── prompts/                      LLM 프롬프트
 ├── scripts/                      kb.py (단일 진입점)와 모듈, lib/
-├── emacs/                        work-kb.el, capture.ahk
+├── nvim/                         work-kb Neovim 플러그인, capture.ahk (일반 설정은 nvim-config 저장소)
 ├── obsidian/setup.md             Obsidian 설정 안내
 ├── examples/sample-vault/        허구 샘플 볼트
 └── docs/                         이 문서들
@@ -135,99 +135,11 @@ python scripts/kb.py act list --all
 쓰기·설정 명령(`init` `act`의 쓰기 하위 명령 `proposals accept` `push` `schedule` `wheels` `demo`)은 종료 7로 거부된다.
 에이전트는 `kb.py status`로 마지막 동기화, 대기 outbox, 미처리 제안·이미지, 프로필별 탐지 결과, environment를 먼저 본다.
 
-## 6. Emacs
+## 6. Neovim
 
-Emacs 30 이상(Windows). 외부 패키지는 필수가 아니다(`transient` 내장, `markdown-mode`·`consult`는 있으면 쓴다). 연결 정보(주소·토큰)는 Emacs가 모른다.
-
-### 로드
-
-```elisp
-(setq work-kb-root "D:/work/work-kb")        ; 코드 루트 (scripts/kb.py가 있는 곳)
-;; (setq work-kb-vault "D:/notes/work-kb")   ; 볼트가 따로 있을 때. nil이면 코드 루트
-;; (setq work-kb-python '("py" "-3"))        ; nil이면 자동
-(load "D:/work/work-kb/emacs/work-kb.el")
-```
-
-- **`setq`는 `load`보다 먼저** 둔다. `work-kb.el`은 코드 루트·볼트 아래 `.md`를 UTF-8로 읽도록 등록하는데,
-  `setq`는 변수의 설정 함수(`:set`)를 거치지 않아 load 뒤에 바꾼 경로가 등록에서 빠질 수 있다. load 뒤에 값을 바꿀 때는
-  `setq` 대신 `(setopt work-kb-vault "D:/notes/work-kb")`(또는 `customize-set-variable`)를 쓴다. 이쪽은 바꿀 때 등록도 다시 한다.
-- `work-kb-root`: 기본은 `work-kb.el`의 상위 폴더.
-- `work-kb-vault`: 기본 nil(코드 루트와 같음).
-- `work-kb-python`: nil이면 `<root>/.venv/Scripts/python.exe` → PATH의 `python`(WindowsApps 별칭 제외) → `py -3` 순. 항상 `-X utf8`로 실행한다. 문자열 하나 또는 목록.
-- `work-kb-prefix-key`: 접두 키, 기본 `"C-c k"`.
-
-### 접두 키 바꾸기 (두 방법)
-
-1. 변수 한 줄을 바꾸고 파일을 다시 load한다.
-
-   ```elisp
-   (setq work-kb-prefix-key "C-c c")
-   (load "D:/work/work-kb/emacs/work-kb.el")
-   ```
-
-   (`M-x work-kb-rebind-prefix`로 대화형으로 바꿀 수도 있다.)
-2. 키맵을 직접 붙인다.
-
-   ```elisp
-   (keymap-set global-map "<f8>" work-kb-command-map)
-   ```
-
-   `<f8>`이 다른 용도로 쓰이는지 `C-h k`로 먼저 확인한다.
-
-### 키 (접두 키 다음)
-
-| 키 | 명령 | 동작 |
-|---|---|---|
-| `c` | `work-kb-capture` | 캡처 버퍼. `C-c C-c`로 오늘 `## 기록` 끝에 저장, `C-c C-k` 취소 |
-| `C` | `work-kb-capture-clipboard-image` | 클립보드 이미지를 `raw/assets/`에 저장하고 `![[...]]` 줄 캡처 |
-| `F` | `work-kb-capture-image-file` | 파일을 골라 `raw/assets/`로 복사하고 `![[...]]` 줄 캡처 |
-| `i` | `work-kb-capture-inbox` | 제목을 받아 `inbox/` 파일 |
-| `t` | `work-kb-today` | 오늘 daily 열기 |
-| `s` | `work-kb-search` | 검색 |
-| `o` | `work-kb-open-at-point` | `KEY-123`·`[[...]]`·`@이름` 열기 (캐시가 없으면 `sync --key`) |
-| `l` | `work-kb-link` | link 실행 후 요약 |
-| `j` | `work-kb-jira` | Jira transient (아래) |
-| `g` | `work-kb-ingest` | ingest 다음 compile. `C-u g`는 둘 다 `--dry-run` |
-| `a` | `work-kb-proposals` | `wiki/_proposals.md`를 열고 번호 또는 all을 받아 확인 후 `proposals accept` |
-| `?` | `work-kb-status` | `kb.py status` 버퍼 |
-
-### `j` Jira transient
-
-| 키 | 동작 |
-|---|---|
-| `v` | 일감 보기 |
-| `c` | 댓글 (기본 현재 줄) |
-| `t` | 전환 (`이름 → 대상 (id)` 목록에서 선택) |
-| `a` | 담당 지정 |
-| `w` | 워크로그 (`1h30m` 형태) |
-| `n` | 새 일감 |
-| `p` | 현재 줄 승격 (daily 줄 → 일감) |
-| `q` | 라이브 JQL (출력만) |
-| `S` | 동기화 |
-| `f` | outbox 다시 보내기 (flush) |
-| `d` | 완료 전환 제안 |
-
-쓰기는 모두 `kb.py act`(outbox)로만 간다. 전환·생성·승격은 `y-or-n-p`로 확인한 뒤 `--yes`를 붙여 보낸다.
-외부 실행 결과는 `*work-kb*` 버퍼에 나온다. Python 호출은 명령줄에 ASCII만 쓰고 실제 인수는 stdin의 UTF-8 JSON으로 넘긴다(한글 인수 안전).
-
-### 서버 모드와 capture.ahk
-
-Emacs 밖에서 전역 단축키로 캡처하려면 Emacs 서버가 떠 있어야 한다.
-
-```elisp
-(require 'server)
-(unless (server-running-p) (server-start))
-```
-
-`emacs/capture.ahk`(AutoHotkey v2)가 `emacsclient -n -c -e "(work-kb-capture)"`로 새 프레임에 캡처 버퍼를 연다.
-
-| 단축키 | 동작 |
-|---|---|
-| Ctrl+Alt+Shift+C | `(work-kb-capture)` |
-| Ctrl+Alt+Shift+V | `(work-kb-capture-clipboard-image)` |
-
-`emacsclient.exe` 경로는 파일 맨 위에서 바꾼다. Win+Shift+C는 PowerToys가 쓰는 일이 있어 기본으로 쓰지 않았다.
-AutoHotkey가 이 구축 PC에 없어 **스크립트는 실행해 보지 못했다**. 사용자 확인 대기 항목이다.
+Neovim 쪽 일반 설정(Neovim, Neovide, 폰트, LSP, `nvd` 데몬)은 이 저장소에 없다. 별도 저장소 nvim-config가 맡고, 이 저장소의 `nvim/` 폴더는 work-kb 플러그인 하나다.
+`install.ps1`이 사용자 환경 변수 `WORK_KB_ROOT`를 이 저장소 폴더로 정하면 nvim-config가 `<WORK_KB_ROOT>\nvim`을 불러오고 접두 키 `<leader>k`로 키와 `:WorkKb`가 생긴다.
+설치, 파일·폴더 위치, 키 표, 사용법: `docs/USER-GUIDE.md`
 
 ### 클립보드 요구 사항
 
@@ -282,4 +194,4 @@ flush 옵션:
 ## 11. 점검 `kb.py doctor`
 
 한 줄에 하나씩: `✓ 이름: 설명`(정상), `✗ 이름: 문제 → 해결 방법`(문제, 종료 1; 회사 환경의 공개 LLM 호스트면 종료 5), `- 이름: 참고`(선택·안내, 종료 코드 무관).
-자주 보는 `-` 줄: 비활성 서비스, keyring 백엔드, Emacs·Obsidian 경로, 볼트 경로의 한글, 시간대, `/models` 없음. 해결은 `docs/TROUBLESHOOTING.md`.
+자주 보는 `-` 줄: 비활성 서비스, keyring 백엔드, Neovim·Neovide·Obsidian 경로, 볼트 경로의 한글, 시간대, `/models` 없음. 해결은 `docs/TROUBLESHOOTING.md`.

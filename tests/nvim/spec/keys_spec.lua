@@ -198,6 +198,74 @@ describe("keys", function()
     H.eq(startup.plugin, 1)
     H.eq(startup.command, true)
     H.eq(startup.loaded, {})
+    H.eq(startup.nargs, "*", "plugin/work-kb.lua: :WorkKb jira <작업>")
+    H.eq(startup.range, ".", "plugin/work-kb.lua: :'<,'>WorkKb capture")
+  end)
+
+  it(":WorkKb 범위 (:'<,'>WorkKb capture)와 :WorkKb jira <작업>, 완성", function()
+    local saved = package.loaded["work-kb.capture"]
+    local calls = {}
+    package.loaded["work-kb.capture"] = {
+      open = function(...)
+        table.insert(calls, { "open", select("#", ...), ... })
+      end,
+      inbox = function(...)
+        table.insert(calls, { "inbox", select("#", ...), ... })
+      end,
+      capture = function(...)
+        table.insert(calls, { "capture", select("#", ...), ... })
+      end,
+    }
+    local jira = require("work-kb.jira")
+    H.patch(jira, "run", function(name)
+      table.insert(calls, { "jira", name })
+    end)
+    local echoed = {}
+    local buf = vim.api.nvim_create_buf(false, true)
+    local ok, err = pcall(function()
+      require("work-kb").setup({ root = H.repo, prefix = false, server = { enable = false } })
+      local def = vim.api.nvim_get_commands({})["WorkKb"]
+      H.eq({ def.nargs, def.range }, { "*", "." }, "setup이 다시 정의한 :WorkKb")
+      vim.api.nvim_set_current_buf(buf)
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "앞 가나다 😀 뒤", "둘째 줄", "셋째 줄" })
+      -- 글자 단위 선택 뒤 :'<,'>WorkKb capture → 선택 글 그대로
+      vim.api.nvim_win_set_cursor(0, { 1, #"앞 " })
+      vim.api.nvim_feedkeys(vim.keycode("v4l<Esc>"), "x", false)
+      vim.cmd("'<,'>WorkKb capture")
+      H.eq(calls[1], { "open", 1, "가나다 😀" })
+      -- 선택과 다른 줄 범위 → 그 줄 전체
+      vim.cmd("2,3WorkKb capture-inbox")
+      H.eq(calls[2], { "inbox", 1, "둘째 줄\n셋째 줄" })
+      -- 범위 없음 → 보통 키와 같다
+      vim.cmd("WorkKb capture")
+      H.eq(calls[3], { "capture", 0 })
+      -- Jira 작업 바로 부르기
+      vim.cmd("WorkKb jira check-done")
+      H.eq(calls[4], { "jira", "check-done" })
+      H.eq(#calls, 4)
+      -- 인수가 맞지 않으면 아무것도 부르지 않고 오류 문구
+      H.patch(vim.api, "nvim_echo", function(chunks)
+        table.insert(echoed, chunks[1])
+      end)
+      vim.cmd("WorkKb status 더")
+      vim.cmd("WorkKb jira view 더")
+      H.eq(#calls, 4)
+      H.eq(#echoed, 2)
+      H.eq(echoed[1][2], "ErrorMsg")
+      -- 완성
+      local kb = require("work-kb")
+      H.eq(kb.complete("ji", "WorkKb ji"), { "jira" })
+      H.eq(kb.complete("ch", "WorkKb jira ch"), { "check-done" })
+      H.eq(kb.complete("", "'<,'>WorkKb jira "), {
+        "view", "comment", "transition", "assign", "worklog", "create", "promote", "query", "sync", "flush", "check-done",
+      })
+      H.eq(kb.complete("", "WorkKb status "), {})
+      H.eq(vim.fn.getcompletion("WorkKb jira tr", "cmdline"), { "transition" })
+    end)
+    package.loaded["work-kb.capture"] = saved
+    cleanup()
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    H.ok(ok, tostring(err))
   end)
 
   it("비주얼 모드 c·i: 선택 글로 capture.open·capture.inbox (Emacs region 미리 넣기)", function()

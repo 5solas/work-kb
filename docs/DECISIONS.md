@@ -977,3 +977,14 @@ Conventions:
   - 조치: Add a fixture-spec assertion to `test_repo_tree`, state the `live` marker's exemption, and add the Phase 5 caller cases to the guard test.
 - [low] Section 0 limits: unverifiable floors and AHK version
   - 조치: Add these to the unverified list and to the report. Declare `#Requires AutoHotkey v2.0` with a user-run pending item. State that clip tests save and restore the clipboard or use only the no-image path through a seam.
+
+## 6. Neovim 포팅 (nvim 브랜치, 2026-11-06)
+
+1. 브랜치 분리: `nvim` 브랜치가 Neovim 판이고 `main`은 Emacs 판을 유지한다. `nvim`에서는 Emacs 파일과 ERT 시험을 지웠다. 이력은 git과 이 문서에 남는다. 두 편집기가 한 저장소를 쓰되 서로의 파일을 어지럽히지 않기 위해서다.
+2. 상주 도우미 `kb.py serve`: 한 번 실행 방식의 `kb.py`는 명령당 170~235 ms가 든다(빈 Python은 42 ms). 키를 누를 때마다 이 시간을 치르지 않도록 오래 사는 도우미를 두고 표준 입출력으로 JSON을 한 줄씩 주고받는다. 도우미를 쓸 수 없으면 한 번 실행 방식으로 되돌아간다.
+3. 접두 키 `<leader>k`: 사용자의 선택이다.
+4. 자체 일반 설정의 철회: 처음에는 이 저장소에 일반 Neovim 설정(lazy.nvim, 14개 고정 플러그인, 자체 Neovide 설정, 자체 미리 띄우는 서버)을 만들었으나 2026-11-06에 사용자 요청으로 철회했다. 사용자의 `nvim-config` 저장소를 기반으로 삼고 work-kb는 그 위의 플러그인 하나로 `WORK_KB_ROOT`를 통해 연결한다. 이유: PC당 Neovim 설정은 하나여야 하고, 폰트·LSP·데몬을 두 벌로 맞춰 가며 유지하고 싶지 않다.
+5. 폰트: 폭을 측정했다(advance width와 Neovide 화면 캡처). 한글이 라틴 2칸이어야 격자가 맞고, Neovide는 대체 폰트를 확대·축소하지 않는다. JetBrains Mono(0.6 em)에 Sarasa(한글 1.0 em)를 대체로 쓰면 한글이 벌어져 보인다. Sarasa Fixed K와 Monoplex KR Nerd Font는 모두 격자를 지킨다. 지금 폰트는 nvim-config의 설정(Monoplex KR Nerd Font, 대체 Sarasa Fixed K)이고 work-kb는 폰트를 정하지 않는다.
+6. 설치 스크립트의 범위: `install.ps1`은 `.venv`, `WORK_KB_ROOT`, 점검만 한다. Neovim 설정 폴더에는 아무것도 쓰지 않는다. 일반 설정은 nvim-config 소유라 덮어쓰면 두 저장소가 서로를 망가뜨린다.
+7. 시험 구동기: Neovim 시험은 `tests/nvim_proc.py`(작업 객체, 프로세스 트리 종료, 시간 제한이 있는 읽기)로 시작한다. 전체 실행이 5시간 멈춘 일이 있었다. 시간 초과가 scoop 래퍼만 죽였고 살아남은 손자 프로세스가 출력 파이프를 쥐고 있었다.
+8. `capture.ahk`: 자체 서버가 아니라 nvim-config 데몬(`nvd`)을 구동한다. AutoHotkey가 없는 PC에서 썼으므로 실행해 보지 못했다(미확인).

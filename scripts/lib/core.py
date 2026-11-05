@@ -102,7 +102,7 @@ def setup_stdio() -> None:
 
 
 def read_argv_stdin() -> list[str]:
-    """stdin에서 UTF-8 JSON 문자열 배열을 읽어 argv로 돌려준다(Emacs 연동용)."""
+    """stdin에서 UTF-8 JSON 문자열 배열을 읽어 argv로 돌려준다(Neovim 연동용)."""
     raw = sys.stdin.buffer.read()
     try:
         data = json.loads(raw.decode("utf-8"))
@@ -478,7 +478,7 @@ _LINK_UNSAFE = re.compile(r"[\[\]#^|]")
 def link_safe_name(name: str, max_len: int = 80) -> str:
     """위키링크 `[[...]]` 안에 들어갈 파일명. safe_name 뒤에 `[ ] # ^ |`를 `-`로 바꾼다.
 
-    Obsidian은 이 문자들을 링크 문법(제목·블록·별칭)으로 읽는다. Emacs 쪽도 같은 규칙을 따로 구현한다.
+    Obsidian은 이 문자들을 링크 문법(제목·블록·별칭)으로 읽는다. Neovim 쪽도 같은 규칙을 따로 구현한다.
     """
     return _LINK_UNSAFE.sub("-", safe_name(name, max_len))
 

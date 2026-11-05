@@ -97,7 +97,7 @@ def iter_files(
 
 
 def scan_file(rel: str, data: bytes, terms: list[str]) -> Iterator[Hit]:
-    # 줄 번호는 편집기(Emacs grep 버퍼)와 맞게 `\n`만으로 센다. str.splitlines는 \x0c· 에서도 끊는다.
+    # 줄 번호는 편집기(Neovim quickfix)와 맞게 `\n`만으로 센다. str.splitlines는 \x0c· 에서도 끊는다.
     for lineno, raw in enumerate(notes.decode(data).split("\n"), start=1):
         line = raw.rstrip("\r")
         if matches(line, terms):

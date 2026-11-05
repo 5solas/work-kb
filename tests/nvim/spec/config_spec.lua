@@ -7,9 +7,11 @@ local H = require("helpers")
 local function junction_tree(opts)
   local base = H.make_vault("정션 시험")
   local repo = base .. "/한글 저장소"
-  local plugin = repo .. "/nvim/dev/work-kb/lua/work-kb"
+  -- 플러그인 자리: OPTS.layout ("nvim/dev/work-kb" 또는 "nvim"), 기본은 지금 저장소의 자리
+  local layout = opts.layout or H.PLUGIN_REL
+  local plugin = repo .. "/" .. layout .. "/lua/work-kb"
   H.mkdir_p(plugin)
-  H.copy_file(H.repo .. "/nvim/dev/work-kb/lua/work-kb/config.lua", plugin .. "/config.lua")
+  H.copy_file(H.plugin .. "/lua/work-kb/config.lua", plugin .. "/config.lua")
   if opts.kb then
     H.write_bytes(repo .. "/scripts/kb.py", "# 시험용\n")
   end
@@ -21,7 +23,8 @@ local function junction_tree(opts)
   H.eq(result.code, 0, "mklink /J 실패: " .. tostring(result.stdout) .. tostring(result.stderr))
   local lst = vim.uv.fs_lstat(link)
   H.ok(lst and lst.type == "link", "정션이 아님: " .. vim.inspect(lst))
-  local via = link .. "/dev/work-kb/lua/work-kb/config.lua"
+  local below = layout:gsub("^nvim/?", "")
+  local via = link .. (below ~= "" and ("/" .. below) or "") .. "/lua/work-kb/config.lua"
   H.ok(H.exists(via), "정션을 거쳐 config.lua가 보이지 않음")
   return {
     base = base,
@@ -35,6 +38,9 @@ local function junction_tree(opts)
     end,
   }
 end
+
+-- 플러그인이 놓일 수 있는 두 자리 (저장소 기준). 지금 자리(H.PLUGIN_REL)는 그중 하나다.
+local LAYOUTS = { "nvim/dev/work-kb", "nvim" }
 
 describe("config", function()
   it("코드 루트가 없으면 사용자 오류 (Emacs %S 꼴)", function()
@@ -87,8 +93,9 @@ describe("config", function()
     H.ok(ok, tostring(err))
   end)
 
-  it("정션으로 닿은 플러그인: 기본 루트는 첫 root() 때 실제 저장소 경로로 (setup은 I/O 없음)", function()
-    local t = junction_tree({ kb = true })
+  for _, layout in ipairs(LAYOUTS) do
+  it("정션으로 닿은 플러그인: 기본 루트는 첫 root() 때 실제 저장소 경로로 (setup은 I/O 없음) — " .. layout, function()
+    local t = junction_tree({ kb = true, layout = layout })
     local ok, err = pcall(function()
       local cfg = dofile(t.via)
       -- 문자열만으로 정한 값은 정션의 부모 (...\AppData\Local꼴): 이것을 쓰면 안 된다.
@@ -126,8 +133,8 @@ describe("config", function()
     H.ok(ok, tostring(err))
   end)
 
-  it("기본 루트 아래 scripts/kb.py가 없으면 setup()의 root를 말하는 사용자 오류", function()
-    local t = junction_tree({ kb = false })
+  it("기본 루트 아래 scripts/kb.py가 없으면 setup()의 root를 말하는 사용자 오류 — " .. layout, function()
+    local t = junction_tree({ kb = false, layout = layout })
     local ok, err = pcall(function()
       local cfg = dofile(t.via)
       cfg.setup({})
@@ -144,6 +151,31 @@ describe("config", function()
     end)
     t.cleanup()
     H.ok(ok, tostring(err))
+  end)
+  end
+
+  it("두 플러그인 자리에서 루트를 꺼낸다: 문자열 꼴과 위로 올라가며 scripts/kb.py 찾기", function()
+    local config = require("work-kb.config")
+    H.eq(config._root_from_path("D:\\저장소 A\\nvim\\dev\\work-kb\\lua\\work-kb\\config.lua"), "D:/저장소 A")
+    H.eq(config._root_from_path("D:/저장소 A/nvim/lua/work-kb/config.lua"), "D:/저장소 A")
+    H.eq(config._root_from_path("D:/저장소 A/lua/work-kb/config.lua"), nil)
+    for _, layout in ipairs(LAYOUTS) do
+      local base = H.make_vault("자리 시험")
+      local repo = base .. "/한글 저장소"
+      local file = repo .. "/" .. layout .. "/lua/work-kb/config.lua"
+      H.write_bytes(file, "-- 자리\n")
+      H.eq(config.real_default_root(file), repo, layout .. ": scripts/kb.py가 없으면 자리 꼴")
+      H.write_bytes(repo .. "/scripts/kb.py", "# 시험용\n")
+      H.eq(config.real_default_root(file), repo, layout)
+      H.eq(config._root_by_walking(file), repo, layout)
+    end
+    -- 플러그인을 옮겨도(어떤 자리든) 위로 올라가 저장소를 찾는다
+    local base = H.make_vault("다른 자리")
+    H.write_bytes(base .. "/repo/scripts/kb.py", "# 시험용\n")
+    H.write_bytes(base .. "/repo/editor/lua/work-kb/config.lua", "-- 자리\n")
+    H.eq(config.real_default_root(base .. "/repo/editor/lua/work-kb/config.lua"), base .. "/repo")
+    -- 지금 저장소에서
+    H.eq(vim.fs.normalize(config.real_default_root()), H.repo)
   end)
 
   it("기본 코드 루트는 플러그인 위치에서 계산 (I/O 없음)", function()

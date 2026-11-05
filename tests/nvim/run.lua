@@ -49,7 +49,14 @@ do
     end
   end
   table.sort(loaded)
-  _G.WORK_KB_STARTUP = { command = vim.fn.exists(":WorkKb") == 2, loaded = loaded, plugin = vim.g.loaded_work_kb }
+  local def = vim.api.nvim_get_commands({})["WorkKb"] or {}
+  _G.WORK_KB_STARTUP = {
+    command = vim.fn.exists(":WorkKb") == 2,
+    loaded = loaded,
+    plugin = vim.g.loaded_work_kb,
+    nargs = def.nargs,
+    range = def.range,
+  }
 end
 
 local H = require("helpers")
@@ -141,6 +148,16 @@ if load_errors > 0 then
 end
 for _, line in ipairs(not_run) do
   out(line)
+end
+-- 테스트가 만든 임시 볼트를 지운다 (WORK_KB_TEST_KEEP=1이면 남긴다). 못 지우면 실패로 센다.
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  pcall(vim.api.nvim_buf_delete, buf, { force = true })
+end
+local left = H.cleanup_tmp()
+if left then
+  failed = failed + 1
+  ran = ran + 1
+  out("FAIL (정리) 임시 폴더가 남음: " .. left)
 end
 out(string.format("Ran %d tests, %d passed, %d failed, %d skipped", ran, passed, failed, skipped))
 os.exit(failed > 0 and 1 or 0)

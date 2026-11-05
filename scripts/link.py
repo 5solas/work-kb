@@ -792,7 +792,7 @@ def _apply(ctx: _Ctx, plan: Plan) -> tuple[int, int, int, list[str]]:
 
 
 def create_stubs(cfg: Config, keys: Iterable[str], *, dry_run: bool = False) -> dict:
-    """`--stub KEY`: jira/KEY.md 최소 페이지만 만든다(Emacs `o`). 이미 있으면 그대로 둔다."""
+    """`--stub KEY`: jira/KEY.md 최소 페이지만 만든다(Neovim `o`). 이미 있으면 그대로 둔다."""
     started = time.perf_counter()
     project_keys = cfg.project_keys
     if not project_keys:

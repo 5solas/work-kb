@@ -6,8 +6,10 @@ python -X utf8 tests/nvim/fake_serve.py [--idle-sec N] [--mode ok|bad-ready|no-r
 - {"id": n, "op": "ping"} → {"id": n, "ok": true}, {"op": "shutdown"} → 종료 0.
 - {"id": n, "argv": [...]}: 계약의 빠른 명령만 받는다. 그 밖은 refused.
   argv에 시험용 표지가 있으면: --fake-refuse 거부, --fake-die 답 없이 종료 3,
-  --fake-sleep 5초 뒤 답, --fake-code N 종료 코드 N.
-  답의 out은 "served <argv JSON>\npid=<pid>\n".
+  --fake-sleep 5초 뒤 답, --fake-delay-ms N N밀리초 뒤 답, --fake-hang 답 없이 영영 멈춤(stdin도 안 읽음),
+  --fake-code N 종료 코드 N.
+  답의 out은 "served <argv JSON>\npid=<pid>\n" (--fake-seq면 끝에 "seq=<이 서버가 받은 argv 요청 번호>\n").
+- UTF-8이 아닌 줄·JSON이 아닌 줄은 serve.py처럼 {"id": null, "refused": true}.
 - stdin EOF 또는 --idle-sec 동안 요청이 없으면 종료 0.
 """
 from __future__ import annotations
@@ -69,6 +71,7 @@ def main() -> int:
         lines.put(b"")
 
     threading.Thread(target=reader, daemon=True).start()
+    seq = 0
     while True:
         try:
             raw = lines.get(timeout=idle)
@@ -91,17 +94,31 @@ def main() -> int:
         if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
             send({"id": rid, "refused": True, "reason": "argv"})
             continue
+        seq += 1
         if "--fake-die" in argv:
             os._exit(3)
+        if "--fake-hang" in argv:
+            while True:
+                time.sleep(1)
         if "--fake-refuse" in argv or not served(argv):
             send({"id": rid, "refused": True, "reason": "not served"})
             continue
         if "--fake-sleep" in argv:
             time.sleep(5)
+        delay = int(option(argv, "--fake-delay-ms", "0"))
+        if delay:
+            time.sleep(delay / 1000)
         code = int(option(argv, "--fake-code", "0"))
         out = "served " + json.dumps(argv, ensure_ascii=False) + "\npid=" + str(os.getpid()) + "\n"
+        if "--fake-seq" in argv:
+            out += f"seq={seq}\n"
         send({"id": rid, "code": code, "out": out})
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # os._exit: stdin을 읽던 데몬 스레드가 인터프리터 종료 중 stdin 잠금을 잡고 있으면 CPython이
+    # "could not acquire lock for <stdin>"로 비정상 종료(0xC0000005)한다. 유휴 종료가 종료 0이어야 한다.
+    status = main()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)

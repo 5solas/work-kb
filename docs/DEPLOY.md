@@ -11,7 +11,7 @@
 |---|---|
 | Python | **3.13 또는 3.14** (64비트) 권장. 3.15는 PyPI에 PyYAML wheel이 없다. 인터넷이 되면 pip가 원본(sdist)에서 순수 Python으로 빌드하지만(느리고 libyaml 가속 없음), `--no-index --find-links wheels` 설치는 실패한다. 더 낮은 버전은 거부된다 |
 | pip | `python -m venv` + `pip`면 충분하다. 다른 도구는 필요 없다 |
-| Emacs / Obsidian | Emacs 30 이상, Obsidian(Bases 지원 버전) |
+| Neovim / Obsidian | Neovim 0.11 이상(Neovide는 선택), Obsidian(Bases 지원 버전) |
 | 네트워크 | 사내 Jira·Confluence·LLM 서버에 닿으면 된다. pip가 막혀 있으면 `wheels/`로 설치 |
 | `kb.py demo` | `tests/`를 제외하므로 회사 PC에서는 **쓸 수 없다**(집 전용). 회사에서는 6단계의 dry-run으로 확인한다 |
 
@@ -38,7 +38,7 @@
 | `tests/` | 회사에서 테스트·demo를 돌리지 않는다. 모의 서버와 허구 fixture가 들어 있다 |
 | `.obsidian/` | 볼트별 설정 |
 
-남기는 것: `scripts/`, `emacs/`, `obsidian/`, `prompts/`, `docs/`, `config.yaml`, `config.local.example.yaml`, `requirements*.txt`, `AGENTS.md`, `CLAUDE.md`, `.gitignore`, `.gitattributes`, **`wheels/`**(만들었다면), 빈 폴더 구조(`daily/` `inbox/` `raw/assets/` `jira/_views/` `wiki/…` 의 `.gitkeep`).
+남기는 것: `scripts/`, `nvim/`, `install.ps1`, `uninstall.ps1`, `obsidian/`, `prompts/`, `docs/`, `config.yaml`, `config.local.example.yaml`, `requirements*.txt`, `AGENTS.md`, `CLAUDE.md`, `.gitignore`, `.gitattributes`, **`wheels/`**(만들었다면), 빈 폴더 구조(`daily/` `inbox/` `raw/assets/` `jira/_views/` `wiki/…` 의 `.gitkeep`).
 
 집에서는 `python scripts/deploy_check.py <대상 폴더>`가 같은 제외 규칙으로 복사하고 제외 경로가 없는지 확인한다(있을 때).
 폴더 이름에 한글·공백이 있어도 된다(`D:\업무 도구\work-kb`처럼).
@@ -58,8 +58,8 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 
 - `python`이 없으면 `py -3.14 -m venv .venv`. `py -3`이 동작하지 않는 PC도 있으니 안 되면 `python`을 쓴다.
 - 3.15: PyPI에 PyYAML wheel이 없다. 인터넷이 되면 `pip`가 원본(sdist)에서 순수 Python wheel을 빌드해 설치한다(느리고 libyaml 가속 없음). `--no-index --find-links wheels`는 `wheels/`에 3.15용 wheel이 없어 실패한다. 3.14 또는 3.13으로 venv를 만드는 것을 권장한다.
-- 스크립트는 `.venv\Scripts\python.exe scripts\kb.py …`로 실행한다. (스케줄과 Emacs는 이 경로를 자동으로 쓴다.)
-- `PYTHONUTF8=1`이 없어도 `kb.py`와 Emacs·스케줄은 `-X utf8`을 직접 넘기지만, 터미널에서 직접 칠 때를 위해 설정해 둔다.
+- 스크립트는 `.venv\Scripts\python.exe scripts\kb.py …`로 실행한다. (스케줄과 Neovim 플러그인은 이 경로를 자동으로 쓴다.)
+- `PYTHONUTF8=1`이 없어도 `kb.py`와 Neovim·스케줄은 `-X utf8`을 직접 넘기지만, 터미널에서 직접 칠 때를 위해 설정해 둔다.
 - wheels 만들기(집): `python scripts/kb.py wheels --targets 3.13,3.14`. 결과는 `wheels/`와 `wheels/MANIFEST.txt`. 상세는 `docs/PACKAGING.md`.
 
 ### 3. PAT 만들기
@@ -95,7 +95,7 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 기대하는 출력:
 
 - `✓` 줄: Python, 의존성, config.yaml, config.local.yaml(`environment: company`), 공개 호스트 차단, Jira, Confluence, LLM 프로필, 쓰기 권한.
-- `-` 줄은 정상이다(종료 코드에 영향 없음): `keyring` 백엔드 이름, `Jira 서버` 버전, `sprint 필드`, 볼트 경로의 한글 안내, PowerShell 실행 정책(막히지 않았을 때), 시간대, Emacs·Obsidian 경로, 푸시 대상 파일 수(`푸시는 kb.py push로 직접 합니다`), `/models`가 없는 서버의 "연결됨, /models 없음".
+- `-` 줄은 정상이다(종료 코드에 영향 없음): `keyring` 백엔드 이름, `Jira 서버` 버전, `sprint 필드`, 볼트 경로의 한글 안내, PowerShell 실행 정책(막히지 않았을 때), 시간대, Neovim·Neovide·Obsidian 경로, 푸시 대상 파일 수(`푸시는 kb.py push로 직접 합니다`), `/models`가 없는 서버의 "연결됨, /models 없음".
 - `✗` 줄이 있으면 줄 끝의 `→ 해결 방법`을 따른다. 대부분 `docs/TROUBLESHOOTING.md`에 있다.
 - **허용되는 ✗ 하나**: 그룹 정책(GPO)이 PowerShell 실행 정책을 `Restricted`·`AllSigned`로 막아 PowerShell 줄이 ✗이면, 사용자가 고칠 수 없으므로 이것만은 ✗인 채로 진행한다(doctor는 종료 1). 클립보드 이미지 캡처(`C`) 대신 `F`(파일 선택)로 캡처한다. 다른 ✗는 모두 고친 뒤 진행한다.
 - **공개 호스트 ✗(종료 5)**: 진행 금지. `kb.py init --section llm`으로 사내 주소로 고친다.
@@ -112,12 +112,21 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 
 `--jql … --dry-run`은 받기만 하고 아무것도 쓰지 않는다. 결과가 기대와 맞으면 `sync --full`로 `project_keys × jql_mine` 범위를 받는다. 이어서 `kb.py status`로 동기화 시각을 확인한다.
 
-### 7. Emacs
+### 7. Neovim
 
-> Emacs: `(load "…/emacs/work-kb.el")`, `work-kb-root`, 필요하면 `work-kb-prefix-key` 변경, 캡처 테스트. 서버 모드 + `capture.ahk`(선택).
+> Neovim: nvim-config 설치 확인, `install.ps1`, 새 터미널에서 `nvd --restart`, `:checkhealth work-kb`, 캡처 테스트. 사용법: `docs/USER-GUIDE.md`.
 
-설정 조각과 키 표는 `docs/README.md`의 Emacs 절. 캡처 테스트는 `접두 키 c`로 한 줄, `C`(클립보드 이미지)나 `F`(파일)로 이미지 한 번씩.
-`capture.ahk`는 AutoHotkey v2가 필요하고 Emacs 서버(`server-start`)가 떠 있어야 한다. `emacsclient.exe` 경로는 파일 맨 위에서 고친다.
+Neovim 쪽 일반 설정(Neovim, Neovide, 폰트, `nvd`)은 이 저장소가 아니라 별도 저장소 nvim-config가 설치한다. 먼저 그 PC에 nvim-config가 설치되어 있어야 한다(`docs/USER-GUIDE.md` 5.2절). 그다음 이 저장소 폴더에서 한다.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+nvd --restart
+```
+
+- `install.ps1`은 `.venv`(2단계에서 이미 만들었으면 유지), 사용자 환경 변수 `WORK_KB_ROOT`, 읽기 전용 점검만 한다. pip가 막혀 있으면 `-Offline`을 준다(`wheels/` 사용). 먼저 `-WhatIf`로 할 일만 볼 수 있다.
+- 환경 변수는 새 터미널부터 보이고 데몬의 환경은 시작할 때 고정되므로, **새 터미널**에서 `nvd --restart`를 한다(수정한 버퍼가 있으면 거부하니 먼저 저장).
+- Neovim에서 `:checkhealth work-kb`가 코드 루트·볼트·접두 키·Python·상주 서버를 점검한다.
+- 캡처 테스트는 `<leader>k` 다음 `c`로 한 줄, `C`(클립보드 이미지)나 `F`(파일)로 이미지 한 번씩.
 
 ### 8. Obsidian
 

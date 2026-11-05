@@ -7,7 +7,7 @@
 - AGENTS.md 앵커(절 제목)와 명령 목록이 kb.COMMANDS와 맞다.
 - config.yaml에 연결 값이 없다.
 - .gitignore와 DEPLOY.md 제외 목록이 실행 산출물을 모두 덮는다.
-- emacs/capture.ahk(AutoHotkey v2)의 형식. 이 PC에는 AutoHotkey가 없어 실행은 확인하지 않는다.
+- nvim/capture.ahk(AutoHotkey v2)의 형식. 이 PC에는 AutoHotkey가 없어 실행은 확인하지 않는다.
 
 검사 대상 파일은 .gitignore가 무시하지 않는 것(= 저장소에 올라가는 것)이다. .gitignore 해석은 이 저장소가
 쓰는 문법(`!`, 끝 `/`, 앞 `/`, `*`, `**`)만 구현한다. git은 부르지 않는다.
@@ -71,9 +71,12 @@ LIB_MODULES = [
 ]
 PROMPT_TASKS = ["tag", "decisions", "entity_summary", "topic_proposal", "image_ingest", "contradictions"]
 DOCS = ["README", "DEPLOY", "SCHEDULING", "DECISIONS", "TROUBLESHOOTING", "LIVE"]
+# work-kb 플러그인 진입점. 플러그인 폴더를 옮기면 이 상수 하나만 고친다.
+PLUGIN_INIT = "nvim/lua/work-kb/init.lua"
 OTHER_FILES = [
-    "emacs/work-kb.el",
-    "emacs/capture.ahk",
+    PLUGIN_INIT,
+    "install.ps1",
+    "uninstall.ps1",
     "obsidian/setup.md",
     "jira/_views/일감.base",
     "wiki/엔티티.base",
@@ -256,7 +259,8 @@ TRACKED = [
     "examples/sample-vault/config.local.example.yaml",
     "tests/fixtures/llm/vault/jira/KB-12.md",
     "tests/fixtures/notes/daily/2026-11-04.md",
-    "emacs/capture.ahk",
+    PLUGIN_INIT,
+    "install.ps1",
     "docs/DEPLOY.md",
 ]
 
@@ -566,7 +570,7 @@ def _url_scope(rel: str) -> bool:
     """fixture와 배포되는 코드·설정. 테스트 모듈(test_*.py)은 공개 호스트 거부를 검사하려고 일부러 쓰므로 뺀다."""
     if rel in DEEPINFRA_OK:
         return True
-    if rel.startswith(("tests/fixtures/", "examples/", "scripts/", "emacs/", "prompts/", "obsidian/")):
+    if rel.startswith(("tests/fixtures/", "examples/", "scripts/", "nvim/", "prompts/", "obsidian/")):
         return True
     if rel.startswith("tests/") and not PurePosixPath(rel).name.startswith("test_"):
         return True  # mock_*.py, conftest.py, fake_keyring.py, sitecustomize.py
@@ -695,24 +699,29 @@ def test_agents_md_command_list_matches_kb_commands():
         assert token in names, f"AGENTS.md: kb.py {token}는 없는 명령"
 
 
-# ── emacs/capture.ahk ────────────────────────────────────────
+# ── nvim/capture.ahk ─────────────────────────────────────────
 
-AHK = ROOT / "emacs" / "capture.ahk"
+AHK = ROOT / "nvim" / "capture.ahk"
+LUA_INIT = ROOT / PLUGIN_INIT
+# capture.ahk는 선택 사항이다. 파일이 없으면 아래 두 검사는 건너뛴다.
+pytestmark_ahk = pytest.mark.skipif(not AHK.is_file(), reason="nvim/capture.ahk 없음")
 
 
+@pytestmark_ahk
 def test_capture_ahk_is_autohotkey_v2():
     text = AHK.read_bytes().decode("utf-8-sig")
     lines = text.splitlines()
     assert lines[0].strip() == "#Requires AutoHotkey v2.0"
     code = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith(";")]
     # 설정 변수가 단축키보다 먼저 나온다
-    setting = next(i for i, ln in enumerate(code) if re.match(r"\s*EmacsClient\s*:=\s*\"", ln))
+    setting = next(i for i, ln in enumerate(code) if re.match(r"\s*Nvim\s*:=\s*\"", ln))
     hotkeys = [i for i, ln in enumerate(code) if "::" in ln]
     assert hotkeys and setting < min(hotkeys)
-    # D13: Ctrl+Alt+Shift+C/V → emacsclient -n -c -e
-    assert re.search(r'(?m)^\^!\+c::.*"\(work-kb-capture\)"', text)
-    assert re.search(r'(?m)^\^!\+v::.*"\(work-kb-capture-clipboard-image\)"', text)
-    assert "-n -c -e" in text
+    # D13: Ctrl+Alt+Shift+C/V → :WorkKb 명령을 nvim 서버로 보낸다
+    assert re.search(r'(?m)^\^!\+c::Capture\("WorkKb capture"\)', text)
+    assert re.search(r'(?m)^\^!\+v::Capture\("WorkKb capture-clipboard-image"\)', text)
+    # nvim-config의 데몬(nvd)을 쓴다. 자체 서버(--remote-send)는 쓰지 않는다
+    assert '"nvd-rpc.lua"' in text and '"nvd.cmd"' in text and "--remote-send" not in text
     assert not re.search(r"(?m)^[\^!+]*#[\^!+#]*\w+::", text)  # Win 조합 없음(PowerToys 충돌, D13)
     # v1 문법(명령, 쉼표) 없음
     assert not re.search(r"(?m)^\s*(Run|MsgBox|Send|WinActivate),", text)
@@ -720,10 +729,11 @@ def test_capture_ahk_is_autohotkey_v2():
     assert "실행해 보지 못했다" in text and "미확인" in text
 
 
+@pytestmark_ahk
 def test_capture_ahk_calls_existing_commands():
-    el = (ROOT / "emacs" / "work-kb.el").read_text(encoding="utf-8")
-    for func in re.findall(r'"\((work-kb-[a-z-]+)\)"', AHK.read_text(encoding="utf-8-sig")):
-        m = re.search(rf"\(defun {re.escape(func)} \(([^)]*)\)", el)
-        assert m, f"work-kb.el에 {func} 없음"
-        args = m.group(1).split()
-        assert not args or args[0] == "&optional", f"{func}는 인수 없이 부를 수 있어야 함"
+    lua = LUA_INIT.read_text(encoding="utf-8")
+    names = set(re.findall(r'name = "([a-z-]+)"', lua))
+    used = re.findall(r'Capture\("WorkKb ([a-z-]+)"\)', AHK.read_text(encoding="utf-8-sig"))
+    assert used, "capture.ahk에 :WorkKb 호출이 없다"
+    for name in used:
+        assert name in names, f"work-kb init.lua에 명령 {name} 없음"

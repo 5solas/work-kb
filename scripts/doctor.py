@@ -1117,12 +1117,31 @@ def check_timezone(ctx: Context) -> None:
 
 @check("편집기")
 def check_editors(ctx: Context) -> None:
-    emacs = shutil.which("emacs") or shutil.which("runemacs")
-    if emacs:
-        client = shutil.which("emacsclient")
-        ctx.report.info("Emacs", emacs + (f", emacsclient {client}" if client else ", emacsclient 없음"))
+    nvim = shutil.which("nvim")
+    if nvim:
+        version = ""
+        try:
+            out = subprocess.run([nvim, "--version"], capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=10, stdin=subprocess.DEVNULL).stdout
+            m = re.search(r"NVIM v(\d+)\.(\d+)\.(\d+)", out)
+            if m:
+                version = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
+                old = (int(m.group(1)), int(m.group(2))) < (0, 11)
+            else:
+                old = False
+        except Exception:
+            old = False
+        text = nvim + (f", {version}" if version else "")
+        if old:
+            text += " → 0.11 이상이 필요합니다. Neovim을 올리세요"
+        ctx.report.info("Neovim", text)
     else:
-        ctx.report.info("Emacs", "PATH에 없습니다. emacs/work-kb.el을 쓰려면 Emacs 30 이상을 설치하세요")
+        ctx.report.info("Neovim", "PATH에 없습니다. nvim/을 쓰려면 Neovim 0.11 이상을 설치하세요")
+    neovide = shutil.which("neovide")
+    if neovide:
+        ctx.report.info("Neovide", neovide)
+    else:
+        ctx.report.info("Neovide", "찾지 못했습니다. 창으로 쓰려면 Neovide를 설치하세요 (선택)")
     obsidian = shutil.which("Obsidian") or shutil.which("obsidian")
     if obsidian is None:
         local = os.environ.get("LOCALAPPDATA")

@@ -257,7 +257,7 @@ KEEP = [
     "AGENTS.md",
     "CLAUDE.md",
     ".gitignore",
-    "emacs/work-kb.el",
+    "install.ps1",
     "obsidian/setup.md",
     "prompts/tag.md",
     "docs/DEPLOY.md",

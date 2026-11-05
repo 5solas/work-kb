@@ -285,7 +285,7 @@ class SourceLine:
 
 
 def read_source(cfg: Config, spec: str) -> SourceLine:
-    """`daily/YYYY-MM-DD.md:N`의 줄(1부터, `\\n` 기준. Emacs 줄 번호와 같다)."""
+    """`daily/YYYY-MM-DD.md:N`의 줄(1부터, `\\n` 기준. Neovim 줄 번호와 같다)."""
     normalized = (spec or "").strip().replace("\\", "/")
     match = SOURCE_RE.match(normalized)
     if match is None:

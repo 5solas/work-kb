@@ -12,10 +12,7 @@ __pycache__/
 .pytest_cache/
 .obsidian/
 
-# Neovim 설정: PC별 값 (예: nvim/lua/local.example.lua)
-/nvim/lua/local.lua
-
-# 실행 중 생기는 임시·백업 파일 (atomic_write 임시 .<이름>.<pid>.tmp, Emacs 백업·자동 저장·잠금)
+# 실행 중 생기는 임시·백업 파일 (atomic_write 임시 .<이름>.<pid>.tmp, 편집기 백업·자동 저장·잠금)
 .*.tmp
 *~
 \#*\#
