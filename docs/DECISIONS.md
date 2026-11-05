@@ -235,7 +235,14 @@ Opus 3명 독립 검토(지시서·탐지 논리 / 회사 가드·데이터 안�
 - **ingest 포기 규칙**: 같은 프로필·모델에서 3회 실패한 이미지는 `gave_up`(LLM 호출 없음, "포기: … kb.py ingest --force"). `--force`로 재시도. 프로필·모델이 바뀌면 다시 센다. dry-run은 세지 않는다. 원장 `skipped[sha] = {image, count, status, profiles, at, error}`. daily가 가리키는 inbox 이미지 판정은 casefold+NFC, `![alt](…)` 형식(URL 디코드)도 인식, 애매하면 옮기지 않는다.
 - **doctor(company)**: 어느 프로필이든 공개 호스트면 LLM 프로필 전부 `-`로 표시하고 아무것도 보내지 않는다.
 - status: D41 하한 표시("출력 하한 2048(D41)"), 포기한 이미지 수.
-- mock_llm 추가 모드: `rate_limit_on`, `reasoning_tokens_in_usage`, `json_answer`. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
+- mock_llm 추가 모드: `rate_limit_on`, `reasoning_tokens_in_usage`, `json_answer`.
+
+### Phase 5 구축 결정 (2026-11-05)
+
+- **lint**: 고아 페이지는 들어오는 위키링크도 `mentions` 항목도 없는 wiki 페이지(색인 구역·`_lint.md`·자기 링크는 링크로 안 침; index·decisions·actions·`_*.md`는 제외). 깨진 링크는 Obsidian 방식으로 해석(절대 경로·접미 경로·파일명·`.md` 생략·대소문자 무시·NFC), daily·inbox·wiki·jira의 .md만 검사하고 코드·front matter·`mentions` 구역은 건너뜀. 오래된 캐시는 완료 일감 제외(변경 없으면 `synced_at`이 안 바뀌므로). 멘션 없는 stub은 파일 수정 시각 기준. `sending`은 나이(2×write_timeout)로만 uncertain 판정. 추가 절: 포기한 편찬 단위, 포기한 이미지, 비UTF-8 파일(마커 손상에 포함). T5는 엔티티별로 관련 결정(기각 제외)을 묶어 2개 이상일 때만 보내고 큰 입력은 나눠 합친다; `--llm` 없이 돌리면 지난 T5 결과를 안내문과 함께 보존. 항상 종료 0, `_lint.md`의 `lint` 구역만 씀(마커 손상이면 stdout).
+- **confluence_push**: 페이지 매칭은 제목 → `.state/confluence.json`의 page_id(이름 바뀐 페이지 갱신) → 생성. 409는 버전 재조회 후 1회 재시도. 첫 H1은 본문에서 제거(제목으로 씀). 원시 HTML은 텍스트로, 엔티티는 XML에 맞게 변환. 변경 감지 sha256은 스페이스·제목·storage를 포함. push_globs에 걸리는 파일끼리만 페이지 링크(`--only`로 좁혀도), 임베드는 텍스트. `--dry-run`은 네트워크 호출 없음(PAT 없이 동작). 같은 제목 둘·마커 손상·4xx는 그 파일만 실패하고 계속(종료 1), 생성 403은 종료 2. `.state`는 페이지마다 잠금 아래 기록, 네트워크는 잠금 밖. mock 모드 `version_conflict_once`, `forbid_create`, `anonymous`, `personal_spaces`; 모든 스페이스에 홈페이지가 있음.
+- **init Confluence**: PAT는 `/rest/api/user/current` 성공 전엔 저장 안 함(익명 응답은 인증 실패, 종료 2). 개인 스페이스는 `~username` → `~userKey` → `type=personal` 목록(25개씩, 최대 100)으로 찾고, 자동으로 찾으면 묻지 않는다. 부모 페이지는 숫자 id 또는 `pageId=` URL, `-`로 비움. 설정되면 `enabled: true`. 마법사 순서: 환경 → Jira → Confluence → LLM → (Phase 6) 스케줄. `KB_INIT_CONFLUENCE_URL/PAT/SPACE/PARENT`. init은 자체 GET 전용 `ConfluenceProbe`를 쓴다(W5.2와 동시에 만들어져 `lib/confluence_client.py`를 쓰지 못함 — 검토에서 통합 여부 결정). doctor에 스페이스·부모 페이지·push_globs 줄 추가.
+- **demo**: 모든 단계를 프로세스 안에서 각 모듈의 `run()`으로 실행, mock은 포트 0(`--fixed-ports`면 8081~8083). 가짜 keyring 서비스명 `work-kb-demo`. LLM 프로필은 main 하나(키 참조 없음, `trust_env: false`, 탐지 블록 미리 설정) → `DEEPINFRA_API_KEY`를 읽지 않음. mock LLM 답은 "모의"로 표시. `KB_FAKE_NOW=2026-11-05T18:30:00+09:00`(샘플 날짜에 맞춤, 사용자 값 우선). 사용자 `KB_*` 덮어쓰기 무시. 임시 볼트의 `config.yaml`은 저장소 것으로 교체. company 판정은 `config.local.yaml` 최상위 `environment:` 줄만 정규식으로 읽어 글자 그대로 company일 때만 거부(종료 7). `examples/sample-vault`나 `tests/` mock이 없으면 종료 4(D60대로 `tests/`를 빼고 복사한 회사 사본에서는 demo 불가 — 의도). `--keep DIR`은 저장소 밖의 새 폴더만. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 
