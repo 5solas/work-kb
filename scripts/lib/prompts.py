@@ -25,6 +25,7 @@ AGENTS_NAME = "AGENTS.md"
 PROMPTS_DIR = "prompts"
 # 시스템 메시지에 넣는 AGENTS.md 절(이 순서). 하나라도 없으면 ConfigError.
 AGENTS_SECTIONS: tuple[str, ...] = ("역할", "금지", "태그", "작업 스키마", "답변 규칙")
+AGENTS_LEVEL = 2  # 위 절은 `## ` 제목만 본다
 
 _TASK_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
@@ -67,15 +68,9 @@ def load_prompt(task: str, *, root: Path | str | None = None) -> str:
     return _read_text(path, "프롬프트").strip("\n")
 
 
-def section(text: str, heading: str) -> str | None:
-    """마크다운에서 `## heading` 절을 제목 줄째로 돌려준다. 다음 같은 수준 이하 제목 전까지.
-
-    코드 펜스 안의 `#` 줄은 제목으로 보지 않는다. 없으면 None.
-    """
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+def _headings(lines: Sequence[str]) -> Iterable[tuple[int, int, str]]:
+    """(줄 번호, 수준, 제목 글). 코드 펜스 안의 `#` 줄은 제목이 아니다."""
     fence: str | None = None
-    start: int | None = None
-    level = 0
     for i, line in enumerate(lines):
         match = _FENCE.match(line)
         if match:
@@ -88,35 +83,63 @@ def section(text: str, heading: str) -> str | None:
         if fence is not None:
             continue
         head = _HEADING.match(line)
-        if not head:
-            continue
-        depth = len(head.group(1))
+        if head:
+            yield i, len(head.group(1)), head.group(2).strip()
+
+
+def section(text: str, heading: str, *, level: int | None = None) -> str | None:
+    """마크다운에서 `heading` 절을 제목 줄째로 돌려준다. 다음 같은 수준 이하 제목 전까지.
+
+    level을 주면 그 수준(`##` = 2)의 제목만 본다(하위 `### 역할` 같은 미끼를 고르지 않게).
+    코드 펜스 안의 `#` 줄은 제목으로 보지 않는다. 없으면 None. 여럿이면 첫 번째.
+    """
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    start: int | None = None
+    depth_of_start = 0
+    for i, depth, title in _headings(lines):
         if start is None:
-            if head.group(2).strip() == heading:
-                start, level = i, depth
-        elif depth <= level:
+            if title == heading and (level is None or depth == level):
+                start, depth_of_start = i, depth
+        elif depth <= depth_of_start:
             return "\n".join(lines[start:i]).strip("\n")
     if start is None:
         return None
     return "\n".join(lines[start:]).strip("\n")
 
 
+def count_sections(text: str, heading: str, *, level: int) -> int:
+    """수준 level인 `heading` 제목의 개수(코드 펜스 밖)."""
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return sum(1 for _i, depth, title in _headings(lines) if depth == level and title == heading)
+
+
 def agents_sections(
     headings: Iterable[str] = AGENTS_SECTIONS, *, root: Path | str | None = None
 ) -> str:
-    """AGENTS.md에서 고른 절들을 순서대로 이어 붙인다. 빠진 절이 있으면 ConfigError."""
+    """AGENTS.md에서 고른 `##`(2수준) 절들을 순서대로 이어 붙인다.
+
+    빠졌거나 두 번 있는 절이 있으면 ConfigError(하위 `### 역할` 같은 제목으로 대신하지 않는다).
+    """
     text = _read_text(_root(root) / AGENTS_NAME, "AGENTS.md")
     parts: list[str] = []
     missing: list[str] = []
+    duplicated: list[str] = []
     for heading in headings:
-        body = section(text, heading)
-        if body is None:
+        count = count_sections(text, heading, level=AGENTS_LEVEL)
+        if count == 0:
             missing.append(heading)
-        else:
-            parts.append(body)
+            continue
+        if count > 1:
+            duplicated.append(heading)
+            continue
+        parts.append(section(text, heading, level=AGENTS_LEVEL) or "")
     if missing:
         raise core.ConfigError(
             "AGENTS.md에 필요한 절이 없습니다: " + ", ".join(f"## {h}" for h in missing)
+        )
+    if duplicated:
+        raise core.ConfigError(
+            "AGENTS.md에 같은 절이 두 번 이상 있습니다: " + ", ".join(f"## {h}" for h in duplicated)
         )
     return "\n\n".join(parts)
 

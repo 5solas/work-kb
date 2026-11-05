@@ -235,3 +235,25 @@ def test_read_view_rows_and_missing(vault):
     assert rows[0]["제목"] == "캐시 front matter 확정" and rows[0]["마감"] == "2026-11-06"
     assert rows[1]["상태"] == "Blocked" and rows[1]["마감"] == ""
     assert set(notes.VIEW_COLUMNS) <= set(rows[0])
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["- 배포 절차", "!중요 일정", "@배포", "&앵커 문제", "'따옴표", "%TAG 설정", "{배포}", "[목록]", "a #b", "yes", "2026", "배포", "김철수"],
+)
+@pytest.mark.parametrize("kind", ["topic", "person"])
+def test_page_template_name_with_yaml_indicators_parses_back(kind, name):
+    """LLM이 제안한 주제 이름이 YAML 표시 문자로 시작해도 front matter는 읽히고 이름은 그대로다."""
+    _rel, body = notes.page_template(kind, name, title=None, today="2026-11-05")
+    fields = frontmatter.parse(body.encode("utf-8"))
+    assert fields["name"] == name and fields["type"] == kind
+    assert fields["updated"] == "2026-11-05"
+    if kind == "topic":
+        assert fields["aliases"] == []
+
+
+def test_page_template_plain_names_stay_unquoted():
+    _rel, body = notes.page_template("topic", "배포 준비", title=None, today="2026-11-05")
+    assert body.startswith("---\ntype: topic\nname: 배포 준비\naliases: []\nupdated: 2026-11-05\n---\n# 배포 준비\n")
+    _rel, body = notes.page_template("project", "KB", title="- 캐시: 정리", today="2026-11-05")
+    assert frontmatter.parse(body.encode("utf-8"))["title"] == "- 캐시: 정리"

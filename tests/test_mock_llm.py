@@ -318,6 +318,41 @@ def test_usage_computed_from_actual_text(start):
     assert chat(start())[1]["usage"]["prompt_tokens"] == (len("시스템") + len("안녕")) // 4
 
 
+# ---------------------------------------------------------------- 리뷰 뒤 더한 모드
+
+
+def test_rate_limit_on_param_image_and_all(start):
+    mock = start(rate_limit_on="reasoning_effort", call_counter=True)
+    assert chat(mock, reasoning_effort="none")[0] == 429
+    assert chat(mock)[0] == 200
+    assert mock.counts["chat"] == 2  # 429도 센다
+    both = start(rate_limit_on=["image", "chat_template_kwargs"])
+    assert call(both, body=image_message((255, 0, 0)))[0] == 429
+    assert chat(both, chat_template_kwargs={"enable_thinking": False})[0] == 429
+    assert chat(both)[0] == 200
+    assert chat(start(rate_limit_on="*"))[0] == 429
+
+
+def test_http_500_always(start):
+    mock = start(http_500_always=True)
+    assert [chat(mock)[0] for _ in range(3)] == [500, 500, 500]
+
+
+def test_json_answer(start):
+    fmt = {"response_format": {"type": "json_object"}}
+    mock = start(json_answer="[1]")
+    assert msg(chat(mock, **fmt))["content"] == "[1]"
+    assert msg(chat(mock))["content"] == '{"ok": true}'  # response_format 없으면 기본 답
+
+
+def test_reasoning_tokens_in_usage(start):
+    shown = chat(start(default_thinking=True, trace_field="none"))[1]["usage"]
+    assert shown["completion_tokens_details"]["reasoning_tokens"] == 60
+    hidden = chat(start(default_thinking=True, trace_field="none", reasoning_tokens_in_usage=False))
+    assert "completion_tokens_details" not in hidden[1]["usage"] and thinking(hidden)
+    assert msg(hidden) == {"role": "assistant", "content": '{"ok": true}'}
+
+
 # ---------------------------------------------------------------- 기존 모드 유지
 
 def test_existing_modes_still_work(start):

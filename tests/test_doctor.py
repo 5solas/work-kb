@@ -177,6 +177,39 @@ def test_company_public_host_sends_nothing(run_kb, vault, mock_jira, mock_conflu
     assert result.returncode == 5
 
 
+@pytest.mark.parametrize("args", [(), ("--redetect",)], ids=["doctor", "redetect"])
+@pytest.mark.parametrize(
+    "spare_url", ["https://api.deepinfra.com/v1/openai", "https://api.openai.com/v1"], ids=["deepinfra", "openai"]
+)
+def test_company_public_host_in_unused_profile_sends_nothing(run_kb, vault, mock_jira, mock_confluence, mock_llm, spare_url, args):
+    """D44: 쓰지 않는 프로필(fallback_order 밖)이 공개 호스트여도 사내 main에 GET /models조차 보내지 않는다."""
+    _store_pats()
+    kb_secrets.store("work-kb", "llm", "company-llm-key")
+    main = {"base_url": f"{mock_llm.base_url}/v1", "model": "mock", "api_key_ref": "keyring:work-kb/llm", "trust_env": False}
+    profiles = {"main": main, "spare": {"base_url": spare_url, "model": "x"}}
+    config.save_local(vault, _mock_config(mock_jira, mock_confluence, mock_llm, environment="company", profiles=profiles))
+    result = run_kb("doctor", *args)
+    assert _state(result.stdout, "LLM spare 주소")[0] == "✗"
+    state, text = _state(result.stdout, "LLM main")
+    assert state == "-" and "어떤 LLM도 호출하지 않았습니다" in text and "spare" in text
+    assert mock_llm.counts == {"models": 0, "chat": 0}
+    assert mock_llm.log == []
+    assert result.returncode == 5
+
+
+def test_company_public_host_check_skipped_still_refuses_via_client(vault, monkeypatch, mock_jira, mock_confluence, mock_llm):
+    """공개 호스트 검사 결과가 비어 있어도(검사를 건너뜀) LlmClient가 거부하면 아무 프로필도 부르지 않는다."""
+    _store_pats()
+    profiles = {"main": {"base_url": f"{mock_llm.base_url}/v1", "model": "mock"}, "spare": {"base_url": "https://api.deepinfra.com/v1/openai"}}
+    config.save_local(vault, _mock_config(mock_jira, mock_confluence, mock_llm, environment="company", profiles=profiles))
+    ctx = doctor.Context(root_arg=str(vault), report=doctor.Report())
+    doctor.run_checks(ctx, [doctor.check_dependencies, doctor.check_config, doctor.check_local, doctor.check_secrets])
+    ctx.public_check_done = True  # 검사가 끝났다고 믿지만 public_profiles는 비어 있다
+    doctor.run_checks(ctx, [doctor.check_llm])
+    assert [c.state for c in ctx.report.checks if c.name == "LLM main"] == ["-"]
+    assert mock_llm.log == []
+
+
 def test_company_mock_profile_is_called_without_blocklist_hit(run_kb, vault, mock_jira, mock_confluence, mock_llm):
     # 위 시험의 대조군: 같은 설정에서 차단 목록만 빼면 요청이 실제로 닿는다.
     result = _company_mock_profile(run_kb, vault, mock_jira, mock_confluence, mock_llm)

@@ -573,6 +573,32 @@ def _check_profile(ctx: Context, name: str, profiles: Mapping[str, dict]) -> Non
         ctx.report.info(label, f"연결됨, 모델 목록에 없음 ({model or '모델 미설정'}){note}")
 
 
+SKIPPED_PUBLIC_TEXT = "공개 LLM 호스트라 호출하지 않았습니다"
+
+
+def _company_llm_blocked(ctx: Context) -> str | None:
+    """회사 환경(home 아님)에서 LLM을 하나도 부르면 안 되는 이유. 부를 수 있으면 None.
+
+    LlmClient와 같은 규칙(D44): 어느 프로필이든 공개 호스트면 전부 거부. 공개 호스트 검사 결과와
+    LlmClient 생성 둘 다 본다.
+    """
+    cfg = ctx.cfg
+    if cfg is None or cfg.environment == "home":
+        return None
+    if ctx.public_profiles:
+        names = ", ".join(sorted(ctx.public_profiles))
+        return f"회사 환경에 공개 LLM 호스트 프로필({names})이 있어 어떤 LLM도 호출하지 않았습니다 (D44)"
+    from lib import llm_client
+
+    try:
+        llm_client.LlmClient(cfg)
+    except core.PublicHostRefused:
+        return "회사 환경에 공개 LLM 호스트 프로필이 있어 어떤 LLM도 호출하지 않았습니다 (D44)"
+    except Exception:  # 다른 설정 문제는 프로필별 점검이 알린다
+        return None
+    return None
+
+
 @check("LLM")
 def check_llm(ctx: Context) -> None:
     cfg = ctx.cfg
@@ -585,6 +611,12 @@ def check_llm(ctx: Context) -> None:
     names = _profiles_to_check(cfg)
     if not names:
         ctx.report.fail("LLM", "확인할 프로필이 없습니다 → kb.py init --section llm")
+        return
+    blocked = _company_llm_blocked(ctx)
+    if blocked is not None:
+        # D44: 회사 환경에서 공개 호스트 프로필이 하나라도 있으면(쓰지 않는 프로필이어도) 어떤 LLM에도 보내지 않는다
+        for name in names:
+            ctx.report.info(f"LLM {name}", SKIPPED_PUBLIC_TEXT if name in ctx.public_profiles else blocked)
         return
     for name in names:
         try:

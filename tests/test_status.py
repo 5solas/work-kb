@@ -22,6 +22,7 @@ JSON_KEYS = {
     "outbox",
     "proposals",
     "images",
+    "images_gave_up",
     "compile_gave_up",
     "llm",
     "lock",
@@ -287,6 +288,56 @@ def test_summarize_detected():
     assert status.summarize_detected("이상한 값") == "탐지 안 됨"
     assert status.summarize_detected({"vision": False, "reasoning_toggle": {"method": "none"}}) == "비전 아니오, 추론 토글 none"
     assert status.summarize_detected({"evidence": "x"}) == "기록됨"
+
+
+def test_summarize_detected_shows_output_floor_d41():
+    """D41: method none + 기준선 생각 켜짐이면 출력 하한 2048을 status에 보인다."""
+    from lib import llm_client
+
+    assert status.NONE_REASONING_FLOOR == llm_client.NONE_REASONING_FLOOR
+    floor = {"vision": True, "reasoning_toggle": {"method": "none"}, "baseline_reasoning": True, "context_tokens": 32768}
+    assert status.summarize_detected(floor) == "비전 예, 추론 토글 none, 컨텍스트 32,768, 출력 하한 2048(D41)"
+    assert "출력 하한" not in status.summarize_detected({**floor, "baseline_reasoning": False})
+    assert "출력 하한" not in status.summarize_detected({**floor, "reasoning_toggle": {"method": "param"}})
+    assert "출력 하한" not in status.summarize_detected({"reasoning_toggle": {"method": "none"}})
+
+
+def test_images_gave_up_from_images_ledger(vault, fake_now, capsys):
+    """ingest가 포기한 이미지(skipped[sha].count >= 3)를 센다. 모양이 다르거나 깨져도 치명적이지 않다."""
+    fake_now("2026-11-05T09:00:00+09:00")
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    assert status.images_gave_up(cfg, []) == 0  # 원장 없음
+    ledger = {
+        "images": {"s0": {"sidecar": "inbox/a.md"}},
+        "skipped": {
+            "s1": {"count": 3, "error": "x", "image": "inbox/a.png"},
+            "s2": {"count": 5, "error": "x", "image": "inbox/b.png"},
+            "s3": {"count": 2, "error": "x", "image": "inbox/c.png"},
+            "s4": {"count": "3"},
+            "s5": "이상한 값",
+            "s6": {"count": True},
+        },
+    }
+    state = vault / ".state" / "images.json"
+    state.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    assert status.images_gave_up(cfg, []) == 2
+    assert status.main(["--root", str(vault)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "미처리 이미지: 0개 (포기한 이미지 2개, 이유는 .state/images.json)" in out
+    assert json.loads(_json_out(vault, capsys))["images_gave_up"] == 2
+    for broken in ('{"skipped": []}', '["x"]', "{깨짐"):
+        state.write_text(broken, encoding="utf-8")
+        problems: list[str] = []
+        assert status.images_gave_up(cfg, problems) == 0
+        assert len(problems) == (1 if broken == "{깨짐" else 0)
+    assert status.main(["--root", str(vault)]) == 0
+    assert "미처리 이미지: 0개" in capsys.readouterr().out.splitlines()
+
+
+def _json_out(vault: Path, capsys) -> str:
+    assert status.main(["--root", str(vault), "--json"]) == 0
+    return capsys.readouterr().out
 
 
 def test_never_touches_network(sample, monkeypatch):

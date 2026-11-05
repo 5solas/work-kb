@@ -42,6 +42,7 @@ MODE_NAME = {"reasoning_effort": "reasoning_effort", "chat_template_kwargs": "ch
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch):
     monkeypatch.setattr(net, "_sleep", lambda seconds: None)
+    monkeypatch.setattr(llm_detect, "_sleep", lambda seconds: None)
 
 
 def make_client(vault, url, *, model="mock", detected=None, environment="home"):
@@ -71,6 +72,7 @@ def serve(vault):
 def run_detect(serve):
     def _run(**modes):
         mock, client = serve(**modes)
+        _run.last_mock = mock  # detect가 예외를 내도 서버 계량을 볼 수 있게
         return llm_detect.detect(client, "main"), mock
 
     return _run
@@ -215,7 +217,7 @@ def test_orphan_think_answer_is_kept(run_detect):
 
 
 def test_token_ratio_tiebreak_when_no_trace_field(run_detect):
-    detected, _ = run_detect(trace_field="none", reasoning_effort="accept")
+    detected, _ = run_detect(trace_field="none", reasoning_tokens_in_usage=False, reasoning_effort="accept")
     toggle = detected["reasoning_toggle"]
     assert toggle["param_name"] == "reasoning_effort"
     assert toggle["evidence"].startswith("tokens"), toggle["evidence"]
@@ -226,8 +228,12 @@ def test_token_ratio_tiebreak_when_no_trace_field(run_detect):
 
 def test_system_prefix_needs_a_trace(run_detect):
     """/think는 프롬프트 자체를 바꾸므로 토큰 수로는 채택하지 않는다(D36)."""
-    detected, _ = run_detect(trace_field="none", system_prefix=True)
+    detected, _ = run_detect(trace_field="none", reasoning_tokens_in_usage=False, system_prefix=True)
     assert detected["reasoning_toggle"]["method"] == "none"
+    # usage의 reasoning_tokens는 흔적이므로 /think도 그것으로는 채택한다
+    detected, _ = run_detect(trace_field="none", system_prefix=True)
+    assert detected["reasoning_toggle"]["method"] == "system_prefix"
+    assert detected["reasoning_toggle"]["evidence"].startswith("trace")
 
 
 def test_no_usage_and_no_trace_is_no_evidence(run_detect):
@@ -252,6 +258,126 @@ def test_token_rule_thresholds():
     assert llm_detect._signal(result(70), result(40), cand) is None  # 2배 미만
     assert llm_detect._signal(result(70), result(10, content=""), cand) is None  # 끄기 쪽 빈 답
     assert llm_detect._signal(result(70), result(10), llm_detect.CANDIDATES[2]) is None  # /think는 흔적만
+
+
+def test_token_rule_only_when_neither_side_has_a_trace():
+    """D36: 양쪽 모두 흔적이 있으면(예: effort low 대 medium) 토큰 차이로 채택하지 않는다."""
+    cand = llm_detect.CANDIDATES[0]
+    on = llm_detect.ChatResult("20", "생각 " * 50, "stop", {"completion_tokens": 200}, "main", "m")
+    off = llm_detect.ChatResult("20", "짧게", "stop", {"completion_tokens": 40}, "main", "m")
+    assert llm_detect._signal(on, off, cand) is None
+    # 끄기 쪽 흔적이 usage의 reasoning_tokens뿐이어도 같다
+    off_tokens = llm_detect.ChatResult(
+        "20", None, "stop", {"completion_tokens": 40, "completion_tokens_details": {"reasoning_tokens": 35}}, "main", "m"
+    )
+    assert llm_detect._signal(on, off_tokens, cand) is None
+    # 대조: 흔적이 양쪽 다 없으면 같은 토큰 수로 'tokens'
+    plain_on = llm_detect.ChatResult("20", None, "stop", {"completion_tokens": 200}, "main", "m")
+    plain_off = llm_detect.ChatResult("20", None, "stop", {"completion_tokens": 40}, "main", "m")
+    assert llm_detect._signal(plain_on, plain_off, cand) == "tokens"
+
+
+class EffortScaled:
+    """reasoning_effort를 받는 서버인데 언제나 생각 흔적을 낸다. 토큰 수만 effort에 따라 다르다."""
+
+    def __init__(self):
+        self.chats: list[dict] = []
+        fake = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _go(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length)) if length else {}
+                if self.path.endswith("/models"):
+                    payload = {"object": "list", "data": [{"id": "mock", "max_model_len": 8192}]}
+                else:
+                    fake.chats.append(body)
+                    effort = body.get("reasoning_effort")
+                    tokens = {"none": 40, None: 120}.get(effort, 200)
+                    answer = '{"answer": 20}' if "response_format" in body else "20"
+                    payload = {
+                        "choices": [{"index": 0, "message": {"role": "assistant", "content": answer, "reasoning": "생각 " * 10},
+                                     "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": tokens},
+                    }
+                data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            do_GET = do_POST = _go
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
+        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+
+
+def test_traces_on_both_sides_never_adopt_by_tokens(vault):
+    server = EffortScaled()
+    try:
+        client = make_client(vault, server.base_url)
+        detected = llm_detect.detect(client, "main")
+    finally:
+        server.stop()
+    assert detected["reasoning_toggle"]["method"] == "none"
+    assert detected["baseline_reasoning"] is True
+    assert len(server.chats) <= MAX_POSTS
+
+
+# ---------------------------------------------------------------- 흔적 없이 생각하는 기본 켜짐 서버
+
+
+def test_default_on_without_trace_probes_off_and_uses_tokens(run_detect, vault):
+    """reasoning_content를 지우고 reasoning_tokens도 없는 게이트웨이: '켜기'는 변화 없음 → '끄기'로 판정."""
+    detected, mock = run_detect(
+        default_thinking=True, trace_field="none", reasoning_tokens_in_usage=False, reasoning_effort="accept"
+    )
+    toggle = detected["reasoning_toggle"]
+    assert toggle_core(toggle) == EXPECTED_TOGGLE["reasoning_effort"]
+    assert toggle["evidence"].startswith("tokens"), toggle["evidence"]
+    assert detected["baseline_reasoning"] is True
+    assert steps(detected)[1:4] == ["baseline", "reasoning_effort:on", "reasoning_effort:off"]
+    assert mock.counts["chat"] <= MAX_POSTS
+    # 끄기 상태로 JSON·비전을 보냈다
+    assert chat_bodies(mock)[-1]["reasoning_effort"] == "none"
+
+
+def test_default_on_without_trace_no_toggle_stays_within_budget(run_detect):
+    """흔적 없는 기본 켜짐 + 어느 후보도 듣지 않음: 후보마다 켜기·끄기(/think는 켜기만)로 예산 8 안에서 끝."""
+    detected, mock = run_detect(default_thinking=True, trace_field="none", reasoning_tokens_in_usage=False)
+    toggle = detected["reasoning_toggle"]
+    assert toggle["method"] == "none" and toggle["evidence"].startswith("none:"), toggle["evidence"]
+    assert mock.counts["chat"] == 1 + (2 + 2 + 1 + 2) + 2 <= MAX_POSTS
+    assert "system_prefix:off" not in steps(detected)
+
+
+def test_default_on_reasoning_tokens_in_usage_is_a_trace(run_detect, vault):
+    """흔적 필드는 없지만 usage.completion_tokens_details.reasoning_tokens > 0이면 그것이 흔적이다."""
+    detected, mock = run_detect(default_thinking=True, trace_field="none", reasoning_effort="accept")
+    toggle = detected["reasoning_toggle"]
+    assert toggle_core(toggle) == EXPECTED_TOGGLE["reasoning_effort"]
+    assert toggle["evidence"].startswith("trace"), toggle["evidence"]
+    assert detected["baseline_reasoning"] is True
+    baseline = next(p for p in detected["probes"] if p["step"] == "baseline")
+    assert baseline["trace"] is True and baseline["trace_field"] == "reasoning_tokens"
+    assert steps(detected)[2:4] == ["reasoning_effort:off", "reasoning_effort:on"]
+    # 토글 없이 기본 켜짐이면 D41 하한이 걸리도록 baseline_reasoning이 참으로 남는다
+    none_detected, _ = run_detect(default_thinking=True, trace_field="none")
+    assert none_detected["reasoning_toggle"]["method"] == "none" and none_detected["baseline_reasoning"] is True
+    client = make_client(vault, mock.base_url + "/v1", detected=none_detected)
+    assert client.max_output_tokens("tag", "main") == 2048
 
 
 # ---------------------------------------------------------------- 기본 켜짐 + content null
@@ -462,6 +588,20 @@ def test_json_mode(run_detect, mode, expected):
         assert "json.loads 실패" in probe["verdict"]
 
 
+@pytest.mark.parametrize("answer", ["20", "[1]", '"문자열"', "null"])
+def test_json_probe_requires_an_object(run_detect, answer):
+    """D38: json.loads가 되더라도 객체가 아니면 json_mode: false."""
+    detected, _ = run_detect(json_answer=answer)
+    assert detected["json_mode"] is False
+    probe = next(p for p in detected["probes"] if p["step"] == "json_mode")
+    assert "JSON 객체 아님" in probe["verdict"], probe["verdict"]
+
+
+def test_json_answer_object_control(run_detect):
+    detected, _ = run_detect(json_answer='{"answer": 20}')
+    assert detected["json_mode"] is True
+
+
 @pytest.mark.parametrize("mode, expected", [("accept", True), ("reject", False), ("ignore", False)])
 def test_vision(run_detect, mode, expected):
     detected, mock = run_detect(vision=mode)
@@ -497,6 +637,92 @@ def test_baseline_failure_raises_detect_error(run_detect):
         run_detect(http_500_once=True)
     assert [p["step"] for p in info.value.probes] == ["context", "baseline"]
     assert info.value.probes[1]["http_status"] == 500
+    assert info.value.exit_code == 3  # 종료 코드 표: 3 = 네트워크·서버
+    assert DetectError("x").exit_code == 3
+
+
+# ---------------------------------------------------------------- 429·5xx는 '이 방식이 아님'이 아니다
+
+
+@pytest.mark.parametrize(
+    "limited",
+    [["reasoning_effort", "image"], "reasoning_effort", "response_format", "image"],
+    ids=["toggle+image", "toggle", "json", "image"],
+)
+def test_rate_limit_is_inconclusive_not_a_rejection(run_detect, limited):
+    """429는 판정 불가: false를 기록하지 않고 DetectError, 실제 POST는 10회 이하(429 재시도 없음)."""
+    with pytest.raises(DetectError) as info:
+        run_detect(default_thinking=True, reasoning_effort="accept", vision="accept", rate_limit_on=limited)
+    exc = info.value
+    mock = run_detect.last_mock
+    assert exc.exit_code == 3
+    assert "rate limited" in str(exc) and "--redetect" in str(exc)
+    assert mock.counts["chat"] <= MAX_POSTS
+    assert mock.counts["chat"] == sum(1 for p in exc.probes if p["step"] != "context")  # 예산이 센 수 = 실제 POST 수
+    limited_probes = [p for p in exc.probes if p.get("http_status") == 429]
+    assert len(limited_probes) == 2  # 처음 한 번 + 다시 한 번
+    assert not any(str(p.get("verdict", "")).startswith("거부") for p in limited_probes)
+
+
+def test_rate_limit_once_then_ok_is_retried(serve):
+    """한 번만 429면 같은 요청을 다시 보내 판정을 이어 간다(거짓 거부 없음)."""
+    mock, client = serve(default_thinking=True, reasoning_effort="accept", vision="accept")
+    original = mock_llm._rate_limited
+    hits = {"n": 0}
+
+    def once(setting, body):
+        if "reasoning_effort" in body and hits["n"] == 0:
+            hits["n"] += 1
+            return True
+        return original(setting, body)
+
+    try:
+        mock_llm._rate_limited = once
+        detected = llm_detect.detect(client, "main")
+    finally:
+        mock_llm._rate_limited = original
+    assert toggle_core(detected["reasoning_toggle"]) == EXPECTED_TOGGLE["reasoning_effort"]
+    assert detected["vision"] is True and detected["json_mode"] is True
+    assert "reasoning_effort:off(재시도)" in steps(detected)
+    assert mock.counts["chat"] == 1 + 1 + 2 + 2 <= MAX_POSTS
+
+
+@pytest.mark.parametrize("status", [400, 404, 405, 422])
+def test_parameter_statuses_are_rejections(status):
+    assert llm_detect._is_reject({"status": "http", "http_status": status})
+
+
+@pytest.mark.parametrize("status", [401, 403, 408, 413, 429, 500, 502, 503])
+def test_other_statuses_are_not_rejections(status):
+    assert not llm_detect._is_reject({"status": "http", "http_status": status})
+    assert not llm_detect._is_reject({"status": "error", "error": "연결 실패"})
+
+
+def test_server_error_on_candidate_is_inconclusive(serve):
+    """후보 호출의 500이 다시 보내도 500이면 DetectError(‘오류: 증거 없음’으로 넘어가 none을 저장하지 않음)."""
+    mock, client = serve(reasoning_effort="accept")
+    mock.faults = ["", "http_500_once", "http_500_once"]  # 기준선은 정상, 첫 후보와 그 재시도는 500
+    with pytest.raises(DetectError) as info:
+        llm_detect.detect(client, "main")
+    assert [p["step"] for p in info.value.probes] == ["context", "baseline", "reasoning_effort:on", "reasoning_effort:on(재시도)"]
+    assert mock.counts["chat"] == 3
+
+
+def test_server_error_once_on_candidate_is_retried(serve):
+    mock, client = serve(reasoning_effort="accept")
+    mock.faults = ["", "http_500_once"]
+    detected = llm_detect.detect(client, "main")
+    assert toggle_core(detected["reasoning_toggle"]) == EXPECTED_TOGGLE["reasoning_effort"]
+
+
+def test_json_and_vision_without_budget_raise_instead_of_false(serve):
+    """보내지 못한 JSON·비전을 false로 저장하지 않는다."""
+    mock, client = serve(vision="accept")
+    with pytest.raises(DetectError):
+        llm_detect.detect_json(client, "main", Budget(0))
+    with pytest.raises(DetectError):
+        llm_detect.detect_vision(client, "main", Budget(0))
+    assert mock.counts["chat"] == 0
 
 
 def test_unauthorized_baseline_raises(run_detect):

@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import shutil
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -242,19 +243,78 @@ def test_daily_embeds_get_sidecars_and_daily_raw_unchanged(vault, llm, fake_now)
     assert note.read_bytes() == raw_before["daily/2026-11-05.md"]
 
 
-def test_inbox_image_referenced_by_daily_is_not_moved(vault, llm, fake_now):
+PINNED = "붙인 그림.png"
+
+
+@pytest.mark.parametrize(
+    "filename, link",
+    [
+        (PINNED, "![[inbox/붙인 그림.png]]"),
+        (PINNED, "![[붙인 그림.png]]"),
+        (PINNED, "![[붙인 그림.png|300]]"),
+        (PINNED, "![alt](inbox/붙인%20그림.png)"),
+        (PINNED, "![](<inbox/붙인 그림.png>)"),
+        (PINNED, '![그림](../inbox/붙인%20그림.png "제목")'),
+        ("Pinned.png", "![[inbox/pinned.png]]"),  # Obsidian·NTFS는 대소문자를 가리지 않는다
+        ("Pinned.png", "![[PINNED.PNG]]"),
+        (PINNED, "![[inbox/" + unicodedata.normalize("NFD", "붙인 그림") + ".png]]"),  # macOS식 NFD
+    ],
+    ids=["inbox-wikilink", "bare", "bare-size", "markdown-encoded", "markdown-angle", "markdown-relative",
+         "case-inbox", "case-bare", "nfd"],
+)
+def test_inbox_image_referenced_by_daily_is_not_moved(vault, llm, fake_now, filename, link):
     fake_now(NOW)
     server = llm()
     cfg = make_cfg(vault, server.base_url)
-    original = put(vault / "inbox" / "붙인 그림.png")
-    daily(vault, "2026-11-05", "- 10:00 ![[inbox/붙인 그림.png]] 링크가 깨지면 안 됨")
+    original = put(vault / "inbox" / filename)
+    note = daily(vault, "2026-11-05", f"- 10:00 {link} 링크가 깨지면 안 됨")
+    daily_bytes = note.read_bytes()
     ingest_images.run(cfg, out=quiet)
-    assert (vault / "inbox" / "붙인 그림.png").read_bytes() == original
-    fields, _ = sidecar_parts(vault / "inbox" / "붙인 그림.md")
-    assert fields["source_image"] == "inbox/붙인 그림.png"
+    assert (vault / "inbox" / filename).read_bytes() == original
+    fields, _ = sidecar_parts(vault / "inbox" / f"{Path(filename).stem}.md")
+    assert fields["source_image"] == f"inbox/{filename}"
     assert not any((vault / "raw" / "assets").iterdir())
+    assert note.read_bytes() == daily_bytes
     assert status.unprocessed_images(cfg) == 0
     assert ingest_images.run(cfg, out=quiet)["status"] == "empty"
+
+
+@pytest.mark.parametrize(
+    "link, asset_name",
+    [
+        ("![[붙인 그림.png]]", PINNED),  # 이름만인 링크는 raw/assets의 같은 이름으로 풀린다
+        ("![[붙인 그림.png]]", "붙인 그림.PNG"),  # 대소문자만 달라도 같은 파일
+        ("![[raw/assets/붙인 그림.png]]", PINNED),  # 다른 폴더를 분명히 적은 링크
+    ],
+    ids=["bare-resolves-to-assets", "bare-resolves-to-assets-case", "explicit-assets"],
+)
+def test_inbox_image_moves_when_link_resolves_elsewhere(vault, llm, fake_now, link, asset_name):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    original = put(vault / "inbox" / PINNED)
+    put(vault / "raw" / "assets" / asset_name, "mail.png")
+    daily(vault, "2026-11-05", f"- 10:00 {link} 이 링크는 raw/assets 것을 가리킨다")
+    ingest_images.run(cfg, out=quiet)
+    assert not (vault / "inbox" / PINNED).exists()
+    assert (vault / "raw" / "assets" / f"2026-11-05-1430-{PINNED}").read_bytes() == original
+
+
+def test_markdown_image_targets():
+    text = '앞 ![a](inbox/a%20b.png) ![](<inbox/c d.png>) ![x](https://e.example/f.png) ![t](g.png "제목") ![[h.png]]'
+    assert ingest_images.markdown_image_targets(text) == ["inbox/a b.png", "inbox/c d.png", "g.png"]
+
+
+def test_pin_check_is_cheap_without_bare_match():
+    calls = []
+
+    def exists():
+        calls.append(1)
+        return False
+
+    assert ingest_images.is_pinned("a.png", {"inbox/b.png", "c.png"}, exists) is False
+    assert calls == []  # 이름이 맞는 링크가 없으면 raw/assets를 훑지 않는다
+    assert ingest_images.is_pinned("a.png", {"a.png"}, exists) is True and calls == [1]
 
 
 # ---------------------------------------------------------------- 중복
@@ -394,6 +454,76 @@ def test_schema_failure_keeps_image_and_records_skip(vault, llm, fake_now):
     ingest_images.run(cfg, out=quiet)
     ledger = json.loads((vault / ".state" / "images.json").read_text(encoding="utf-8"))
     assert ledger["skipped"][core.sha256_hex(original)]["count"] == 2
+
+
+def _ledger(vault: Path) -> dict:
+    return json.loads((vault / ".state" / "images.json").read_text(encoding="utf-8"))
+
+
+def test_failing_image_is_given_up_after_three_runs(vault, llm, fake_now):
+    """D40: 같은 이미지·같은 비전 프로필로 3번 실행에서 실패하면 그다음부터 보내지 않는다."""
+    fake_now(NOW)
+    server = llm(canned={"image_ingest": json.dumps(dict(REPLY, kind="chart"), ensure_ascii=False)})
+    cfg = make_cfg(vault, server.base_url)
+    original = put(vault / "inbox" / "a.png")
+    sha = core.sha256_hex(original)
+    posts: list[int] = []
+    reports = []
+    for _ in range(5):
+        before = len(chats(server))
+        lines: list[str] = []
+        reports.append(ingest_images.run(cfg, out=lines.append))
+        posts.append(len(chats(server)) - before)
+    assert posts == [2, 2, 2, 0, 0] and sum(posts) == 6
+    assert [len(r["skipped"]) for r in reports] == [1, 1, 1, 0, 0]
+    assert [len(r["gave_up"]) for r in reports] == [0, 0, 0, 1, 1]
+    assert any(line.startswith("- 포기: inbox/a.png — 3번") and "--force" in line for line in lines)
+    assert any(line.startswith("결과:") and line.endswith("포기 1") for line in lines)
+    entry = _ledger(vault)["skipped"][sha]
+    assert entry["count"] == 3 and entry["status"] == "gave_up" and entry["image"] == "inbox/a.png"
+    assert entry["profiles"] == ["main=mock-비전"] and "schema" in entry["error"]
+    assert (vault / "inbox" / "a.png").read_bytes() == original  # 이미지는 그대로
+
+    # --force는 포기한 이미지도 다시 보낸다(CLI 인자)
+    before = len(chats(server))
+    assert ingest_images.main(["--root", str(vault), "--force"]) == 0
+    assert len(chats(server)) - before == 2
+    assert _ledger(vault)["skipped"][sha]["count"] == 4
+
+
+def test_given_up_image_retried_when_model_changes(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm(canned={"image_ingest": json.dumps(dict(REPLY, kind="chart"), ensure_ascii=False)})
+    cfg = make_cfg(vault, server.base_url)
+    original = put(vault / "inbox" / "a.png")
+    for _ in range(3):
+        ingest_images.run(cfg, out=quiet)
+    assert len(chats(server)) == 6
+    ingest_images.run(cfg, out=quiet)
+    assert len(chats(server)) == 6
+    # 비전 모델을 바꾸면 처음부터 다시 센다
+    profiles = {"main": {"base_url": f"{server.base_url}/v1", "model": "새-비전", "detected": detected(True)}}
+    cfg = make_cfg(vault, profiles=profiles)
+    ingest_images.run(cfg, out=quiet)
+    assert len(chats(server)) == 8
+    entry = _ledger(vault)["skipped"][core.sha256_hex(original)]
+    assert entry["count"] == 1 and entry["profiles"] == ["main=새-비전"]
+    # 바이트가 바뀐 이미지는 sha가 달라 새 이미지다
+    put(vault / "inbox" / "a.png", "mail.png")
+    ingest_images.run(cfg, out=quiet)
+    assert len(chats(server)) == 10
+
+
+def test_dry_run_does_not_count_toward_give_up(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm(canned={"image_ingest": json.dumps(dict(REPLY, kind="chart"), ensure_ascii=False)})
+    cfg = make_cfg(vault, server.base_url)
+    put(vault / "inbox" / "a.png")
+    for _ in range(3):
+        ingest_images.run(cfg, out=quiet, dry_run=True)
+    assert not (vault / ".state" / "images.json").exists()
+    ingest_images.run(cfg, out=quiet)
+    assert len(chats(server)) == 8
 
 
 def test_broken_json_once_then_ok(vault, llm, fake_now):

@@ -6,12 +6,17 @@
 
 판정 규칙:
 - 200 응답은 증거가 아니다. 판정은 생각의 흔적(`reasoning`·`reasoning_content` 필드, content 안의
-  `</think>`)으로 한다(D36). 흔적이 양쪽 모두 없고 usage가 있을 때만 토큰 수를 보조로 쓴다
-  (켜기 ≥ 2×끄기, 차이 ≥ 30). `/think` 접두는 흔적으로만 인정한다(프롬프트 자체가 바뀌므로).
+  `</think>`, `usage.completion_tokens_details.reasoning_tokens > 0`)으로 한다(D36). 흔적이 양쪽 모두
+  없고 usage가 있을 때만 토큰 수를 보조로 쓴다(켜기 ≥ 2×끄기, 차이 ≥ 30). `/think` 접두는 토큰 수로
+  채택하지 않는다(프롬프트 자체가 바뀌므로).
 - 각 후보는 기준선과 반대 방향을 먼저 보낸다. 뒤집히면 다른 방향 한 번으로 확인하고 채택한다.
-  4xx는 '이 방식이 아님', 200인데 변화 없음은 '증거 없음'으로 보고 다음 후보로 간다.
+  기준선에 흔적이 없는데 출력이 길면(≥ 30토큰, 흔적 없이 생각하는 서버일 수 있음) '켜기'가 변화
+  없을 때 '끄기'도 보내 토큰 규칙으로 본다(기준선 ≥ 2×끄기 + 켜기 ≥ 2×끄기 → 채택, 기준선은 생각 켜짐).
+- 400·404·405·422만 '이 방식이 아님'(거부)이다. 429·408·5xx·연결 실패 등은 '판정 불가'라 같은 요청을
+  한 번 더 보내고, 그래도 판정 불가이거나 예산이 없으면 DetectError(아무것도 저장하지 않음, 종료 3).
+  탐지 중에는 429 자동 재시도를 끈다 — 예산이 센 POST 수가 실제 POST 수다.
 - '끄기' 쪽 답은 비어 있으면 안 된다(D36).
-- 예산이 떨어지면 `method: none` + `budget_exhausted` 근거 + 경고.
+- 예산이 떨어지면 `method: none` + `budget_exhausted` 근거 + 경고. JSON·비전 몫까지 떨어지면 DetectError.
 - `method: none`이어도 `baseline_reasoning`을 기록해 D41의 출력 하한이 적용되게 한다.
 
 회사 차단은 `LlmClient.__init__`이 하고, `detect()` 입구에서 이 프로필 주소를 한 번 더 검사한다.
@@ -23,12 +28,15 @@ import base64
 import json
 import re
 import struct
+import time
 import zlib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from lib import core
+from lib import llm_client as _llm_client_module
 from lib.llm_client import (
     ASSUMED_CONTEXT,
     ChatHttpError,
@@ -46,6 +54,10 @@ TOKEN_RATIO = 2.0  # D36 보조 신호: 켜기 ≥ 2×끄기
 TOKEN_GAP = 30  # D36 보조 신호: 차이 ≥ 30 (출처 없는 시작값)
 ANSWER_SNIPPET = 80
 VISION_SIZE = 64
+REJECT_STATUSES = frozenset({400, 404, 405, 422})  # '이 방식이 아님'. 그 밖의 실패는 판정 불가
+RETRY_WAIT_SEC = 2.0  # 판정 불가(429·5xx) 뒤 같은 요청을 다시 보내기 전 기다림
+
+_sleep = time.sleep  # 시험에서 바꾼다
 
 # 탐지 프롬프트: 허구의 짧은 산수 하나로 고정(§6.11).
 SYSTEM_PROMPT = "짧게 답한다."
@@ -71,7 +83,8 @@ class BudgetExhausted(core.KbError):
 
 
 class DetectError(core.KbError):
-    """기준선 호출이 실패해 아무것도 판정할 수 없음. `probes`에 지금까지의 기록이 있다."""
+    """판정할 수 없음(기준선 실패, 또는 429·5xx 같은 판정 불가가 다시 보내도 계속됨). 호출자는 아무것도
+    저장하지 않는다(종료 3). `probes`에 지금까지의 기록이 있다."""
 
     exit_code = 3
 
@@ -193,15 +206,27 @@ def red_png_data_url() -> str:
 # ---------------------------------------------------------------- 결과 읽기
 
 
+def _reasoning_tokens(result: ChatResult) -> int:
+    """`usage.completion_tokens_details.reasoning_tokens`(정수가 아니면 0)."""
+    usage = result.usage if isinstance(result.usage, Mapping) else None
+    details = usage.get("completion_tokens_details") if usage else None
+    value = details.get("reasoning_tokens") if isinstance(details, Mapping) else None
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 def has_trace(result: ChatResult) -> bool:
-    """생각의 흔적이 있는가: reasoning·reasoning_content 필드, content 안의 `</think>`(normalize_message)."""
-    return bool(result.reasoning and result.reasoning.strip())
+    """생각의 흔적이 있는가: reasoning·reasoning_content 필드, content 안의 `</think>`(normalize_message),
+    또는 `usage.completion_tokens_details.reasoning_tokens > 0`(흔적 필드를 지우는 게이트웨이도 남긴다)."""
+    return bool(result.reasoning and result.reasoning.strip()) or _reasoning_tokens(result) > 0
 
 
 def trace_field(result: ChatResult) -> str | None:
-    """흔적이 어디서 왔나: 'reasoning', 'reasoning_content', 'think_tag'(content 안). 없으면 None."""
+    """흔적이 어디서 왔나: 'reasoning', 'reasoning_content', 'think_tag'(content 안), 'reasoning_tokens'(usage만).
+    없으면 None."""
     if not has_trace(result):
         return None
+    if not (result.reasoning and result.reasoning.strip()):
+        return "reasoning_tokens"
     raw = result.raw if isinstance(result.raw, Mapping) else {}
     choices = raw.get("choices")
     message = choices[0].get("message") if isinstance(choices, list) and choices and isinstance(choices[0], Mapping) else None
@@ -250,12 +275,16 @@ def _post(
     extra: Mapping[str, Any] | None,
     request: str,
 ) -> ChatResult | None:
-    """예산을 하나 쓰고 chat을 한 번 보낸다. 실패면 None(기록은 probes에). 회사 차단은 그대로 올린다."""
+    """예산을 하나 쓰고 chat을 한 번 보낸다. 실패면 None(기록은 probes에). 회사 차단은 그대로 올린다.
+
+    429 자동 재시도는 끈다(`_no_429_retry`): 예산 1 = 실제 POST 1.
+    """
     budget.take(step)
     record: dict[str, Any] = {"step": step, "request": request}
     probes.append(record)
     try:
-        result = client.chat(profile, messages, body_extra=dict(extra) if extra else None, max_tokens=PROBE_MAX_TOKENS)
+        with _no_429_retry():
+            result = client.chat(profile, messages, body_extra=dict(extra) if extra else None, max_tokens=PROBE_MAX_TOKENS)
     except core.PublicHostRefused:
         raise
     except ChatHttpError as exc:
@@ -275,15 +304,78 @@ def _post(
     return result
 
 
-def _is_4xx(record: Mapping[str, Any]) -> bool:
+@contextmanager
+def _no_429_retry() -> Iterator[None]:
+    """탐지 호출 동안 llm_client의 429 재시도(MAX_429)를 0으로. 429는 판정 불가로 이 모듈이 다룬다.
+
+    LlmClient.chat에 재시도 인자가 없어 모듈 값을 잠시 바꾼다(탐지는 init·doctor의 한 스레드에서만 돈다).
+    """
+    if not hasattr(_llm_client_module, "MAX_429"):
+        yield
+        return
+    old = _llm_client_module.MAX_429
+    _llm_client_module.MAX_429 = 0
+    try:
+        yield
+    finally:
+        _llm_client_module.MAX_429 = old
+
+
+def _is_reject(record: Mapping[str, Any]) -> bool:
+    """매개변수·형식 거부(400·404·405·422) = '이 방식이 아님'. 429·408·5xx·연결 실패는 아니다."""
     status = record.get("http_status")
-    return isinstance(status, int) and 400 <= status < 500
+    return record.get("status") == "http" and isinstance(status, int) and status in REJECT_STATUSES
 
 
 def _failure_text(record: Mapping[str, Any]) -> str:
     if record.get("status") == "http":
         return f"{record.get('http_status')} {record.get('error') or ''}".strip()
     return str(record.get("error") or record.get("status"))
+
+
+def _inconclusive_error(record: Mapping[str, Any], probes: list[dict], why: str) -> DetectError:
+    status = record.get("http_status")
+    head = (
+        "LLM 서버가 요청을 제한했습니다(rate limited, 429)"
+        if status == 429
+        else "LLM 서버가 판정할 수 없는 응답을 냈습니다"
+    )
+    return DetectError(
+        f"{head}: {record.get('step')} {_failure_text(record)}. {why} — 탐지 결과를 판정할 수 없어 아무것도 "
+        "저장하지 않습니다 → 잠시 뒤 kb.py init --redetect(또는 kb.py doctor --redetect)로 다시 탐지하세요",
+        probes,
+    )
+
+
+def _post_settled(
+    client: LlmClient,
+    profile: str,
+    budget: Budget,
+    probes: list[dict],
+    step: str,
+    messages: list[dict],
+    extra: Mapping[str, Any] | None,
+    request: str,
+) -> ChatResult | None:
+    """`_post` + 판정 불가 처리. 결과(200) 또는 None(거부: 400·404·405·422).
+
+    429·408·5xx·연결 실패 같은 판정 불가는 RETRY_WAIT_SEC 뒤 한 번 더 보낸다. 그래도 판정 불가이거나
+    다시 보낼 예산이 없으면 DetectError(거짓 값을 저장하지 않게). 첫 호출의 BudgetExhausted는 그대로 올린다.
+    """
+    result = _post(client, profile, budget, probes, step, messages, extra, request)
+    if result is not None or _is_reject(probes[-1]):
+        return result
+    first = probes[-1]
+    first["verdict"] = "판정 불가: 한 번 더 보냄"
+    _sleep(RETRY_WAIT_SEC)
+    try:
+        result = _post(client, profile, budget, probes, f"{step}(재시도)", messages, extra, request)
+    except BudgetExhausted as exc:
+        raise _inconclusive_error(first, probes, f"다시 보낼 탐지 호출 예산이 없습니다({MAX_POSTS}회)") from exc
+    if result is not None or _is_reject(probes[-1]):
+        return result
+    probes[-1]["verdict"] = "판정 불가"
+    raise _inconclusive_error(probes[-1], probes, "다시 보내도 같았습니다")
 
 
 # ---------------------------------------------------------------- 컨텍스트
@@ -401,14 +493,43 @@ def detect_reasoning(client: LlmClient, profile: str, budget: Budget) -> dict:
         except BudgetExhausted:
             untested = [c.name for c in CANDIDATES[index:]]
             return _exhausted(client, finish_none, warnings, base_text, outcomes, untested)
-        if first is None:
+        if first is None:  # 400·404·405·422(판정 불가는 _post_settled가 DetectError로 올린다)
             record = probes[-1]
-            verdict = "거부" if _is_4xx(record) else "오류"
-            outcomes.append(f"{candidate.name}: {verdict}({_failure_text(record)})")
-            record["verdict"] = f"{verdict}: 이 방식이 아님" if verdict == "거부" else "오류: 증거 없음"
+            outcomes.append(f"{candidate.name}: 거부({_failure_text(record)})")
+            record["verdict"] = "거부: 이 방식이 아님"
             continue
         on_r, off_r = _pair(baseline, first, first_on)
         signal = _signal(on_r, off_r, candidate)
+        if signal is None and first_on and _maybe_hidden_thinking(baseline, first, candidate):
+            # 기준선이 흔적 없이 생각하고 있을 수 있다: '끄기'도 보내 기준선과 토큰 수를 견준다
+            probes[-1]["verdict"] = "변화 없음(200은 증거 아님) → 기준선이 길어 끄기도 시험"
+            try:
+                off = _send_candidate(client, profile, budget, probes, candidate, False)
+            except BudgetExhausted:
+                untested = [f"{candidate.name}(끄기 못 함)"] + [c.name for c in CANDIDATES[index + 1 :]]
+                return _exhausted(client, finish_none, warnings, base_text, outcomes, untested)
+            if off is None:
+                outcomes.append(f"{candidate.name}: 켜기 변화 없음, 끄기 거부({_failure_text(probes[-1])})")
+                probes[-1]["verdict"] = "거부: 이 방식이 아님"
+                continue
+            flip = _signal(baseline, off, candidate)  # 기준선을 '켜짐'으로 본다
+            if flip is None:
+                outcomes.append(f"{candidate.name}: 200, 켜기·끄기 모두 변화 없음")
+                probes[-1]["verdict"] = "변화 없음(200은 증거 아님)"
+                continue
+            probes[-1]["verdict"] = f"뒤집힘({flip}, 기준선 대비)"
+            confirm = _signal(first, off, candidate)
+            if confirm is None:
+                outcomes.append(f"{candidate.name}: 끄기로 뒤집혔으나 켜기와 구분되지 않음")
+                probes[-1]["verdict"] = "확인 실패"
+                continue
+            probes[-1]["verdict"] = f"확인({confirm}, 켜기 대비)"
+            # 끄기만 짧았다 = 기준선은 생각 켜짐(흔적 없음)
+            signals = sorted({flip, confirm})
+            toggle = _candidate_toggle(candidate)
+            toggle["evidence"] = _adopt_evidence(candidate, baseline, first, off, True, signals)
+            toggle["source"] = "detected"
+            return {"baseline_reasoning": True, "reasoning_toggle": toggle, "probes": probes, "warnings": warnings}
         if signal is None:
             outcomes.append(f"{candidate.name}: 200, 변화 없음")
             probes[-1]["verdict"] = "변화 없음(200은 증거 아님)"
@@ -447,7 +568,17 @@ def _send_candidate(
 ) -> ChatResult | None:
     extra, prefix = _toggle_request(_candidate_toggle(candidate), on)
     step = f"{candidate.name}:{'on' if on else 'off'}"
-    return _post(client, profile, budget, probes, step, _messages(ARITHMETIC_PROMPT, prefix=prefix), extra, candidate.describe(on))
+    return _post_settled(
+        client, profile, budget, probes, step, _messages(ARITHMETIC_PROMPT, prefix=prefix), extra, candidate.describe(on)
+    )
+
+
+def _maybe_hidden_thinking(baseline: ChatResult, on_result: ChatResult, candidate: Candidate) -> bool:
+    """흔적 없는 기준선이 사실은 생각 중일 수 있는가: 둘 다 흔적 없음 + 토큰 규칙이 걸릴 만큼 긴 기준선."""
+    if not candidate.tokens_ok or has_trace(baseline) or has_trace(on_result):
+        return False
+    tokens = _completion_tokens(baseline)
+    return tokens is not None and tokens >= TOKEN_GAP
 
 
 def _adopt_evidence(
@@ -515,22 +646,27 @@ def detect_json(client: LlmClient, profile: str, budget: Budget, *, toggle: Mapp
     extra, prefix, state = _off_request(toggle)
     extra = {**extra, "response_format": {"type": "json_object"}}
     try:
-        result = _post(
+        result = _post_settled(
             client, profile, budget, probes, "json_mode", _messages(JSON_PROMPT, system=JSON_SYSTEM_PROMPT, prefix=prefix),
             extra, f"response_format=json_object, {state}",
         )
-    except BudgetExhausted:
-        return {"json_mode": False, "evidence": "budget_exhausted: 보내지 못함", "probes": probes}
-    if result is None:
+    except BudgetExhausted as exc:  # 보내지 못한 것을 거짓으로 저장하지 않는다
+        raise DetectError(
+            f"탐지 호출 예산({MAX_POSTS}회)이 떨어져 JSON 모드를 시험하지 못했습니다. 아무것도 저장하지 않습니다 "
+            "→ kb.py init --redetect로 다시 탐지하세요",
+            probes,
+        ) from exc
+    if result is None:  # 400·404·405·422
         record = probes[-1]
-        verdict = f"거부({_failure_text(record)})" if _is_4xx(record) else f"오류({_failure_text(record)})"
+        verdict = f"거부({_failure_text(record)})"
         record["verdict"] = verdict
         return {"json_mode": False, "evidence": f"response_format {verdict}", "probes": probes}
     out: dict[str, Any] = {"probes": probes}
+    parsed = True
     try:
         data = json.loads(result.content)
     except ValueError:
-        data = None
+        data, parsed = None, False
     if isinstance(data, dict):
         out.update(json_mode=True, evidence="content가 json.loads로 JSON 객체")
     elif not result.content.strip() and result.reasoning:
@@ -541,7 +677,7 @@ def detect_json(client: LlmClient, profile: str, budget: Budget, *, toggle: Mapp
         else:
             out.update(json_mode=True, evidence="content 비었고 JSON은 reasoning 필드에만 있음", note="json_in_reasoning")
     else:
-        why = "빈 답" if not result.content.strip() else "json.loads 실패" if data is None else "JSON 객체 아님"
+        why = "빈 답" if not result.content.strip() else "json.loads 실패" if not parsed else "JSON 객체 아님"
         out.update(json_mode=False, evidence=f"200이지만 {why}(finish={result.finish_reason})")
     probes[-1]["verdict"] = out["evidence"]
     return out
@@ -556,15 +692,19 @@ def detect_vision(client: LlmClient, profile: str, budget: Budget, *, toggle: Ma
         {"type": "image_url", "image_url": {"url": red_png_data_url()}},
     ]
     try:
-        result = _post(
+        result = _post_settled(
             client, profile, budget, probes, "vision", _messages(user, prefix=prefix), extra or None,
             f"{VISION_SIZE}×{VISION_SIZE} 빨강 PNG, {state}",
         )
-    except BudgetExhausted:
-        return {"vision": False, "evidence": "budget_exhausted: 보내지 못함", "probes": probes}
-    if result is None:
+    except BudgetExhausted as exc:  # 보내지 못한 것을 거짓으로 저장하지 않는다
+        raise DetectError(
+            f"탐지 호출 예산({MAX_POSTS}회)이 떨어져 비전을 시험하지 못했습니다. 아무것도 저장하지 않습니다 "
+            "→ kb.py init --redetect로 다시 탐지하세요",
+            probes,
+        ) from exc
+    if result is None:  # 400·404·405·422
         record = probes[-1]
-        verdict = f"거부({_failure_text(record)})" if _is_4xx(record) else f"오류({_failure_text(record)})"
+        verdict = f"거부({_failure_text(record)})"
         record["verdict"] = verdict
         return {"vision": False, "evidence": f"이미지 요청 {verdict}", "probes": probes}
     out: dict[str, Any] = {"probes": probes}
@@ -586,7 +726,8 @@ def detect(client: LlmClient, profile: str) -> dict:
 
     반환: {context_tokens, context_source, json_mode, vision, reasoning_toggle{method, param_name?,
     on_value, off_value, evidence, source}, baseline_reasoning, probes[, notes][, warnings]}.
-    기준선 호출이 실패하면 DetectError. 회사 환경의 공개 호스트는 PublicHostRefused.
+    기준선 호출이 실패하거나 판정 불가(429·5xx 등)가 다시 보내도 계속되면 DetectError(저장하지 말 것).
+    회사 환경의 공개 호스트는 PublicHostRefused.
     """
     base_url = _model_of(client, profile).get("base_url")
     assert_host_allowed(client.cfg, base_url if isinstance(base_url, str) else "")
@@ -603,9 +744,14 @@ def detect(client: LlmClient, profile: str) -> dict:
     probes += reasoning["probes"]
     toggle = reasoning["reasoning_toggle"]
 
-    json_part = detect_json(client, profile, budget, toggle=toggle)
-    vision_part = detect_vision(client, profile, budget, toggle=toggle)
-    probes += json_part["probes"] + vision_part["probes"]
+    try:
+        json_part = detect_json(client, profile, budget, toggle=toggle)
+        probes += json_part["probes"]
+        vision_part = detect_vision(client, profile, budget, toggle=toggle)
+        probes += vision_part["probes"]
+    except DetectError as exc:
+        exc.probes = probes + exc.probes
+        raise
 
     notes = [part["note"] for part in (json_part, vision_part) if part.get("note")]
     if toggle.get("evidence", "").startswith("budget_exhausted"):

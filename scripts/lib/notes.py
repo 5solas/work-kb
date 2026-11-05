@@ -328,8 +328,20 @@ def _region(name: str) -> str:
     return f"<!-- kb:{name}:start -->\n<!-- kb:{name}:end -->\n"
 
 
+def _fm_line(key: str, value: str) -> str:
+    """front matter 한 줄 `key: value\\n`. 값은 YAML로 안전하게(필요하면 따옴표) 쓴다.
+
+    이름이 `- x`·`!x`·`@x`·`&x`·`%x`·`'x`·`{x}`처럼 YAML 표시로 시작해도 읽으면 같은 문자열이다.
+    평범한 이름(`배포`, `김철수`)은 따옴표 없이 그대로다.
+    """
+    return frontmatter.render({key: value})[4:-4].decode("utf-8")
+
+
 def page_template(kind: str, name: str, *, title: str | None, today: str) -> tuple[Path | None, str]:
-    """(볼트 기준 상대 경로 조각, 본문). kind: jira·project·person·topic·decisions·actions·index·proposals·lint."""
+    """(볼트 기준 상대 경로 조각, 본문). kind: jira·project·person·topic·decisions·actions·index·proposals·lint.
+
+    사람·주제 이름과 프로젝트 제목은 LLM·Jira에서 올 수 있어서 front matter에 따옴표 규칙대로 쓴다.
+    """
     if kind == "jira":
         project = name.split("-", 1)[0]
         body = (
@@ -341,19 +353,19 @@ def page_template(kind: str, name: str, *, title: str | None, today: str) -> tup
     if kind == "project":
         heading = f"{name} — {title}" if title else name
         body = (
-            f"---\ntype: project\nkey: {name}\ntitle: {title or name}\nupdated: {today}\n---\n"
+            f"---\ntype: project\nkey: {name}\n{_fm_line('title', title or name)}updated: {today}\n---\n"
             f"# {heading}\n\n## 개요\n\n## 현재 일감\n{_region('issues')}\n## 최근 요약\n{_region('summary')}\n## 언급\n{_region('mentions')}"
         )
         return Path("wiki") / "projects" / f"{name}.md", body
     if kind == "person":
         body = (
-            f"---\ntype: person\nname: {name}\nupdated: {today}\n---\n"
+            f"---\ntype: person\n{_fm_line('name', name)}updated: {today}\n---\n"
             f"# {name}\n\n## 개요\n\n## 최근 요약\n{_region('summary')}\n## 언급\n{_region('mentions')}"
         )
         return Path("wiki") / "people" / f"{core.safe_name(name)}.md", body
     if kind == "topic":
         body = (
-            f"---\ntype: topic\nname: {name}\naliases: []\nupdated: {today}\n---\n"
+            f"---\ntype: topic\n{_fm_line('name', name)}aliases: []\nupdated: {today}\n---\n"
             f"# {name}\n\n## 개요\n\n## 최근 요약\n{_region('summary')}\n## 언급\n{_region('mentions')}"
         )
         return Path("wiki") / "topics" / f"{core.safe_name(name)}.md", body

@@ -16,6 +16,14 @@ system_prefix, default_thinking, trace_field, content_null_when_thinking, broken
 no_usage, always_reasoning_truncate, connection_drop_once, http_500_once, context_length, call_counter
 (`RunningMock.counts`), canned(`KB-TASK: <이름>` 첫 줄로 고른 답), echo_request.
 
+Phase 4 리뷰 뒤 더한 모드:
+- `rate_limit_on="reasoning_effort"`(또는 목록): 그 최상위 매개변수가 실린 요청에 429. 이름 `"image"`는
+  이미지가 실린 요청, `"*"`는 모든 채팅 요청. 429도 `counts["chat"]`에 센다.
+- `http_500_always=True`: 모든 채팅 요청에 500(계속 죽은 서버).
+- `json_answer="20"`: response_format이 실린 요청의 답 content를 이 문자열로(JSON 객체가 아닌 JSON 시험용).
+- `reasoning_tokens_in_usage=False`: 생각해도 `usage.completion_tokens_details.reasoning_tokens`를 보내지
+  않는다(기본은 보냄 — DeepInfra처럼). `trace_field="none"`과 함께 쓰면 흔적이 전혀 없는 서버.
+
 라우팅은 `ROUTES` 표(메서드, 경로 정규식, 처리 함수)로 한다. 이후 단계(Phase 4)는 표에 줄을
 더하고 `KNOWN_MODES`에 모드 이름을 더한다.
 """
@@ -41,6 +49,8 @@ KNOWN_MODES = {
     "trace_field", "content_null_when_thinking", "json_mode", "vision", "broken_json_once", "no_models",
     "no_usage", "always_reasoning_truncate", "connection_drop_once", "http_500_once", "context_length",
     "call_counter", "canned", "echo_request",
+    # Phase 4 리뷰 뒤
+    "rate_limit_on", "http_500_always", "json_answer", "reasoning_tokens_in_usage",
 }
 _TRIPLE = {"accept", "reject", "ignore"}
 _ENUM_MODES = {
@@ -459,6 +469,9 @@ def _answer_for(req: Request, structured: bool):
             return (value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)), None
     urls = _image_urls(body.get("messages"))
     answer = DEFAULT_ANSWER
+    json_answer = modes.get("json_answer")
+    if structured and isinstance(json_answer, str):
+        answer = json_answer
     if urls:
         vision = modes.get("vision")
         if vision == "reject":
@@ -467,6 +480,22 @@ def _answer_for(req: Request, structured: bool):
             ko, en = _dominant_colour(urls[0])
             answer = json.dumps({"ok": True, "color": ko, "color_en": en, "description": f"이미지의 지배적인 색은 {ko}({en})입니다"}, ensure_ascii=False)
     return answer, None
+
+
+def _rate_limited(setting, body: dict) -> bool:
+    """`rate_limit_on` 모드: 이 요청이 429를 받을 대상인가."""
+    if not setting:
+        return False
+    names = [setting] if isinstance(setting, str) else list(setting)
+    for name in names:
+        if name == "*":
+            return True
+        if name == "image":
+            if _image_urls(body.get("messages")):
+                return True
+        elif name in body:
+            return True
+    return False
 
 
 def _chat(req: Request):
@@ -478,10 +507,14 @@ def _chat(req: Request):
         return 200, Drop()
     if fault == "http_500_once":
         return 500, {"error": {"message": "서버 내부 오류"}}
+    if modes.get("http_500_always"):
+        return 500, {"error": {"message": "서버 내부 오류(계속)"}}
     if req.bad_json or not isinstance(req.json, dict):
         return _bad_request("잘못된 JSON")
     body = req.json
     messages = body.get("messages")
+    if _rate_limited(modes.get("rate_limit_on"), body):
+        return 429, {"error": {"message": "요청이 너무 많습니다(rate limited)"}}
 
     ctx = modes.get("context_length")
     if isinstance(ctx, int) and not isinstance(ctx, bool) and _all_text_chars(messages) / 2.5 > ctx:
@@ -539,7 +572,7 @@ def _chat(req: Request):
     }
     if not modes.get("no_usage"):
         usage = {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion}
-        if trace_tokens:
+        if trace_tokens and modes.get("reasoning_tokens_in_usage", True):
             usage["completion_tokens_details"] = {"reasoning_tokens": trace_tokens}
         result["usage"] = usage
     return 200, result

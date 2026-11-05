@@ -25,6 +25,14 @@
   status: ok | skipped | gave_up. 같은 입력으로 3번 연속 건너뛰면 gave_up이고, 입력이 바뀌거나
   `--force`가 아니면 다시 보내지 않는다. ok인 단위는 새 줄이 생길 때만 다시 보낸다(지운 줄은 무시).
   `_`로 시작하는 키는 작업이 아니다.
+  줄 해시는 `line_hashes()`의 대표 해시: 키 위키링크(`[[KB-12]]`·`[[jira/KB-12]]`·`[[KB-12|x]]`)를 맨 키로
+  푼 줄의 core.line_hash. 원문 해시와 promote 꼬리(` [[NEW-1]]`)를 뗀 꼴의 해시도 같은 줄로 본다(이전 원장·
+  `src:` 표시 호환, link·promote가 줄을 고쳐도 중복 없음). T1 원장은 실행마다 옛 키를 대표 키로 옮기고
+  없어진 줄의 키를 지운다(link의 태그 개수가 정직하게).
+  T2 단위의 `emitted_srcs`: 그 날에서 낸 항목의 src 전부. 사람이 항목을 지워도(기각) 다시 붙이지 않는다.
+  입력 한도(D41): T2·T4는 응답한 프로필의 한도에 맞춰 앞쪽부터 보내고 나머지를 다시 나눠 보낸다(부분 결과를
+  합친다). 모든 줄을 보냈을 때만 ok. T1·T3은 가장 최근 줄만 남긴다(T1은 보낸 줄만 원장에 적는다).
+  T2·T4는 쓸 파일의 관리 구역을 LLM 호출 전에 확인해서, 망가졌으면 그 작업을 하지 않는다.
 
 지키는 것
 - daily·inbox·raw는 읽기만 한다(바이트 불변). 쓰는 곳: wiki/decisions.md, wiki/actions.md,
@@ -37,7 +45,8 @@
 
 T1 출력 상한: `llm.tasks.tag.max_output_tokens`(기본 64)는 **줄 하나당** 값으로 읽고, 이 모듈이
 만드는 클라이언트에는 `줄당 × 묶음 크기(40)`(최대 16384)를 준다. 밖에서 클라이언트를 넘기면 그 상한에
-맞춰 묶음 크기를 줄인다(줄당 16토큰 가정).
+맞춰 묶음 크기를 줄인다(줄당 16토큰 가정). 묶음은 한 번 훑으며 만든다: 묶음 크기에 닿거나 글자 예산
+(입력 한도 × 2.5 - 프롬프트 몫)을 넘으면 새 묶음(1,000줄 → 25요청).
 """
 from __future__ import annotations
 
@@ -60,6 +69,7 @@ TASKS: tuple[str, ...] = ("tag", "decisions", "entity_summary", "topic_proposal"
 LEDGER = "compile"  # .state/compile.json
 PROPOSALS_KEY = "_proposals"
 GIVE_UP_AFTER = 3
+EMITTED = "emitted_srcs"  # T2 원장: 그 단위가 낸 항목의 src 전부
 DEFAULT_SINCE_DAYS = 7  # --date·--since가 없을 때 T1·T2가 보는 날 수(오늘 포함). 0이면 전부
 T4_EVERY_DAYS = 7
 T4_WINDOW_DAYS = 14
@@ -88,6 +98,10 @@ _CHECKBOX = re.compile(r"^[-*+] \[[ xX]\] ")
 _BULLET = re.compile(r"^[-*+] ")
 _TOPIC_BAD = re.compile(r'[\[\]#^|<>:"/\\?*\x00-\x1f]')
 _META_LINE = re.compile(r"^- (출처|갱신): ")
+# link가 맨 키를 감싼 꼴(`[[KB-12]]`·`[[jira/KB-12]]`·`[[KB-12|별칭]]`) → `KB-12`(정규화의 역)
+_KEY_LINK = re.compile(r"\[\[(?:jira/)?([A-Z][A-Z0-9_]+-[1-9][0-9]*)(?:\|[^\[\]\n]*)?\]\]")
+# promote가 줄 끝에 붙이는 ` [[NEW-1]]`
+_PROMOTE_TAIL = re.compile(r"[ \t]+\[\[(?:jira/)?[A-Z][A-Z0-9_]+-[1-9][0-9]*(?:\|[^\[\]\n]*)?\]\][ \t]*$")
 
 Edit = tuple[Path, "str | None", Callable[[bytes], bytes]]
 
@@ -102,7 +116,7 @@ def fixed_tags() -> tuple[str, ...]:
         text = (prompts.CODE_ROOT / prompts.AGENTS_NAME).read_bytes().decode("utf-8-sig")
     except (OSError, UnicodeDecodeError):
         return DEFAULT_TAGS
-    body = prompts.section(text, "태그")
+    body = prompts.section(text, "태그", level=prompts.AGENTS_LEVEL)
     for line in (body or "").splitlines()[1:]:
         stripped = line.strip()
         if stripped.count(",") >= 2 and not stripped.startswith(("#", "-", "|", ">")):
@@ -192,6 +206,7 @@ def validate_topic_proposal(data: Mapping) -> None:
         where = f"proposals[{i}]"
         _need(isinstance(item, Mapping), f"{where}: 객체여야 합니다")
         _need(_nonempty(item.get("name")), f"{where}.name: 비어 있습니다")
+        _need(bool(topic_name(item["name"])), f"{where}.name: 쓸 수 있는 글자가 없습니다")
         _need(item.get("why") is None or isinstance(item.get("why"), str), f"{where}.why: 문자열이어야 합니다")
         _check_str_list(item.get("sample_sources"), f"{where}.sample_sources", required=True)
         _need(item.get("merge_with") is None or isinstance(item.get("merge_with"), str), f"{where}.merge_with: 문자열 또는 null")
@@ -208,21 +223,60 @@ SCHEMAS: dict[str, Callable[[Mapping], None]] = {
 # ---------------------------------------------------------------- 자료형
 
 
+def canonical_line(text: str) -> str:
+    """중복 판정용 줄 꼴: 키 위키링크를 맨 키로 푼다(link의 `KB-12` → `[[KB-12]]` 정규화의 역)."""
+    return _KEY_LINK.sub(r"\1", text)
+
+
+def line_hashes(text: str) -> tuple[str, ...]:
+    """(대표 해시, 같은 줄로 보는 다른 해시…).
+
+    대표 해시는 core.line_hash(canonical_line(줄)). 다른 해시는 원문 그대로의 해시(이전 원장·`src:` 표시와
+    맞추려고)와, 줄 끝에 promote가 붙인 ` [[KEY-n]]`가 있으면 그것을 뗀 꼴의 해시들이다. 그래서 link가
+    키를 감싸거나 promote가 키를 붙여도 이미 처리한 줄로 본다.
+    """
+    out = [core.line_hash(canonical_line(text)), core.line_hash(text)]
+    tail = _PROMOTE_TAIL.search(text)
+    if tail:
+        base = text[: tail.start()]
+        out += [core.line_hash(canonical_line(base)), core.line_hash(base)]
+    return tuple(dict.fromkeys(out))
+
+
 @dataclass(frozen=True)
 class Item:
     """모델에 보여 주는 입력 줄 하나."""
 
     rel: str  # 원천 파일(볼트 기준, `/`)
-    hash: str  # core.line_hash(원문 줄)
+    hash: str  # 대표 해시: core.line_hash(canonical_line(원문 줄))
     text: str  # 모델에 보일 글(목록 기호 `- ` 뗌)
     day: str  # YYYY-MM-DD(분할용). 없으면 ""
     source: str  # 렌더된 출처: `[[2026-11-04]] 09:12`, `[[사이드카 이름]]`
     kind: str = "line"  # line | checkbox | extracted | mention
     id: str = ""
+    aliases: tuple[str, ...] = ()  # 같은 줄로 보는 다른 해시(line_hashes의 나머지)
 
     @property
     def key(self) -> str:
         return f"{self.rel}#{self.hash}"
+
+    @property
+    def all_hashes(self) -> tuple[str, ...]:
+        return (self.hash, *self.aliases)
+
+    @property
+    def all_keys(self) -> tuple[str, ...]:
+        return tuple(f"{self.rel}#{h}" for h in self.all_hashes)
+
+    @property
+    def srcs(self) -> frozenset[str]:
+        """이 줄로 볼 수 있는 `src:` 값 전부(대표 + 이전 꼴)."""
+        return frozenset(_src_of(self.rel, h) for h in self.all_hashes)
+
+
+def _item_for(rel: str, raw: str, **fields: Any) -> Item:
+    hashes = line_hashes(raw)
+    return Item(rel=rel, hash=hashes[0], aliases=hashes[1:], **fields)
 
 
 @dataclass
@@ -285,14 +339,23 @@ def _units(ledger: dict, task: str) -> dict:
 
 def _pending(record: Any, hashes: Iterable[str], force: bool) -> bool:
     """이 단위를 (다시) 보내야 하는가. ok는 새 줄이 있을 때만, gave_up은 입력이 바뀌었을 때만."""
+    return _pending_groups(record, [(h,) for h in hashes], force)
+
+
+def _pending_groups(record: Any, groups: Sequence[Sequence[str]], force: bool) -> bool:
+    """_pending과 같되 줄마다 (대표, 다른 꼴…) 해시 묶음. 묶음 중 하나라도 원장에 있으면 본 줄이다."""
     if force or not isinstance(record, Mapping):
         return True
-    current = set(hashes)
     status = record.get("status")
     if status == "ok":
-        return bool(current - set(record.get("line_hashes") or []))
+        seen = set(record.get("line_hashes") or [])
+        return any(not seen.intersection(group) for group in groups)
     if status == "gave_up":
-        return sorted(record.get("attempt_hashes") or []) != sorted(current)
+        attempt = set(record.get("attempt_hashes") or [])
+        if sorted(attempt) == sorted({group[0] for group in groups}):
+            return False
+        # 이전 꼴 해시로 기록된 포기: 줄마다 정확히 하나가 대응하면 같은 입력이다
+        return not (len(attempt) == len(groups) and all(attempt.intersection(group) for group in groups))
     return True
 
 
@@ -305,7 +368,7 @@ def _fail_record(ctx: _Ctx, old: Any, hashes: Iterable[str]) -> dict:
     old = old if isinstance(old, Mapping) else {}
     same = old.get("status") in ("skipped", "gave_up") and sorted(old.get("attempt_hashes") or []) == attempt
     skips = (int(old.get("skips") or 0) if same else 0) + 1
-    return {
+    record = {
         "status": "gave_up" if skips >= GIVE_UP_AFTER else "skipped",
         "profile": None,
         "at": ctx.now_iso(),
@@ -313,6 +376,24 @@ def _fail_record(ctx: _Ctx, old: Any, hashes: Iterable[str]) -> dict:
         "attempt_hashes": attempt,
         "skips": skips,
     }
+    if old.get(EMITTED):
+        record[EMITTED] = list(old[EMITTED])
+    return record
+
+
+def _emitted(record: Any) -> set[str]:
+    """T2 단위가 지금까지 낸 항목의 src(지워진 항목도 포함: 지움 = 기각, 다시 붙이지 않는다)."""
+    values = record.get(EMITTED) if isinstance(record, Mapping) else None
+    return {str(v) for v in values} if isinstance(values, list) else set()
+
+
+def _all_emitted(ledger: Mapping) -> set[str]:
+    units = ledger.get("decisions")
+    out: set[str] = set()
+    if isinstance(units, Mapping):
+        for record in units.values():
+            out |= _emitted(record)
+    return out
 
 
 def _note_failure(ctx: _Ctx, task: str, record: dict, label: str) -> None:
@@ -410,8 +491,13 @@ def _one_line(value: Any, limit: int) -> str:
     return text
 
 
+def _src_of(rel: str, digest: str) -> str:
+    return core.sha256_hex(f"{rel}\n{digest}".encode("utf-8"))[:16]
+
+
 def _src(item: Item) -> str:
-    return core.sha256_hex(f"{item.rel}\n{item.hash}".encode("utf-8"))[:16]
+    """새 항목에 남기는 `src:` 값(대표 해시 기준). 판정은 item.srcs 전부로 한다."""
+    return _src_of(item.rel, item.hash)
 
 
 def _bare(text: str) -> str:
@@ -431,6 +517,23 @@ def _fit_newest(items: Sequence[Item], limit: int, render: Callable[[Item], str]
         chosen.append(item)
         used += size
     return list(reversed(chosen))
+
+
+def _fit_oldest(items: Sequence[Item], limit: int, render: Callable[[Item], str], reserve: int = 0) -> list[Item]:
+    """추정 토큰 limit(글자 수 = limit × 2.5 - reserve) 안에 드는 앞쪽(오래된) 항목들. 최소 1개.
+
+    T2·T4가 쓴다: 나머지는 버리지 않고 다음 요청으로 다시 나눠 보낸다(D41: 분할, 버리지 않음).
+    """
+    budget = max(limit * 2.5 - reserve, 1)
+    chosen: list[Item] = []
+    used = 0
+    for item in items:
+        size = len(render(item)) + 1
+        if chosen and used + size > budget:
+            break
+        chosen.append(item)
+        used += size
+    return chosen
 
 
 def _chunks(items: Sequence[Item], limit: int, render: Callable[[Item], str]) -> list[list[Item]]:
@@ -511,7 +614,7 @@ def _record_items(rel: str, day: str, data: bytes) -> list[Item]:
             continue
         source = f"[[{day}]] {line.time}" if line.time else f"[[{day}]]"
         kind = "checkbox" if _CHECKBOX.match(text) else "line"
-        items.append(Item(rel=rel, hash=line.hash, text=_bare(text), day=day, source=source, kind=kind))
+        items.append(_item_for(rel, line.text, text=_bare(text), day=day, source=source, kind=kind))
     return items
 
 
@@ -553,7 +656,7 @@ def _sidecar_items(ctx: _Ctx, day: str, records: Sequence[Item]) -> list[Item]:
         for raw in notes.split_lines(notes.decode(body)):
             text = raw.strip()
             if text:
-                items.append(Item(rel=rel, hash=core.line_hash(raw), text=_bare(text), day=day, source=f"[[inbox/{path.stem}]]", kind="extracted"))
+                items.append(_item_for(rel, raw, text=_bare(text), day=day, source=f"[[inbox/{path.stem}]]", kind="extracted"))
     return items
 
 
@@ -600,6 +703,47 @@ def _tag_user(items: Sequence[Item]) -> str:
     return "\n".join(lines)
 
 
+def _tidy_tag_ledger(ctx: _Ctx, files: Sequence[tuple[str, str, bytes]]) -> None:
+    """T1 원장 정리(LLM 없음). 읽은 daily마다:
+
+    - 이전 꼴 해시(원문 해시, promote 앞 꼴)로 적힌 기록은 대표 해시 키로 옮긴다.
+    - 줄이 없어진(지워졌거나 고쳐진) 기록과 파일이 없어진 기록은 지운다.
+    그래서 link.tag_counts가 같은 줄을 두 번 세거나 없는 줄을 세지 않는다. 바뀔 것이 없으면 쓰지 않는다.
+    """
+    units = ctx.ledger.get("tag")
+    if not isinstance(units, dict) or not units:
+        return
+    read = {rel: _record_items(rel, day, data) for day, rel, data in files}
+    moves: dict[str, str | None] = {}  # 옛 키 → 새 키(None이면 지움)
+    for key in list(units):
+        rel, sep, _digest = str(key).partition("#")
+        if not sep:
+            continue
+        if rel not in read:
+            if rel.startswith("daily/") and not ctx.cfg.path(*rel.split("/")).exists():
+                moves[key] = None
+            continue
+        items = read[rel]
+        if any(item.key == key for item in items):
+            continue
+        target = next((item.key for item in items if key in item.all_keys), None)
+        moves[key] = target if target and target not in units else None
+    if not moves:
+        return
+
+    def fn(ledger: dict) -> list[Edit]:
+        tag_units = _units(ledger, "tag")
+        for old, new in moves.items():
+            record = tag_units.pop(old, None)
+            if new is not None and isinstance(record, dict) and new not in tag_units:
+                record = dict(record)
+                record["line_hashes"] = [new.partition("#")[2]]
+                tag_units[new] = record
+        return []
+
+    _commit(ctx, "태그 원장 정리", fn)
+
+
 def _plan_tag(ctx: _Ctx, files: Sequence[tuple[str, str, bytes]]) -> list[Item]:
     units = ctx.ledger.get("tag") if isinstance(ctx.ledger.get("tag"), dict) else {}
     seen: set[str] = set()
@@ -609,9 +753,28 @@ def _plan_tag(ctx: _Ctx, files: Sequence[tuple[str, str, bytes]]) -> list[Item]:
             if item.key in seen:
                 continue
             seen.add(item.key)
-            if _pending(units.get(item.key), [item.hash], ctx.force):
+            record = next((units[k] for k in item.all_keys if k in units), None)
+            if _pending_groups(record, [item.all_hashes], ctx.force):
                 out.append(item)
     return out
+
+
+def _tag_batches(items: Sequence[Item], per_batch: int, limit: int) -> list[list[Item]]:
+    """한 번 훑으며 묶는다: per_batch줄이 차거나 글자 예산(limit × 2.5 - 프롬프트 몫)을 넘으면 새 묶음."""
+    budget = max(limit * 2.5 - len(_tag_user([])) - 1, 1)
+    batches: list[list[Item]] = []
+    current: list[Item] = []
+    used = 0
+    for item in items:
+        size = len(f"[L{per_batch}] {item.day} {item.text}") + 1
+        if current and (len(current) >= per_batch or used + size > budget):
+            batches.append(current)
+            current, used = [], 0
+        current.append(item)
+        used += size
+    if current:
+        batches.append(current)
+    return batches
 
 
 def _run_tag(ctx: _Ctx, items: list[Item]) -> None:
@@ -619,10 +782,7 @@ def _run_tag(ctx: _Ctx, items: list[Item]) -> None:
         return
     per_batch = max(1, min(TAG_BATCH_LINES, ctx.client.max_output_tokens("tag") // TAG_TOKENS_PER_LINE))
     limit = ctx.client.input_limit("tag")
-    batches: list[list[Item]] = []
-    for chunk in _chunks(items, limit, lambda it: f"[L00] {it.day} {it.text}"):
-        batches += [chunk[i : i + per_batch] for i in range(0, len(chunk), per_batch)]
-    for batch in batches:
+    for batch in _tag_batches(items, per_batch, limit):
         numbered = _numbered(batch, "L")
         sent: dict[str, Item] = {}
 
@@ -689,6 +849,10 @@ class _DayUnit:
     def hashes(self) -> list[str]:
         return [item.key for item in self.items]
 
+    @property
+    def groups(self) -> list[tuple[str, ...]]:
+        return [item.all_keys for item in self.items]
+
 
 def _present_srcs(ctx: _Ctx, rel_parts: tuple[str, ...], region: str) -> set[str]:
     data = _current(ctx, ctx.cfg.path(*rel_parts))
@@ -701,6 +865,30 @@ def _present_srcs(ctx: _Ctx, rel_parts: tuple[str, ...], region: str) -> set[str
     return set(_SRC_RE.findall(text))
 
 
+def _targets_ok(ctx: _Ctx, task: str, targets: Sequence[tuple[tuple[str, ...], str]]) -> bool:
+    """쓸 파일의 관리 구역을 LLM 호출 전에 확인한다. 망가졌으면 알리고 False(이 작업은 이번에 하지 않는다).
+
+    파일이 없으면 괜찮다(템플릿으로 만든다). 구역이 없어도 괜찮다(끝에 만든다).
+    """
+    good = True
+    for rel_parts, region in targets:
+        data = _current(ctx, ctx.cfg.path(*rel_parts))
+        if data is None:
+            continue
+        try:
+            notes.decode(data)
+            managed.read_region(data, region)
+        except (managed.MarkerError, UnicodeDecodeError) as exc:
+            reason = notes.NOT_UTF8 if isinstance(exc, UnicodeDecodeError) else str(exc)
+            ctx.problem(f"{'/'.join(rel_parts)}: 관리 구역을 읽지 못해 {task}을(를) 하지 않았습니다 ({reason}) → 고친 뒤 다시 실행")
+            good = False
+    return good
+
+
+DECISION_TARGETS: tuple[tuple[tuple[str, ...], str], ...] = ((("wiki", "decisions.md"), "decisions"), (("wiki", "actions.md"), "actions"))
+PROPOSAL_TARGETS: tuple[tuple[tuple[str, ...], str], ...] = ((("wiki", "_proposals.md"), "proposals"),)
+
+
 def _plan_decisions(ctx: _Ctx, files: Sequence[tuple[str, str, bytes]]) -> list[_DayUnit]:
     units = ctx.ledger.get("decisions") if isinstance(ctx.ledger.get("decisions"), dict) else {}
     out: list[_DayUnit] = []
@@ -708,13 +896,15 @@ def _plan_decisions(ctx: _Ctx, files: Sequence[tuple[str, str, bytes]]) -> list[
         records = _record_items(rel, day, data)
         sidecars = _sidecar_items(ctx, day, records)
         unit = _DayUnit(day, rel, records, sidecars)
-        if unit.items and _pending(units.get(rel), unit.hashes, ctx.force):
+        if unit.items and _pending_groups(units.get(rel), unit.groups, ctx.force):
             out.append(unit)
+    if out and not _targets_ok(ctx, "decisions", DECISION_TARGETS):
+        return []
     return out
 
 
 def _decision_line(item: Item, consumed: set[str]) -> str:
-    mark = "(이미 반영) " if _src(item) in consumed else ""
+    mark = "(이미 반영) " if item.srcs & consumed else ""
     if item.kind == "extracted":
         return f"[{item.id}] {mark}({Path(item.rel).stem}) {item.text}"
     return f"[{item.id}] {mark}{item.text}"
@@ -798,13 +988,25 @@ def _action_entry(item: Item, raw: Mapping, related: list[str]) -> str:
     return " · ".join(parts) + "\n"
 
 
-def _append_new(region: str, entries: Sequence[tuple[str, str]]) -> Callable[[bytes], bytes]:
-    """src가 구역에 아직 없는 항목만 끝에 붙인다(잠금 안에서 다시 읽은 바이트 기준)."""
+def _append_new(
+    region: str,
+    entries: Sequence[tuple[frozenset[str], str]],
+    rejected: Iterable[str] = (),
+    added: list[int] | None = None,
+) -> Callable[[bytes], bytes]:
+    """src가 구역에 아직 없고 원장의 낸 src(rejected)에도 없는 항목만 끝에 붙인다.
+
+    entries: (그 줄로 볼 수 있는 src 전부, 항목 글). 잠금 안에서 다시 읽은 바이트 기준이다.
+    한 번 낸 뒤 사람이 지운 항목은 rejected에 있어서 다시 붙지 않는다. 붙인 수는 added[0].
+    """
+    skip = set(rejected)
 
     def transform(data: bytes) -> bytes:
         text = _region_text(data, region) or ""
-        present = set(_SRC_RE.findall(text))
-        new = [entry for src, entry in entries if src not in present]
+        present = set(_SRC_RE.findall(text)) | skip
+        new = [entry for srcs, entry in entries if not srcs & present]  # 한 줄에서 여러 항목이면 모두
+        if added is not None:
+            added[0] = len(new)
         return managed.append_to_region(data, region, new) if new else data
 
     return transform
@@ -813,7 +1015,11 @@ def _append_new(region: str, entries: Sequence[tuple[str, str]]) -> Callable[[by
 def _run_decisions(ctx: _Ctx, units: list[_DayUnit]) -> None:
     keys = list(ctx.project_keys)
     for unit in units:
-        consumed = _present_srcs(ctx, ("wiki", "decisions.md"), "decisions") | _present_srcs(ctx, ("wiki", "actions.md"), "actions")
+        consumed = (
+            _present_srcs(ctx, ("wiki", "decisions.md"), "decisions")
+            | _present_srcs(ctx, ("wiki", "actions.md"), "actions")
+            | _all_emitted(ctx.ledger)  # 지워진 항목도 반영된 줄로 본다(지움 = 기각)
+        )
         records = _numbered(unit.records, "L")
         sidecars = _numbered(unit.sidecars, "X")
         jira = _jira_summaries(ctx, [item.text for item in unit.items])
@@ -823,17 +1029,20 @@ def _run_decisions(ctx: _Ctx, units: list[_DayUnit]) -> None:
         reserve = sum(len(line) + 1 for line in jira) + 200
         render = lambda it: _decision_line(it, consumed)  # noqa: E731
         limit = ctx.client.input_limit("decisions")
-        chunks = _chunks(records + sidecars, max(limit - int(reserve / 2.5), 1), render)
-        decisions: list[tuple[str, str]] = []
-        actions: list[tuple[str, str]] = []
+        queue = _chunks(records + sidecars, max(limit - int(reserve / 2.5), 1), render)
+        decisions: list[tuple[frozenset[str], str, str]] = []  # (srcs, 대표 src, 항목)
+        actions: list[tuple[frozenset[str], str, str]] = []
+        sent_keys: set[str] = set()
         dropped = rejected = 0
         ok = True
         profile: str | None = None
-        for chunk in chunks:
+        while queue:
+            chunk = queue.pop(0)
             sent: dict[str, Item] = {}
 
             def messages_for(limit: int, chunk=chunk, sent=sent) -> list[dict]:
-                chosen = _fit_newest(chunk, limit, render, reserve)
+                # 응답한 프로필의 한도에 맞는 앞쪽만 보낸다. 나머지는 아래에서 다시 나눠 보낸다(D41).
+                chosen = _fit_oldest(chunk, limit, render, reserve)
                 sent.clear()
                 sent.update({item.id: item for item in chosen})
                 recs = [it for it in chosen if it.kind != "extracted"]
@@ -842,46 +1051,59 @@ def _run_decisions(ctx: _Ctx, units: list[_DayUnit]) -> None:
 
             outcome = ctx.client.run_task("decisions", messages_for, validate=validate_decisions)
             ctx.calls += _attempt_calls(outcome)
-            if outcome.status != "ok" or not outcome.data:
+            if outcome.status != "ok" or not isinstance(outcome.data, Mapping):
                 ok = False
                 ctx.log(f"compile decisions {unit.rel}: 건너뜀 ({_outcome_note(outcome)})")
                 continue
             profile = outcome.profile
-            for raw in outcome.data["decisions"]:
+            sent_keys.update(item.key for item in sent.values())
+            rest = [item for item in chunk if item.id not in sent]
+            if rest:
+                queue.insert(0, rest)
+            for raw in _dict_list(outcome.data.get("decisions")):
                 item = sent.get(norm_id(raw.get("source_line")) or "")
                 if item is None:
                     dropped += 1
                     continue
                 related, bad = _related(raw.get("related"), keys, people, with_projects=True)
                 rejected += bad
-                decisions.append((_src(item), _decision_entry(unit.day, item, raw, related)))
-            for raw in outcome.data["actions"]:
+                decisions.append((item.srcs, _src(item), _decision_entry(unit.day, item, raw, related)))
+            for raw in _dict_list(outcome.data.get("actions")):
                 item = sent.get(norm_id(raw.get("source_line")) or "")
                 if item is None or item.kind == "checkbox":
                     dropped += 1
                     continue
                 related, bad = _related(raw.get("related"), keys, people, with_projects=False)
                 rejected += bad
-                actions.append((_src(item), _action_entry(item, raw, related)))
+                actions.append((item.srcs, _src(item), _action_entry(item, raw, related)))
+        ok = ok and sent_keys >= set(unit.hashes)  # 보내지 않은 줄이 있으면 성공으로 적지 않는다
+        added = {"decisions": [0], "actions": [0]}
 
         def fn(ledger: dict, unit=unit, ok=ok, profile=profile, decisions=decisions, actions=actions) -> list[Edit]:
             units_ = _units(ledger, "decisions")
+            old = units_.get(unit.rel)
+            rejected_srcs = _all_emitted(ledger)
+            emitted = _emitted(old) | {src for _s, src, _e in decisions} | {src for _s, src, _e in actions}
             if ok:
-                units_[unit.rel] = _ok_record(ctx, profile, unit.hashes)
+                record = _ok_record(ctx, profile, unit.hashes)
             else:
-                units_[unit.rel] = _fail_record(ctx, units_.get(unit.rel), unit.hashes)
+                record = _fail_record(ctx, old, unit.hashes)
+            if emitted:
+                record[EMITTED] = sorted(emitted)
+            units_[unit.rel] = record
             edits: list[Edit] = []
             if decisions:
-                edits.append((ctx.cfg.path("wiki", "decisions.md"), "decisions", _append_new("decisions", decisions)))
+                entries = [(srcs, entry) for srcs, _src_, entry in decisions]
+                edits.append((ctx.cfg.path("wiki", "decisions.md"), "decisions", _append_new("decisions", entries, rejected_srcs, added["decisions"])))
             if actions:
-                edits.append((ctx.cfg.path("wiki", "actions.md"), "actions", _append_new("actions", actions)))
+                entries = [(srcs, entry) for srcs, _src_, entry in actions]
+                edits.append((ctx.cfg.path("wiki", "actions.md"), "actions", _append_new("actions", entries, rejected_srcs, added["actions"])))
             return edits
 
-        before = (_present_srcs(ctx, ("wiki", "decisions.md"), "decisions"), _present_srcs(ctx, ("wiki", "actions.md"), "actions"))
         if not _commit(ctx, f"결정·할 일 {unit.rel}", fn):
             continue
-        ctx.count("decisions", "decisions", sum(1 for src, _ in decisions if src not in before[0]))
-        ctx.count("decisions", "actions", sum(1 for src, _ in actions if src not in before[1]))
+        ctx.count("decisions", "decisions", added["decisions"][0])
+        ctx.count("decisions", "actions", added["actions"][0])
         if dropped:
             ctx.count("decisions", "dropped", dropped)
         if rejected:
@@ -891,6 +1113,11 @@ def _run_decisions(ctx: _Ctx, units: list[_DayUnit]) -> None:
             ctx.count("decisions", "ok")
         else:
             _note_failure(ctx, "decisions", record, unit.rel)
+
+
+def _dict_list(value: Any) -> list[Mapping]:
+    """스키마 밖 모양이 와도 죽지 않게: 목록 안의 객체만."""
+    return [v for v in value if isinstance(v, Mapping)] if isinstance(value, list) else []
 
 
 # ---------------------------------------------------------------- T3 entity_summary
@@ -1155,7 +1382,9 @@ def _plan_proposals(ctx: _Ctx, end: dt.date, explicit: bool) -> _ProposalUnit | 
     if not items:
         return None
     hashes = [item.key for item in items]
-    if not _pending(units.get(end.isoformat()), hashes, ctx.force):
+    if not _pending_groups(units.get(end.isoformat()), [item.all_keys for item in items], ctx.force):
+        return None
+    if not _targets_ok(ctx, "topic_proposal", PROPOSAL_TARGETS):
         return None
     return _ProposalUnit(end.isoformat(), _numbered(items, "L"), hashes)
 
@@ -1236,11 +1465,15 @@ def _run_proposals(ctx: _Ctx, unit: _ProposalUnit) -> None:
     merged: dict[str, dict] = {}
     ok = True
     profile: str | None = None
-    for chunk in _chunks(unit.items, max(limit - int(reserve / 2.5), 1), render):
+    sent_keys: set[str] = set()
+    queue = _chunks(unit.items, max(limit - int(reserve / 2.5), 1), render)
+    while queue:
+        chunk = queue.pop(0)
         sent: dict[str, Item] = {}
 
         def messages_for(limit: int, chunk=chunk, sent=sent) -> list[dict]:
-            chosen = _fit_newest(chunk, limit, render, reserve)
+            # 응답한 프로필의 한도에 맞는 앞쪽만 보낸다. 나머지는 다음 요청으로(D41: 부분 결과를 합친다)
+            chosen = _fit_oldest(chunk, limit, render, reserve)
             sent.clear()
             sent.update({item.id: item for item in chosen})
             return prompts.build_messages("topic_proposal", _proposal_user(unit, chosen, topics))
@@ -1256,12 +1489,16 @@ def _run_proposals(ctx: _Ctx, unit: _ProposalUnit) -> None:
 
         outcome = ctx.client.run_task("topic_proposal", messages_for, validate=validate)
         ctx.calls += _attempt_calls(outcome)
-        if outcome.status != "ok" or not outcome.data:
+        if outcome.status != "ok" or not isinstance(outcome.data, Mapping):
             ok = False
             ctx.log(f"compile topic_proposal {unit.end}: 묶음 건너뜀 ({_outcome_note(outcome)})")
             continue
         profile = outcome.profile
-        for proposal in outcome.data["proposals"]:
+        sent_keys.update(item.key for item in sent.values())
+        rest = [item for item in chunk if item.id not in sent]
+        if rest:
+            queue.insert(0, rest)
+        for proposal in _dict_list(outcome.data.get("proposals")):
             name = topic_name(proposal["name"])
             merge = (proposal.get("merge_with") or "").strip()
             sources = [sent[norm_id(s)].source for s in proposal["sample_sources"] if norm_id(s) in sent]
@@ -1274,6 +1511,7 @@ def _run_proposals(ctx: _Ctx, unit: _ProposalUnit) -> None:
                     entry["sources"].append(source)
 
     proposals = list(merged.values())
+    ok = ok and sent_keys >= set(unit.hashes)  # 보내지 않은 줄이 있으면 성공으로 적지 않는다
     added_box: list[int] = [0]
 
     def fn(ledger: dict) -> list[Edit]:
@@ -1413,6 +1651,8 @@ def run(
         return result
 
     files = _daily_files(ctx, the_day, since) if {"tag", "decisions"} & set(chosen) else []
+    if "tag" in chosen:
+        _tidy_tag_ledger(ctx, files)
     tag_items = _plan_tag(ctx, files) if "tag" in chosen else []
     day_units = _plan_decisions(ctx, files) if "decisions" in chosen else []
     entities = _plan_entities(ctx) if "entity_summary" in chosen else []

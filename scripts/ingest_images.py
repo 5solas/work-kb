@@ -3,9 +3,12 @@
 대상(§5.2, §6.5, D21, D64)
 - `inbox/*.png|jpg|jpeg|webp`(드롭한 이미지). 읽기에 성공하면 이미지를
   `raw/assets/YYYY-MM-DD-HHMM-<원래이름>.<ext>`로 옮기고 사이드카 `inbox/<새 이름>.md`를 쓴다.
-  실패하면 inbox에 그대로 두고 다음 실행에서 다시 시도한다. 이름이 이미 `YYYY-MM-DD-HHMM-`로
-  시작하면 시각을 다시 붙이지 않는다. daily가 `![[inbox/<이름>]]`(또는 raw/assets에 없는 이름만)으로
-  가리키는 inbox 이미지는 링크가 깨지지 않게 옮기지 않고 옆에 사이드카만 쓴다.
+  실패하면 inbox에 그대로 두고 다음 실행에서 다시 시도한다. 같은 이미지가 같은 비전 프로필·모델로
+  GIVE_UP_AFTER(3)번 실행에서 실패하면 포기하고 더 보내지 않는다(D40, 원장 `skipped[sha]`의
+  {count, status, error, image, profiles}; 이미지 바이트나 프로필·모델이 바뀌거나 `--force`면 다시).
+  이름이 이미 `YYYY-MM-DD-HHMM-`로 시작하면 시각을 다시 붙이지 않는다. daily가 `![[inbox/<이름>]]`,
+  `![](inbox/<이름>)`(URL 인코딩 풀어서), 또는 raw/assets에 없는 이름만으로 가리키는 inbox 이미지는
+  (대소문자·NFC 무시) 링크가 깨지지 않게 옮기지 않고 옆에 사이드카만 쓴다.
 - daily `## 기록`에 `![[raw/assets/…]]`(또는 이름만 `![[파일.png]]`)으로 임베드된 `raw/assets`
   이미지 중 사이드카 `inbox/<이미지 이름>.md`가 없는 것. 이미지는 그대로 두고 사이드카만 쓴다.
 
@@ -37,7 +40,9 @@ import os
 import re
 import shutil
 import time
+import unicodedata
 from dataclasses import dataclass, field
+from urllib.parse import unquote
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -59,6 +64,9 @@ JIRA_KEY = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
 PERSON = re.compile(rf"^{notes._PERSON_CHARS}+$")
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _RETRY_WINERRORS = {5, 32, 33}
+GIVE_UP_AFTER = 3  # 같은 이미지·같은 비전 프로필로 이만큼 실행에서 실패하면 더 보내지 않는다(D40, --force로 다시)
+# Markdown 이미지 `![대체 글](대상 "제목")`. 대상은 `<...>`로 감쌀 수 있다.
+_MD_IMAGE = re.compile(r"!\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^)\s]+)(?:\s+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^)\n]*\)))?\s*\)")
 
 Out = Callable[[str], None]
 
@@ -94,10 +102,62 @@ def _asset_name(target: str) -> str | None:
     return target
 
 
-def scan_daily(cfg: Config) -> tuple[dict[str, tuple[str, str]], set[str]]:
-    """(raw/assets 파일명 → (daily 상대 경로, 첫 임베드 줄), daily의 모든 임베드 대상).
+def _norm(text: str) -> str:
+    """링크 비교용: NFC + casefold(Obsidian·NTFS는 대소문자를 가리지 않는다)."""
+    return unicodedata.normalize("NFC", text).casefold()
 
-    첫째는 `## 기록` 줄만(코드 블록·관리 구역 제외), 둘째는 파일 전체(코드 블록 제외)에서 모은다.
+
+def markdown_image_targets(text: str) -> list[str]:
+    """`![대체](대상)`의 대상들(URL 해독, `<...>` 벗김). 웹 주소(`scheme:`)는 뺀다."""
+    out: list[str] = []
+    for match in _MD_IMAGE.finditer(text):
+        target = match.group(1).strip()
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1].strip()
+        if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
+            continue
+        target = unquote(target.split("#", 1)[0].split("?", 1)[0])
+        if target:
+            out.append(target)
+    return out
+
+
+def _ref_key(target: str) -> str:
+    """임베드 대상 → 비교 열쇠: `\\`→`/`, 앞의 `./`·`../`·`/` 제거, 정규화."""
+    target = target.replace("\\", "/").strip()
+    while True:
+        if target.startswith("./"):
+            target = target[2:]
+        elif target.startswith("../"):
+            target = target[3:]
+        elif target.startswith("/"):
+            target = target[1:]
+        else:
+            break
+    return _norm(target)
+
+
+def is_pinned(name: str, refs: set[str], asset_exists: bool | Callable[[], bool]) -> bool:
+    """daily가 이 inbox 이미지를 가리키는가(가리키면 옮기지 않는다). `refs`는 `_ref_key`로 만든 열쇠들.
+
+    `inbox/<이름>`(앞에 폴더가 더 붙어도)이면 가리킨다. 이름만이면 raw/assets에 같은 이름이 없을 때
+    가리킨다(Obsidian이 inbox 것으로 푼다). 다른 폴더를 분명히 적은 링크는 가리키지 않는다.
+    `asset_exists`는 이름만 맞을 때만 부른다(raw/assets를 훑는 비용).
+    """
+    key = _norm(name)
+    if any(ref.endswith("/" + key) and ref.rsplit("/", 2)[-2:-1] == ["inbox"] for ref in refs):
+        return True
+    if key in refs:
+        exists = asset_exists() if callable(asset_exists) else asset_exists
+        return not exists
+    return False
+
+
+def scan_daily(cfg: Config) -> tuple[dict[str, tuple[str, str]], set[str]]:
+    """(raw/assets 파일명 → (daily 상대 경로, 첫 임베드 줄), daily의 모든 이미지 대상 열쇠(`_ref_key`)).
+
+    첫째는 `## 기록` 줄의 `![[...]]`만(코드 블록·관리 구역 제외, status와 같은 규칙), 둘째는 파일
+    전체(코드 블록 제외)의 `![[...]]`와 Markdown `![...](...)`에서 모은다(inbox 이미지를 옮길지 판단용).
     """
     assets: dict[str, tuple[str, str]] = {}
     refs: set[str] = set()
@@ -111,7 +171,7 @@ def scan_daily(cfg: Config) -> tuple[dict[str, tuple[str, str]], set[str]]:
             data = path.read_bytes()
         except OSError:
             continue
-        if b"![[" not in data:
+        if b"![" not in data:
             continue
         rel = f"daily/{path.name}"
         try:
@@ -120,10 +180,10 @@ def scan_daily(cfg: Config) -> tuple[dict[str, tuple[str, str]], set[str]]:
         except UnicodeDecodeError:
             continue
         for line in lines:
-            if line.in_code or "![[" not in line.text:
+            if line.in_code or "![" not in line.text:
                 continue
             embeds = notes.image_embeds(line.text)
-            refs.update(t.replace("\\", "/").strip() for t in embeds)
+            refs.update(_ref_key(t) for t in embeds + markdown_image_targets(line.text))
             if line.region is not None or span is None or not span[0] <= line.offset < span[1]:
                 continue
             for target in embeds:
@@ -135,6 +195,17 @@ def scan_daily(cfg: Config) -> tuple[dict[str, tuple[str, str]], set[str]]:
 
 def sidecar_path(cfg: Config, image_name: str) -> Path:
     return cfg.path("inbox", f"{Path(image_name).stem}.md")
+
+
+def _asset_exists(asset_dir: Path, name: str) -> bool:
+    """raw/assets에 같은 이름(대소문자·NFC 무시)의 파일이 있는가. 확실하지 않으면 False(=옮기지 않는 쪽)."""
+    if (asset_dir / name).is_file():
+        return True
+    try:
+        key = _norm(name)
+        return any(_norm(p.name) == key and p.is_file() for p in asset_dir.iterdir())
+    except OSError:
+        return False
 
 
 def collect(cfg: Config) -> list[Target]:
@@ -149,7 +220,7 @@ def collect(cfg: Config) -> list[Target]:
                 continue
             if path.with_suffix(".md").exists():
                 continue  # 옆에 사이드카가 이미 있다(옮기지 않은 채 처리됨)
-            pinned = f"inbox/{path.name}" in refs or (path.name in refs and not (asset_dir / path.name).is_file())
+            pinned = is_pinned(path.name, refs, lambda name=path.name: _asset_exists(asset_dir, name))
             targets.append(Target("inbox", path, f"inbox/{path.name}", pinned=pinned))
     for name in sorted(assets):
         image = asset_dir / name
@@ -443,6 +514,7 @@ class Report:
     duplicates: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)  # LLM 실패(이미지는 그대로, 다음 실행에서 다시)
     failed: list[dict] = field(default_factory=list)  # 읽기·쓰기 실패
+    gave_up: list[dict] = field(default_factory=list)  # GIVE_UP_AFTER번 실패해 보내지 않음(--force면 다시)
     dry_run: bool = False
 
     def as_dict(self) -> dict:
@@ -453,15 +525,21 @@ class Report:
             "duplicates": self.duplicates,
             "skipped": self.skipped,
             "failed": self.failed,
+            "gave_up": self.gave_up,
             "dry_run": self.dry_run,
         }
 
 
 class _Run:
-    def __init__(self, cfg: Config, client: llm_client.LlmClient, *, dry_run: bool, out: Out) -> None:
+    def __init__(
+        self, cfg: Config, client: llm_client.LlmClient, *, dry_run: bool, out: Out, force: bool = False,
+        profiles: list[str] | None = None,
+    ) -> None:
         self.cfg = cfg
         self.client = client
         self.dry_run = dry_run
+        self.force = force
+        self.profiles = list(profiles or [])  # 이번 실행의 비전 프로필 "이름=모델"(포기 판단: 바뀌면 다시 시도)
         self.out = out
         self.report = Report(dry_run=dry_run)
         self.ledger = load_ledger(cfg)
@@ -510,6 +588,10 @@ class _Run:
         if sha in self.failed_hashes:
             self._skip(target, sha, "같은 이미지가 이번 실행에서 이미 실패했습니다", record=False)
             return
+        given_up = self._given_up(sha)
+        if given_up is not None:
+            self._give_up(target, given_up)
+            return
         try:
             payload, mime = prepare_image(data, target.path.suffix)
         except ValueError as exc:
@@ -525,18 +607,57 @@ class _Run:
             return
         self._write(target, sha, clean(outcome.data, self.cfg.project_keys, target.hint), outcome.profile)
 
+    def _same_profiles(self, entry: Mapping[str, Any]) -> bool:
+        """기록의 비전 프로필(이름=모델)이 지금과 같은가. 기록이 없는 옛 항목은 같다고 본다(다시 보내지 않는 쪽)."""
+        recorded = entry.get("profiles")
+        return not isinstance(recorded, list) or sorted(str(x) for x in recorded) == sorted(self.profiles)
+
+    def _given_up(self, sha: str) -> Mapping[str, Any] | None:
+        """포기한 이미지면 원장 항목. --force, 이미지 바이트(sha)나 비전 프로필·모델이 바뀌었으면 None."""
+        if self.force:
+            return None
+        entry = self.ledger["skipped"].get(sha)
+        if not isinstance(entry, Mapping) or not self._same_profiles(entry):
+            return None
+        try:
+            count = int(entry.get("count") or 0)
+        except (TypeError, ValueError):
+            return None
+        return entry if count >= GIVE_UP_AFTER else None
+
+    def _give_up(self, target: Target, entry: Mapping[str, Any]) -> None:
+        count = entry.get("count")
+        last = str(entry.get("error") or "")
+        self.report.gave_up.append({"image": target.rel, "count": count, "error": last})
+        self.out(
+            f"- 포기: {target.rel} — {count}번 실행에서 읽지 못해 보내지 않습니다"
+            + (f" (마지막: {last})" if last else "")
+            + ". 이미지·비전 모델이 바뀌면 다시 시도하고, 지금 다시 하려면 kb.py ingest --force"
+        )
+
     def _skip(self, target: Target, sha: str, why: str, *, record: bool = True) -> None:
         self.report.skipped.append({"image": target.rel, "error": why})
-        self.out(f"- 건너뜀: {target.rel} — {why}. 다음 실행에서 다시 시도합니다")
         if not record or self.dry_run:
+            self.out(f"- 건너뜀: {target.rel} — {why}. 다음 실행에서 다시 시도합니다")
             return
         entry = self.ledger["skipped"].get(sha) or {}
+        before = int(entry.get("count") or 0) if self._same_profiles(entry) else 0  # 프로필이 바뀌면 처음부터
+        count = before + 1
         self.ledger["skipped"][sha] = {
             "image": target.rel,
-            "count": int(entry.get("count") or 0) + 1,
+            "count": count,
+            "status": "gave_up" if count >= GIVE_UP_AFTER else "skipped",
+            "profiles": sorted(self.profiles),
             "at": self._now().isoformat(timespec="seconds"),
             "error": core.redact(why)[:300],
         }
+        if count >= GIVE_UP_AFTER:
+            self.out(
+                f"- 건너뜀: {target.rel} — {why}. {count}번째 실패라 다음 실행부터 보내지 않습니다"
+                " (이미지·비전 모델이 바뀌거나 kb.py ingest --force면 다시)"
+            )
+        else:
+            self.out(f"- 건너뜀: {target.rel} — {why}. 다음 실행에서 다시 시도합니다 ({count}/{GIVE_UP_AFTER})")
         with core.kb_lock(self.cfg.root, "ingest"):
             self._save_ledger()
 
@@ -686,10 +807,14 @@ def run(
     dry_run: bool = False,
     client: llm_client.LlmClient | None = None,
     out: Out = print,
+    force: bool = False,
 ) -> dict:
-    """이미지 읽기 한 번. 결과는 Report.as_dict(). 회사 환경 공개 호스트는 PublicHostRefused(종료 5)."""
+    """이미지 읽기 한 번. 결과는 Report.as_dict(). 회사 환경 공개 호스트는 PublicHostRefused(종료 5).
+
+    `force`면 GIVE_UP_AFTER번 실패해 포기한 이미지도 다시 보낸다.
+    """
     client = client if client is not None else llm_client.LlmClient(cfg)  # D44: 무엇보다 먼저
-    state = _Run(cfg, client, dry_run=dry_run, out=out)
+    state = _Run(cfg, client, dry_run=dry_run, out=out, force=force)
     report = state.report
     targets = collect(cfg)
     report.pending = len(targets)
@@ -721,6 +846,7 @@ def run(
             f"비전 프로필에 연결하지 못해 이미지 읽기를 건너뜁니다 (미처리 이미지 {len(targets)}개; {detail})",
         )
 
+    state.profiles = sorted(f"{name}={state._model(name)}" for name in vision)
     head = "이미지 읽기(시험 실행, 아무것도 쓰지 않음)" if dry_run else "이미지 읽기"
     n_inbox = sum(1 for t in targets if t.origin == "inbox")
     out(f"{head}: {len(targets)}개 (inbox {n_inbox}, daily 임베드 {len(targets) - n_inbox}) · 비전 프로필 {', '.join(vision)}")
@@ -730,6 +856,8 @@ def run(
         f"결과: 읽음 {len(report.processed)}, 중복 {len(report.duplicates)}, "
         f"건너뜀 {len(report.skipped)}, 실패 {len(report.failed)}"
     )
+    if report.gave_up:
+        summary += f", 포기 {len(report.gave_up)}"
     out(summary)
     if not dry_run:
         core.get_logger(cfg.root).info("ingest: %s", summary)
@@ -739,9 +867,10 @@ def run(
 def main(argv: list[str]) -> int:
     parser = core.make_parser("kb.py ingest", "B단계: 이미지에서 글을 읽어 사이드카(inbox/<이름>.md)에 쓴다 (비전 LLM)")
     parser.add_argument("--dry-run", action="store_true", help="LLM은 부르되 아무것도 쓰지 않고 바꿀 내용을 출력")
+    parser.add_argument("--force", action="store_true", help=f"{GIVE_UP_AFTER}번 실패해 포기한 이미지도 다시 보냄")
     args = parser.parse_args(argv)
     cfg = config.load(args.root)
-    run(cfg, dry_run=args.dry_run)
+    run(cfg, dry_run=args.dry_run, force=args.force)
     return 0
 
 

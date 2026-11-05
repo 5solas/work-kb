@@ -222,7 +222,20 @@ Opus 3명 독립 검토 → 16건 → 전부 수정. 추가 결정(위 표를 �
 - **컨텍스트**: `/models` `metadata.context_length` = 262144(`context_source: models`).
 - **대체 프로필**: 없는 모델 id는 **404** `model_not_found`(400 아님) → `run_task`가 fallback(Gemma)으로 넘어가 ok. Gemma는 탐지 블록 없이 프롬프트 강제 JSON으로 보냈고 생각 필드 없이 JSON을 줌.
 - **출력 예산**: T1 묶음 28/2560 토큰, T2 1340(생각 1233)/8192, T6 153~175/2048. 충분.
-- 미확인: 429·5xx 처리(발생 안 함), Gemma 탐지(안 돌림), 시간에 따른 API 변동. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
+- 미확인: 429·5xx 처리(발생 안 함), Gemma 탐지(안 돌림), 시간에 따른 API 변동.
+
+### Phase 4 검토·수정 라운드 (2026-11-05)
+
+Opus 3명 독립 검토(지시서·탐지 논리 / 회사 가드·데이터 안전·비용 / 거짓 통과) → 22건 → 전부 수정. 1536개 통과. 추가 결정:
+
+- **줄 정체성(compile)**: 해시는 키 링크를 벗긴 줄(`[[KEY-n]]`·`[[jira/KEY-n]]`·`[[KEY-n|x]]` → `KEY-n`)로 계산하고, 원문 해시와 끝의 승격 접미 ` [[KEY-n]]`을 뺀 해시를 별칭으로 둔다. link 정규화·promote 뒤에도 같은 줄로 인식되어 decisions·actions가 중복되지 않는다. 옛 형식의 원장 키·`src:` 표식도 인식. T1 원장은 tag 작업 때마다 정리(옛 키 이동, 사라진 줄 삭제).
+- **지운 제안은 되돌아오지 않는다**: T2 원장에 `emitted_srcs`를 두고 파일에 없어도 다시 쓰지 않는다(`--force`도 마찬가지, 삭제 = 기각).
+- **D41 실제 적용**: T2·T4는 답하는 프로필의 한도에 맞춰 청크를 다시 나누고 모든 줄을 보냈을 때만 ok(가장 오래된 줄부터). T1·T3는 최신 줄 유지, T1은 보낸 줄만 기록. T2·T4는 LLM 호출 전에 대상 구역(decisions·actions·_proposals)을 먼저 검사해 마커가 깨졌으면 호출하지 않는다. T1은 한 번에 40줄 또는 글자 예산으로 묶는다(1,000줄 ≤ 26회). 스키마 실패 응답(키 누락)은 그 단위만 skipped. AGENTS.md 절은 고유한 `##` 제목만 인정. 주제·사람·프로젝트 이름은 front matter에 YAML 인용으로 쓴다.
+- **탐지**: 후보 거부는 400/404/405/422만. 429·408·5xx·네트워크는 "판정 불가" → 2초 뒤 1회 재전송, 그래도 실패면 `DetectError`(종료 3, "--redetect로 다시")이고 **아무것도 저장하지 않는다**(json/vision false를 기록하지 않음). 탐지 중에는 429 자동 재시도를 끈다(실제 POST ≤ 10). `usage.completion_tokens_details.reasoning_tokens > 0`도 흔적으로 본다(`trace_field: reasoning_tokens`). 기준선에 흔적이 없고 30토큰 이상이면 '끄기' 방향도 보내 토큰 규칙(기준선·켬 ≥ 2×끔, 차 ≥ 30)으로 판정. 토큰 규칙은 양쪽 다 흔적이 없을 때만. JSON 프로브는 객체만 인정(`20`·`[1]`·`null`은 false).
+- **ingest 포기 규칙**: 같은 프로필·모델에서 3회 실패한 이미지는 `gave_up`(LLM 호출 없음, "포기: … kb.py ingest --force"). `--force`로 재시도. 프로필·모델이 바뀌면 다시 센다. dry-run은 세지 않는다. 원장 `skipped[sha] = {image, count, status, profiles, at, error}`. daily가 가리키는 inbox 이미지 판정은 casefold+NFC, `![alt](…)` 형식(URL 디코드)도 인식, 애매하면 옮기지 않는다.
+- **doctor(company)**: 어느 프로필이든 공개 호스트면 LLM 프로필 전부 `-`로 표시하고 아무것도 보내지 않는다.
+- status: D41 하한 표시("출력 하한 2048(D41)"), 포기한 이미지 수.
+- mock_llm 추가 모드: `rate_limit_on`, `reasoning_tokens_in_usage`, `json_answer`. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
 

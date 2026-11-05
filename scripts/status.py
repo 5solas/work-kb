@@ -3,8 +3,9 @@
 한 줄에 한 항목, 한국어. 네트워크·비밀값 저장소는 쓰지 않고 파일만 읽는다. 아무것도 쓰지 않는다.
 항목: 환경, config.local.yaml, 오늘 daily, 마지막 동기화(.state/sync.json), outbox 대기·실패,
 미처리 제안(wiki/_proposals.md), 미처리 이미지(사이드카 없는 inbox 이미지와 daily에 임베드된
-raw/assets 이미지), 포기한 편찬 단위(.state/compile.json의 gave_up), LLM 프로필과 탐지 결과
-(`detected: pending`은 '탐지 대기'),
+raw/assets 이미지)와 ingest가 포기한 이미지(.state/images.json의 skipped[sha].count >= 3),
+포기한 편찬 단위(.state/compile.json의 gave_up), LLM 프로필과 탐지 결과
+(`detected: pending`은 '탐지 대기', method none + 기준선 생각 켜짐이면 '출력 하한 2048(D41)'),
 잠금 소유자(.state/kb.lock), KB_AGENT.
 `--json`이면 같은 내용을 JSON 객체로 낸다(키는 collect() 참고).
 """
@@ -24,6 +25,9 @@ NOT_DETECTED = "탐지 안 됨"
 PENDING_VALUE = "pending"  # init.DETECT_PENDING과 같은 값(init을 가져오지 않으려고 따로 둔다)
 DETECT_PENDING = "탐지 대기"  # detected: "pending"(init --dev가 키 없이 미뤄 둔 경우) → kb.py doctor --redetect
 COMPILE_LEDGER = "compile"  # .state/compile.json
+IMAGES_LEDGER = "images"  # .state/images.json (ingest가 쓴다)
+IMAGE_GIVE_UP_AFTER = 3  # ingest의 포기 규칙: skipped[sha].count >= 3
+NONE_REASONING_FLOOR = 2048  # llm_client.NONE_REASONING_FLOOR와 같은 값(D41, 가져오지 않으려고 따로 둔다)
 _LIST_ITEM = re.compile(r"^(?:[-*+] |\d+[.)] )")
 
 
@@ -168,6 +172,24 @@ def compile_gave_up(cfg: Config, problems: list[str]) -> int:
     return count
 
 
+def images_gave_up(cfg: Config, problems: list[str]) -> int:
+    """`.state/images.json`의 `skipped`에서 count가 3 이상인(ingest가 포기한) 이미지 수. 모양이 다르면 0."""
+    try:
+        ledger = core.load_state(cfg.root, IMAGES_LEDGER)
+    except (core.KbError, OSError) as exc:
+        problems.append(f".state/images.json을 읽지 못했습니다 ({exc})")
+        return 0
+    skipped = ledger.get("skipped") if isinstance(ledger, Mapping) else None
+    if not isinstance(skipped, Mapping):
+        return 0
+    count = 0
+    for entry in skipped.values():
+        value = entry.get("count") if isinstance(entry, Mapping) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= IMAGE_GIVE_UP_AFTER:
+            count += 1
+    return count
+
+
 def summarize_detected(detected: Any) -> str:
     """`detected` 블록 한 줄 요약. 없으면 '탐지 안 됨', `pending`이면 '탐지 대기'."""
     if isinstance(detected, str) and detected.strip().lower() == PENDING_VALUE:
@@ -185,6 +207,9 @@ def summarize_detected(detected: Any) -> str:
     tokens = detected.get("context_tokens")
     if isinstance(tokens, int) and not isinstance(tokens, bool):
         parts.append(f"컨텍스트 {tokens:,}")
+    method = toggle.get("method") if isinstance(toggle, Mapping) else None
+    if method == "none" and _truthy(detected.get("baseline_reasoning"), False):
+        parts.append(f"출력 하한 {NONE_REASONING_FLOOR}(D41)")  # llm_client와 같은 규칙
     return ", ".join(parts) or "기록됨"
 
 
@@ -249,7 +274,7 @@ def lock_holder(root: Path) -> str | None:
 
 def collect(cfg: Config) -> dict[str, Any]:
     """상태 사전. 키: environment, local_config, vault, agent, today, last_sync, outbox,
-    proposals, images, compile_gave_up, llm, lock, problems."""
+    proposals, images, images_gave_up, compile_gave_up, llm, lock, problems."""
     problems: list[str] = []
     day = core.now(cfg.tz).date()
     daily = notes.daily_path(cfg, day)
@@ -263,6 +288,7 @@ def collect(cfg: Config) -> dict[str, Any]:
         "outbox": outbox_counts(cfg, problems),
         "proposals": pending_proposals(cfg, problems),
         "images": unprocessed_images(cfg),
+        "images_gave_up": images_gave_up(cfg, problems),
         "compile_gave_up": compile_gave_up(cfg, problems),
         "llm": llm_info(cfg, problems),
         "lock": lock_holder(cfg.root),
@@ -286,7 +312,8 @@ def render(info: Mapping[str, Any]) -> list[str]:
     outbox = info["outbox"]
     lines.append(f"outbox: 대기 {outbox['pending']}개, 전송 중 {outbox.get('sending', 0)}개, 실패 {outbox['failed']}개")
     lines.append(f"미처리 제안: {info['proposals']}개")
-    lines.append(f"미처리 이미지: {info['images']}개")
+    given_up = info.get("images_gave_up", 0)
+    lines.append(f"미처리 이미지: {info['images']}개" + (f" (포기한 이미지 {given_up}개, 이유는 .state/images.json)" if given_up else ""))
     gave_up = info.get("compile_gave_up", 0)
     lines.append(f"포기한 편찬 단위: {gave_up}개" + (" → 입력이 바뀌면 다시 시도, 지금 다시 하려면 kb.py compile --force" if gave_up else ""))
     llm = info["llm"]
