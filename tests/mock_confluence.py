@@ -23,7 +23,14 @@
 - `version_conflict_once=True`: 첫 PUT은 다른 사람이 먼저 고친 것처럼 버전을 하나 올리고 409.
 - `forbid_create=True`: POST(생성)는 403.
 - `anonymous=True`: `/user/current`가 익명 사용자를 돌려준다.
-- `personal_spaces=[{key, name}, …]`: 스페이스 목록을 이것으로 바꾼다(기본: `~honggildong` 하나).
+- `personal_spaces=[{key, name, type}, …]`: 스페이스 목록을 이것으로 바꾼다(기본: `~honggildong` 하나).
+- `redirect_to="http://…"`: `/rest/api/content…` 요청(`redirect_methods`, 기본 GET·POST·PUT)에 307과
+  `Location: <redirect_to><경로>`로 답한다.
+- `reject_title="제목"`: 그 제목의 생성·갱신은 400(Confluence 문장 포함).
+- `server_error=N`: 다음 N개의 `/rest/api/content…` 요청은 503.
+
+`GET /rest/api/content…`의 응답에 `space`는 expand에 `space`가 있거나 expand가 없을 때(DC 기본값
+history,space,version)만 들어간다. `spaceKey`는 대소문자 없이 찾는다.
 
 `mock.pages`(id → 페이지 사전)에 저장된 페이지가 있다. `mock.user_pages()`는 홈 페이지를 뺀 목록.
 """
@@ -39,7 +46,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 FIXED_PORT = 8082
-KNOWN_MODES = {"bad_token", "require_token", "version_conflict_once", "forbid_create", "anonymous", "personal_spaces"}
+KNOWN_MODES = {
+    "bad_token",
+    "require_token",
+    "version_conflict_once",
+    "forbid_create",
+    "anonymous",
+    "personal_spaces",
+    "redirect_to",
+    "redirect_methods",
+    "reject_title",
+    "server_error",
+}
+REDIRECT_METHODS = ("GET", "POST", "PUT")
 STORAGE_ROOT = (
     '<ac:root xmlns:ac="http://atlassian.com/content" xmlns:ri="http://atlassian.com/resource/identifier" '
     'xmlns:at="http://atlassian.com/template">'
@@ -155,9 +174,13 @@ class _Handler(BaseHTTPRequestHandler):
         path = unquote(parts.path)
         mock.log.append({"method": self.command, "path": path, "query": query, "has_auth": token is not None, "json": body})
         req = Request(method=self.command, path=path, query=query, headers=self.headers, json_body=body, bad_json=bad_json, token=token, mock=mock)
-        status, payload = handle(req)
+        result = handle(req)
+        status, payload = result[0], result[1]
+        extra = result[2] if len(result) > 2 else {}
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
+        for name, value in extra.items():
+            self.send_header(name, value)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -249,15 +272,17 @@ def _int(value, default: int) -> int:
 
 
 def _page_view(mock: RunningMock, page: dict, expand: set[str]) -> dict:
+    """expand에 맞춘 페이지. `space`는 expand에 있거나 expand가 비었을 때(DC 기본값)만 넣는다."""
     space = mock.spaces[page["space"]]["space"]
     out = {
         "id": page["id"],
         "type": "page",
         "status": "current",
         "title": page["title"],
-        "space": {"key": space["key"], "name": space["name"]},
         "_links": {"webui": f"/spaces/{space['key']}/pages/{page['id']}"},
     }
+    if not expand or "space" in expand:
+        out["space"] = {"key": space["key"], "name": space["name"]}
     if "version" in expand:
         out["version"] = {"number": page["version"]}
     if "body.storage" in expand:
@@ -265,6 +290,13 @@ def _page_view(mock: RunningMock, page: dict, expand: set[str]) -> dict:
     if "ancestors" in expand:
         out["ancestors"] = [{"id": a, "type": "page"} for a in page["ancestors"]]
     return out
+
+
+def _write_view(req: "Request", page: dict) -> dict:
+    """생성·갱신 응답: 언제나 version·ancestors, space는 `_page_view` 규칙대로."""
+    expand = _expand(req)
+    shown = expand | {"version", "ancestors"} | (set() if expand else {"space"})
+    return _page_view(req.mock, page, shown)
 
 
 def _storage_problem(value) -> str | None:
@@ -303,8 +335,8 @@ def _spaces(req: Request):
     with mock.lock:
         entries = list(mock.spaces.values())
     if "spaceKey" in req.query:
-        wanted = req.query["spaceKey"]
-        results = [_space_view(e) for e in entries if e["space"]["key"] == wanted]
+        wanted = req.query["spaceKey"].casefold()
+        results = [_space_view(e) for e in entries if e["space"]["key"].casefold() == wanted]
     else:
         kind = req.query.get("type", "personal")
         results = [_space_view(e) for e in entries if e["space"]["type"] == kind]
@@ -385,6 +417,8 @@ def _content_create(req: Request):
     title = body.get("title")
     if not isinstance(title, str) or not title.strip():
         return _error(400, "제목이 비어 있습니다")
+    if title == mock.modes.get("reject_title"):
+        return _error(400, f"이 제목은 받을 수 없습니다(모의 거부): {title}")
     space_key = (body.get("space") or {}).get("key") if isinstance(body.get("space"), dict) else None
     value, problem = _storage_of(body)
     if problem:
@@ -407,7 +441,7 @@ def _content_create(req: Request):
         page_id = _new_id(mock)
         page = {"id": page_id, "title": title, "space": space_key, "version": 1, "body": value, "ancestors": parent_ids}
         mock.pages[page_id] = page
-        return 200, _page_view(mock, page, {"version", "ancestors"})
+        return 200, _write_view(req, page)
 
 
 def _content_update(req: Request):
@@ -433,6 +467,8 @@ def _content_update(req: Request):
         title = body.get("title")
         if not isinstance(title, str) or not title.strip():
             return _error(400, "제목이 비어 있습니다")
+        if title == mock.modes.get("reject_title"):
+            return _error(400, f"이 제목은 받을 수 없습니다(모의 거부): {title}")
         space = body.get("space")
         if isinstance(space, dict) and space.get("key") not in (None, page["space"]):
             return _error(400, "다른 스페이스로 옮길 수 없습니다")
@@ -442,7 +478,7 @@ def _content_update(req: Request):
         if _title_taken(mock, page["space"], title, except_id=page["id"]):
             return _error(400, f"A page with this title already exists: {title}")
         page.update(title=title, body=value, version=version)
-        return 200, _page_view(mock, page, {"version", "ancestors"})
+        return 200, _write_view(req, page)
 
 
 ROUTES = [
@@ -469,6 +505,17 @@ def _authorized(req: Request) -> bool:
 def handle(req: Request):
     if req.path.startswith("/rest/") and not _authorized(req):
         return 401, {"message": "인증이 필요합니다"}
+    mock = req.mock
+    if req.path.startswith("/rest/api/content"):
+        target = mock.modes.get("redirect_to")
+        if target and req.method in tuple(mock.modes.get("redirect_methods") or REDIRECT_METHODS):
+            location = str(target).rstrip("/") + req.path
+            return 307, {"message": "다른 곳으로 옮겼습니다"}, {"Location": location}
+        with mock.lock:
+            pending = int(mock.modes.get("server_error") or 0)
+            if pending > 0:
+                mock.modes["server_error"] = pending - 1
+                return _error(503, "일시적인 서버 오류(모의)")
     for method, pattern, func in ROUTES:
         if method != req.method:
             continue

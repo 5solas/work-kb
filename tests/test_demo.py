@@ -10,12 +10,15 @@ import hashlib
 import io
 import os
 import socket
+import threading
 from pathlib import Path
 
 import keyring
 import pytest
+import yaml
 
 import demo
+import fake_keyring
 import mock_jira
 from lib import core
 from lib import secrets as kb_secrets
@@ -70,15 +73,130 @@ def run_demo(**kw) -> tuple[dict, str]:
     return result, buf.getvalue()
 
 
+# ---------------------------------------------------------------- 개발자 PC와 무관하게: 표식 저장소 루트
+
+
+REAL_SERVICE = "work-kb"
+CANARY_PAT = "표식-pat-읽히면-안됨"
+
+
+class CanaryPort:
+    """127.0.0.1의 듣기 소켓. 연결이 오면 세고 바로 끊는다(데모가 여기로 가면 안 된다)."""
+
+    def __init__(self) -> None:
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(16)
+        self.sock.settimeout(0.05)
+        self.port = self.sock.getsockname()[1]
+        self.hits = 0
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._loop, daemon=True)
+        self.thread.start()
+
+    def _loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except (TimeoutError, socket.timeout):
+                continue
+            except OSError:
+                return
+            self.hits += 1
+            conn.close()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.thread.join(timeout=5)
+        self.sock.close()
+
+
+class RecordingKeyring(fake_keyring.FileKeyring):
+    """바깥(테스트) keyring. 서비스 이름을 모두 적고, 진짜 서비스 `work-kb`를 읽으면 바로 실패시킨다."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.services: list[str] = []
+
+    def get_password(self, service, username):
+        self.services.append(service)
+        if service == REAL_SERVICE:
+            pytest.fail(f"데모가 진짜 keyring 서비스 {service}/{username}를 읽었습니다")
+        return super().get_password(service, username)
+
+    def set_password(self, service, username, password):
+        self.services.append(service)
+        super().set_password(service, username, password)
+
+
+@pytest.fixture
+def canary(tmp_path, monkeypatch):
+    """demo.CODE_ROOT를 표식 루트로: 진짜 config.yaml + 표식 config.local.yaml(집, 죽은 루프백 포트, keyring:work-kb/…).
+
+    SAMPLE·TESTS는 진짜 그대로. 바깥 keyring은 RecordingKeyring(work-kb/jira에 표식 PAT).
+    """
+    port = CanaryPort()
+    root = tmp_path / "표식 저장소"
+    root.mkdir()
+    (root / "config.yaml").write_bytes((ROOT / "config.yaml").read_bytes())
+    dead = f"http://127.0.0.1:{port.port}"
+    local = {
+        "environment": "home",
+        "jira": {"base_url": dead, "project_keys": ["CANARY"], "pat_ref": f"keyring:{REAL_SERVICE}/jira", "max_results": 2},
+        "confluence": {"enabled": True, "base_url": dead, "space_key": "CANARY", "pat_ref": f"keyring:{REAL_SERVICE}/confluence"},
+        "llm": {
+            "enabled": True,
+            "profiles": {"main": {"base_url": f"{dead}/v1", "model": "canary", "api_key_ref": f"keyring:{REAL_SERVICE}/llm"}},
+            "fallback_order": ["main"],
+        },
+    }
+    (root / "config.local.yaml").write_text(yaml.safe_dump(local, allow_unicode=True), encoding="utf-8")
+    monkeypatch.setattr(demo, "CODE_ROOT", root)
+
+    outer = RecordingKeyring(tmp_path / "outer-keyring.json")
+    outer.set_password(REAL_SERVICE, "jira", CANARY_PAT)
+    outer.set_password(REAL_SERVICE, "confluence", CANARY_PAT)
+    outer.services.clear()
+    previous = keyring.get_keyring()
+    keyring.set_keyring(outer)
+    try:
+        yield {"port": port, "keyring": outer, "root": root}
+    finally:
+        keyring.set_keyring(previous)
+        port.stop()
+
+
 # ---------------------------------------------------------------- 전체 흐름
 
 
-def test_full_flow_hits_mocks_and_leaves_repo_untouched(refs, monkeypatch):
+def test_full_flow_hits_mocks_and_leaves_repo_untouched(refs, monkeypatch, canary):
     monkeypatch.setenv("DEEPINFRA_API_KEY", "di-표식-키-읽히면-안됨")
+    monkeypatch.setenv("KB_JIRA_MAX_RESULTS", "1")  # 사용자의 KB_* 덮어쓰기는 데모 설정에 섞이지 않아야 한다
+    monkeypatch.setenv("KB_LLM_ENABLED", "false")
+    loaded: list = []
+    real_load = demo.config.load
+
+    def spy_load(root=None, **kw):
+        cfg = real_load(root, **kw)
+        loaded.append(cfg)
+        return cfg
+
+    monkeypatch.setattr(demo.config, "load", spy_load)
     before = repo_hashes()
     test_keyring = keyring.get_keyring()
+    assert test_keyring is canary["keyring"]
 
     result, output = run_demo()
+
+    # 표식: 저장소 config.local.yaml의 주소·키·덮어쓰기를 쓰지 않았다
+    assert canary["port"].hits == 0, "데모가 표식 config.local.yaml의 주소로 연결했습니다"
+    assert canary["keyring"].services == [], "데모가 자기 가짜 keyring 대신 바깥 keyring을 썼습니다"
+    assert loaded and all(cfg.get("jira.max_results") != 1 for cfg in loaded)
+    assert all(cfg.get("jira.max_results") != 2 for cfg in loaded)  # 표식 파일의 값도 아님
+    assert all(cfg.get("llm.enabled") is True for cfg in loaded)
+    searches = [e for e in result["mocks"].jira.log if e["path"].endswith("/search")]
+    assert searches and all(e["query"].get("maxResults") not in ("1", "2") for e in searches)
+    assert all("CANARY" not in str(e["query"]) for e in searches)
 
     assert result["exit_code"] == 0, output
     assert all(step.ok for step in result["steps"]), output

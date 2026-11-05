@@ -7,6 +7,8 @@
 - doctor: 스페이스 있음, 부모 페이지 읽힘, push_globs에 맞는 파일 수('-').
 
 Confluence는 이 파일 안의 작은 가짜 서버로 흉내 낸다(사람·스페이스·페이지를 시험마다 바꾸려고).
+마법사는 push·doctor와 같은 `lib.confluence_client.ConfluenceClient`를 쓰므로 가짜 서버도 그 경로를 흉내 낸다:
+`/space?spaceKey=`·`/space/{key}`(대소문자 무시), `/content/{id}`는 expand에 청한 space·version만 돌려준다(DC처럼).
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import pytest
 import yaml
@@ -45,6 +47,7 @@ class FakeConfluence:
         self.spaces: list[dict] = [dict(MY_SPACE)]
         self.pages: dict[str, dict] = {}
         self.redirect = False
+        self.fail: dict[str, list[int]] = {}  # 경로 → 먼저 돌려줄 오류 상태(하나씩 꺼낸다)
         self.log: list[tuple[str, str, dict]] = []
         fake = self
 
@@ -90,21 +93,38 @@ class FakeConfluence:
             return 401, {"message": "인증이 필요합니다"}, {}
         if self.redirect:
             return 302, {}, {"Location": "https://login.example.invalid/sso"}
+        queued = self.fail.get(path)
+        if queued:
+            return queued.pop(0), {"message": "서버 오류"}, {}
         if path == "/rest/api/user/current":
             return 200, self.user, {}
         if path == "/rest/api/space":
-            if "spaceKey" in query:
-                found = [s for s in self.spaces if s["key"] == query["spaceKey"]]
+            if "spaceKey" in query:  # DC처럼 대소문자 없이
+                wanted = query["spaceKey"].casefold()
+                found = [s for s in self.spaces if s["key"].casefold() == wanted]
                 return 200, {"results": found, "size": len(found)}, {}
             kind = query.get("type")
             items = [s for s in self.spaces if kind is None or s.get("type") == kind]
             start, limit = int(query.get("start", 0)), int(query.get("limit", 25))
             page = items[start : start + limit]
             return 200, {"results": page, "start": start, "limit": limit, "size": len(page)}, {}
+        m = re.fullmatch(r"/rest/api/space/([^/]+)", path)
+        if m:  # DC의 스페이스 키 조회는 대소문자를 가리지 않고 저장된 키를 돌려준다
+            wanted = unquote(m.group(1)).casefold()
+            found = next((s for s in self.spaces if s["key"].casefold() == wanted), None)
+            return (200, found, {}) if found else (404, {"message": f"No space with key : {m.group(1)}"}, {})
         m = re.fullmatch(r"/rest/api/content/(\d+)", path)
         if m:
             page = self.pages.get(m.group(1))
-            return (200, page, {}) if page else (404, {"message": "없는 페이지"}, {})
+            if not page:
+                return 404, {"message": "없는 페이지"}, {}
+            # DC: expand를 주면 기본값(history,space,version)을 대신한다. space·version은 청한 것만
+            expand = {x.strip() for x in query.get("expand", "").split(",") if x.strip()}
+            view = {k: v for k, v in page.items() if k not in ("space", "version")}
+            for key in ("space", "version"):
+                if key in page and (not expand or key in expand):
+                    view[key] = page[key]
+            return 200, view, {}
         return 404, {"message": f"없는 경로 {path}"}, {}
 
 
@@ -345,6 +365,54 @@ def test_explicit_space_overrides_detection(vault, conf):
     assert _data(vault)["confluence"]["space_key"] == "TEAM"
 
 
+def _rerun_base(vault: Path, conf, space_key: str) -> None:
+    _base(vault, confluence={"enabled": True, "base_url": conf.base_url, "space_key": space_key, "parent_page_id": "", "pat_ref": "keyring:work-kb/confluence"})
+    kb_secrets.store("work-kb", "confluence", CONF_TOKEN)
+
+
+def test_interactive_rerun_keeps_existing_space_on_enter(vault, conf):
+    """다시 실행(§6.11): 기존 space_key가 아직 있으면 그것이 기본값. 찾은 개인 스페이스는 다른 선택지로만."""
+    conf.spaces.append({"key": "TEAM", "name": "팀", "type": "global"})
+    _rerun_base(vault, conf, "TEAM")
+    script = Script(["", "", ""], [""])  # 주소 기본값 → 저장된 PAT → 스페이스 Enter → 부모 Enter
+    out: list[str] = []
+    assert _interactive(vault, script, out) == 0
+    assert _data(vault)["confluence"]["space_key"] == "TEAM"
+    space_questions = [d for p, d in script.asked if p.startswith("쓸 스페이스")]
+    assert space_questions == ["TEAM"]
+    said = "\n".join(out)
+    assert "~honggildong (홍길동)" in said  # 찾은 개인 스페이스를 보여 준다
+    assert "대신 찾은 개인 스페이스를 씁니다" not in said
+
+
+def test_interactive_rerun_can_switch_to_found_personal_space(vault, conf):
+    conf.spaces.append({"key": "TEAM", "name": "팀", "type": "global"})
+    _rerun_base(vault, conf, "TEAM")
+    script = Script(["", "1", ""], [""])
+    assert _interactive(vault, script, []) == 0
+    assert _data(vault)["confluence"]["space_key"] == "~honggildong"
+
+
+def test_from_env_rerun_keeps_existing_space(vault, conf):
+    conf.spaces.append({"key": "TEAM", "name": "팀", "type": "global"})
+    _rerun_base(vault, conf, "TEAM")
+    assert _section(vault, _values(conf)) == 0
+    assert _data(vault)["confluence"]["space_key"] == "TEAM"
+    # KB_INIT_CONFLUENCE_SPACE는 여전히 이긴다
+    assert _section(vault, _values(conf, KB_INIT_CONFLUENCE_SPACE="~honggildong")) == 0
+    assert _data(vault)["confluence"]["space_key"] == "~honggildong"
+
+
+def test_rerun_with_vanished_space_uses_found_personal_space(vault, conf):
+    _rerun_base(vault, conf, "GONE")
+    script = Script(["", ""], [""])  # 스페이스는 묻지 않는다 → 부모 Enter
+    out: list[str] = []
+    assert _interactive(vault, script, out) == 0
+    assert _data(vault)["confluence"]["space_key"] == "~honggildong"
+    assert not [p for p, _ in script.asked if p.startswith("쓸 스페이스")]
+    assert any("기존 space_key GONE를 찾지 못해" in line for line in out)
+
+
 def test_explicit_unknown_space_exit_4(vault, conf):
     _base(vault)
     with pytest.raises(core.ConfigError) as info:
@@ -401,7 +469,8 @@ def test_parent_page_validated_and_saved(vault, conf):
     assert _section(vault, _values(conf, KB_INIT_CONFLUENCE_PARENT="4242"), out) == 0
     assert _data(vault)["confluence"]["parent_page_id"] == "4242"
     assert "  부모 페이지: 업무 지식 (4242)" in out
-    assert ("/rest/api/content/4242", {"expand": "space,version"}) in conf.paths()
+    expands = [set(q.get("expand", "").split(",")) for p, q in conf.paths() if p == "/rest/api/content/4242"]
+    assert expands and all({"space", "version"} <= e for e in expands)
 
 
 @pytest.mark.parametrize(
@@ -471,10 +540,103 @@ def test_anonymous_user_is_auth_error(vault, tmp_path, conf):
 def test_redirect_not_followed(vault, conf):
     _base(vault)
     conf.redirect = True
+    before = _local(vault).read_bytes()
     with pytest.raises(core.ConfigError) as info:
         _section(vault, _values(conf))
-    assert "다른 주소" in str(info.value)
-    assert len(conf.log) == 1
+    assert info.value.exit_code == 4
+    assert "리다이렉트" in str(info.value) and "따라가지 않았습니다" in str(info.value)
+    assert len(conf.log) == 1  # 리다이렉트 대상(login.example.invalid)으로는 가지 않는다
+    assert _local(vault).read_bytes() == before
+
+
+# ---------------------------------------------------------------- lib.confluence_client로 통일(Phase 5 리뷰)
+
+
+def test_wizard_uses_shared_confluence_client():
+    """마법사 전용 Confluence 호출 코드(ConfluenceProbe)는 없다. push·doctor와 같은 클라이언트를 쓴다."""
+    assert not hasattr(init, "ConfluenceProbe")
+
+
+def test_wizard_retries_get_5xx_once(vault, conf, monkeypatch):
+    """GET 5xx는 클라이언트처럼 한 번 다시 묻는다(1초 쉼은 시험에서 뺀다)."""
+    from lib import net
+
+    monkeypatch.setattr(net, "_sleep", lambda _s: None)
+    _base(vault)
+    conf.fail["/rest/api/user/current"] = [503]
+    assert _section(vault, _values(conf)) == 0
+    assert _data(vault)["confluence"]["space_key"] == "~honggildong"
+    assert [p for p, _ in conf.paths()][:2] == ["/rest/api/user/current", "/rest/api/user/current"]
+
+
+def test_wizard_5xx_twice_is_network_error(vault, tmp_path, conf, monkeypatch):
+    from lib import net
+
+    monkeypatch.setattr(net, "_sleep", lambda _s: None)
+    _base(vault)
+    before = _local(vault).read_bytes()
+    conf.fail["/rest/api/user/current"] = [500, 502]
+    with pytest.raises(core.NetworkError) as info:
+        _section(vault, _values(conf))
+    assert info.value.exit_code == 3 and "서버 오류" in str(info.value)
+    assert _local(vault).read_bytes() == before
+    assert "work-kb\nconfluence" not in _keyring(tmp_path)
+
+
+def test_wizard_honours_confluence_timeout(vault, conf, monkeypatch):
+    """`confluence.timeout`을 따른다(예전 마법사는 30초로 고정)."""
+    from lib import net
+
+    seen: list[float] = []
+    real = net.request
+
+    def spy(session, method, url, *args, **kw):
+        seen.append(kw.get("timeout"))
+        return real(session, method, url, *args, **kw)
+
+    monkeypatch.setattr(net, "request", spy)
+    _base(vault, confluence={"enabled": False, "timeout": 7})
+    assert _section(vault, _values(conf)) == 0
+    assert seen and set(seen) == {7.0}
+    assert _data(vault)["confluence"]["timeout"] == 7  # 다른 키처럼 그대로 둔다
+
+
+def test_parent_without_space_in_response_is_refused(vault, conf):
+    """응답에 space가 없으면(다른 스페이스일 수 있다) 부모 페이지로 받지 않는다(교차 스페이스 갱신 방지)."""
+    _base(vault)
+    conf.pages["6000"] = {"id": "6000", "type": "page", "title": "스페이스 모름", "version": {"number": 1}}
+    before = _local(vault).read_bytes()
+    with pytest.raises(core.ConfigError) as info:
+        _section(vault, _values(conf, KB_INIT_CONFLUENCE_PARENT="6000"))
+    assert "어느 스페이스에 있는지" in str(info.value) and "KB_INIT_CONFLUENCE_PARENT" in str(info.value)
+    assert _local(vault).read_bytes() == before
+
+
+def test_typed_space_key_is_case_insensitive_and_saved_as_server_key(vault, conf):
+    _base(vault)
+    conf.spaces.append({"key": "TEAM", "name": "팀", "type": "global"})
+    assert _section(vault, _values(conf, KB_INIT_CONFLUENCE_SPACE="team")) == 0
+    assert _data(vault)["confluence"]["space_key"] == "TEAM"
+
+
+def test_numbered_env_choice_uses_full_list_even_when_own_space_found(vault, conf):
+    """본인 스페이스를 찾았어도 KB_INIT_CONFLUENCE_SPACE 번호는 type=personal 전체 목록 기준이다."""
+    _base(vault)
+    conf.spaces.append({"key": "~kimcs", "name": "김철수", "type": "personal"})
+    assert _section(vault, _values(conf, KB_INIT_CONFLUENCE_SPACE="2")) == 0
+    assert _data(vault)["confluence"]["space_key"] == "~kimcs"
+
+
+def test_long_personal_list_shows_first_100_and_accepts_key(vault, conf):
+    _base(vault)
+    conf.spaces = [{"key": f"~user{i:03d}", "name": f"사람{i}", "type": "personal"} for i in range(130)]
+    script = Script([conf.base_url, "~user120", ""], [CONF_TOKEN])
+    out: list[str] = []
+    assert _interactive(vault, script, out) == 0
+    said = "\n".join(out)
+    assert "100. ~user099 (사람99)" in said and "101. " not in said
+    assert "처음 100개만 보입니다" in said
+    assert _data(vault)["confluence"]["space_key"] == "~user120"
 
 
 def test_interactive_retries_bad_pat_then_saves(vault, tmp_path, conf):

@@ -3,6 +3,10 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import shutil
+import subprocess
+import sys
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -12,7 +16,7 @@ import confluence_push
 import mock_confluence as mock_mod
 from lib import config, core
 from lib import secrets as kb_secrets
-from lib.confluence_client import ConfluenceClient, NotFound, PersonalSpace
+from lib.confluence_client import ConfluenceClient, NotFound, PersonalSpace, RedirectRefused
 
 TOKEN = "mock-token"
 SPACE = "~honggildong"
@@ -363,6 +367,13 @@ def test_broken_markers_fail_that_file_only(vault_pages, mock_confluence):
         [".state/*.json"],
         ["../outside/*.md"],
         ["wiki/../daily/*.md"],
+        # Windows가 같은 폴더로 여는 다른 철자(끝의 점·공백, 스트림)
+        ["daily./*.md"],
+        ["DAILY./*.md"],
+        ["daily /*.md"],
+        ["daily::$INDEX_ALLOCATION/*.md"],
+        ["daily:$I30:$INDEX_ALLOCATION/*.md"],
+        ["wiki/projects/*.md", "Daily. /2026-11-04.md"],
     ],
 )
 def test_forbidden_globs_refused(vault_pages, mock_confluence, globs):
@@ -505,9 +516,71 @@ def test_personal_space_falls_back_to_list():
         found = client.personal_space()
     assert found.own is None
     assert [s["key"] for s in found.candidates] == ["~kimcheolsu", "~leeyounghee"]
-    assert [e["path"] for e in server.log] == ["/rest/api/user/current", "/rest/api/space", "/rest/api/space"]
+    # D55: ~username → ~userKey → type=personal 목록
+    assert [e["path"] for e in server.log] == ["/rest/api/user/current"] + ["/rest/api/space"] * 3
     assert server.log[1]["query"] == {"spaceKey": SPACE}
-    assert server.log[2]["query"] == {"type": "personal", "start": "0", "limit": "25"}
+    assert server.log[2]["query"] == {"spaceKey": "~" + mock_mod.USER["userKey"]}
+    assert server.log[3]["query"] == {"type": "personal", "start": "0", "limit": "25"}
+
+
+def test_personal_space_user_key_step():
+    user_key_space = "~" + mock_mod.USER["userKey"]
+    spaces = [{"key": "~kimcheolsu", "name": "김철수"}, {"key": user_key_space, "name": "홍길동"}]
+    with mock_mod.start(personal_spaces=spaces) as server:
+        client = ConfluenceClient(server.base_url, TOKEN)
+        found = client.personal_space()
+    assert found.own is not None and found.own["key"] == user_key_space
+    assert found.candidates == [found.own]
+    assert [e["query"] for e in server.log[1:]] == [{"spaceKey": SPACE}, {"spaceKey": user_key_space}]
+
+
+def test_personal_space_key_match_ignores_case():
+    with mock_mod.start(personal_spaces=[{"key": "~HongGilDong", "name": "홍길동"}]) as server:
+        client = ConfluenceClient(server.base_url, TOKEN)
+        found = client.personal_space()
+    assert found.own is not None and found.own["key"] == "~HongGilDong"
+    assert [e["query"] for e in server.log[1:]] == [{"spaceKey": SPACE}]
+
+
+def test_client_honours_timeout(vault, mock_confluence, monkeypatch):
+    from lib import net
+
+    _setup(vault, mock_confluence, timeout=7)
+    seen: list[float] = []
+    original = net.request
+
+    def spy(session, method, url, **kw):
+        seen.append(kw.get("timeout"))
+        return original(session, method, url, **kw)
+
+    monkeypatch.setattr(net, "request", spy)
+    with ConfluenceClient.from_config(config.load(vault)) as client:
+        assert client.timeout == 7.0
+        client.personal_space()
+    assert seen and all(t == 7.0 for t in seen)
+
+
+def test_client_5xx_retries_reads_once_but_not_writes(mock_confluence, monkeypatch):
+    from lib import net
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(net, "_sleep", sleeps.append)
+    client = ConfluenceClient(mock_confluence.base_url, TOKEN, space_key=SPACE)
+    mock_confluence.modes["server_error"] = 1
+    assert client.find_page(SPACE, "없는 제목") is None
+    gets = [e for e in mock_confluence.log if e["path"] == "/rest/api/content"]
+    assert len(gets) == 2 and sleeps == [1.0]
+    mock_confluence.modes["server_error"] = 2
+    with pytest.raises(core.NetworkError) as exc:
+        client.get_page("999999")
+    assert exc.value.after_send is False
+    mock_confluence.log.clear()
+    mock_confluence.modes["server_error"] = 1
+    with pytest.raises(core.NetworkError) as exc:
+        client.create_page(SPACE, "제목", "<p>a</p>")
+    assert exc.value.after_send is True
+    assert [e["method"] for e in mock_confluence.log] == ["POST"]  # 쓰기는 다시 보내지 않는다
+    client.close()
 
 
 def test_personal_space_anonymous_stops():
@@ -599,6 +672,11 @@ def test_mock_content_rules(mock_confluence):
     assert found["results"][0]["body"]["storage"]["value"] == "<p>둘</p>"
     status, one = _call(mock_confluence, "GET", f"/rest/api/content/{pid}")
     assert status == 200 and "version" not in one
+    assert one["space"]["key"] == SPACE  # expand가 없으면 DC 기본값처럼 space가 있다
+    status, one = _call(mock_confluence, "GET", f"/rest/api/content/{pid}", params={"expand": "version"})
+    assert status == 200 and "space" not in one  # expand를 주면 그것만
+    status, one = _call(mock_confluence, "GET", f"/rest/api/content/{pid}", params={"expand": "version,space"})
+    assert one["space"]["key"] == SPACE and one["version"] == {"number": 2}
     status, space = _call(mock_confluence, "GET", f"/rest/api/space/{SPACE}", params={"expand": "homepage"})
     assert status == 200 and space["homepage"]["id"] == mock_confluence.spaces[SPACE]["homepage"]
 
@@ -613,3 +691,354 @@ def test_mock_modes():
         assert _call(server, "PUT", f"/rest/api/content/{pid}", _page_body("가", "<p/>", version=2))[0] == 409
         assert server.pages[pid]["version"] == 2
         assert _call(server, "PUT", f"/rest/api/content/{pid}", _page_body("가", "<p/>", version=3))[0] == 200
+    with mock_mod.start(reject_title="나쁜 제목") as server:
+        status, err = _call(server, "POST", "/rest/api/content", _page_body("나쁜 제목", "<p/>"))
+        assert status == 400 and "모의 거부" in err["message"]
+    with mock_mod.start(redirect_to="http://127.0.0.1:9", redirect_methods=["PUT"]) as server:
+        assert _call(server, "GET", "/rest/api/content", params={"spaceKey": SPACE})[0] == 200
+        resp = requests.put(server.base_url + "/rest/api/content/1", json={}, headers={"Authorization": "Bearer t"}, allow_redirects=False, timeout=5)
+        assert resp.status_code == 307 and resp.headers["Location"] == "http://127.0.0.1:9/rest/api/content/1"
+
+
+# ---------------------------------------------------------------- 검토 반영: 금지 경로(철자·링크·자동 생성 페이지)
+
+
+def _junction(link, target) -> None:
+    """`mklink /J link target`. 만들지 못하면 그 테스트를 건너뛴다."""
+    result = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)], capture_output=True)
+    if result.returncode != 0 or not os.path.isjunction(link):
+        pytest.skip("mklink /J를 쓸 수 없습니다")
+
+
+@pytest.fixture
+def junctions():
+    made: list = []
+
+    def make(link, target) -> None:
+        _junction(link, target)
+        made.append(link)
+
+    yield make
+    for link in made:
+        try:
+            os.rmdir(link)  # 정션만 지운다(대상은 그대로)
+        except OSError:
+            pass
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="정션은 Windows 전용")
+def test_junction_to_daily_is_refused(vault_pages, mock_confluence, junctions):
+    shutil.rmtree(vault_pages / "wiki" / "topics")
+    junctions(vault_pages / "wiki" / "topics", vault_pages / "daily")  # mklink /J wiki\topics daily
+    _setup(vault_pages, mock_confluence)  # 기본 push_globs(wiki/topics/*.md 포함)
+    with pytest.raises(core.PolicyRefused) as exc:
+        _run(vault_pages)
+    assert exc.value.exit_code == 7
+    assert "wiki/topics/2026-11-04.md" in str(exc.value) and "외부 게시 금지 폴더" in str(exc.value)
+    assert mock_confluence.log == []
+    assert not (vault_pages / ".state" / "confluence.json").exists()
+    with pytest.raises(core.PolicyRefused):
+        _run(vault_pages, "--dry-run")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="정션은 Windows 전용")
+def test_junction_inside_wiki_is_refused(vault_pages, mock_confluence, junctions):
+    junctions(vault_pages / "wiki" / "alias", vault_pages / "wiki" / "projects")
+    _setup(vault_pages, mock_confluence, push_globs=["wiki/alias/*.md"])
+    with pytest.raises(core.PolicyRefused) as exc:
+        _run(vault_pages)
+    assert exc.value.exit_code == 7 and "심볼릭 링크·정션" in str(exc.value)
+    assert mock_confluence.log == []
+
+
+def test_symlinked_file_is_refused(vault_pages, mock_confluence, tmp_path):
+    outside = tmp_path / "outside.md"
+    outside.write_text("# 밖\n볼트 밖 비밀\n", encoding="utf-8")
+    link = vault_pages / "wiki" / "topics" / "밖.md"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("심볼릭 링크를 만들 권한이 없습니다")
+    _setup(vault_pages, mock_confluence)
+    with pytest.raises(core.PolicyRefused) as exc:
+        _run(vault_pages)
+    assert "볼트 밖" in str(exc.value)
+    assert mock_confluence.log == []
+
+
+def test_collect_checks_resolved_path_not_only_spelling(vault_pages, monkeypatch):
+    """패턴 검사를 빼도 파일마다 실제 위치로 다시 막는다."""
+    monkeypatch.setattr(confluence_push, "_glob_reason", lambda pattern: None)
+    _setup(vault_pages, None, push_globs=["daily./*.md", "daily::$INDEX_ALLOCATION/*.md"])
+    selection = confluence_push.collect(config.load(vault_pages))
+    assert selection.files == []
+    assert selection.refused and all("금지 폴더" in reason for _, reason in selection.refused)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    ["daily./a.md", "DAILY /a.md", "daily::$INDEX_ALLOCATION/a.md", "inbox.:$DATA/a.md", "wiki/_lint.md", "WIKI/_Proposals.md",
+     "wiki/index.md", "wiki/Actions.md", "wiki/index.md.", "wiki/actions.md::$DATA", "wiki/_*.md", "wiki/.../x.md"],
+)
+def test_forbidden_reason_spellings(rel):
+    assert confluence_push.forbidden_reason(rel)
+
+
+@pytest.mark.parametrize("rel", ["wiki/topics/index.md", "wiki/projects/_draft.md", "wiki/decisions.md", "wiki/topics/*.md"])
+def test_forbidden_reason_allows_wiki_pages(rel):
+    assert confluence_push.forbidden_reason(rel) is None
+
+
+@pytest.mark.parametrize(
+    "globs",
+    [["wiki/**/*.md"], ["wiki/*.md"], ["wiki/_lint.md"], ["wiki/_*.md"], ["wiki/index.md"], ["wiki/actions.md"], ["wiki/[_]proposals.md"]],
+)
+def test_generated_wiki_pages_refused(vault_pages, mock_confluence, globs):
+    _write(vault_pages, "wiki/_lint.md", "# 점검\n- 2026-10-01 비공개 제안 PROPOSED_SECRET_TITLE\n")
+    _write(vault_pages, "wiki/_proposals.md", "# 제안\n- 미확정\n")
+    _write(vault_pages, "wiki/index.md", "# 색인\n")
+    _write(vault_pages, "wiki/actions.md", "# 할 일\n- [ ] 미확정 후보\n")
+    _setup(vault_pages, mock_confluence, push_globs=globs)
+    with pytest.raises(core.PolicyRefused) as exc:
+        _run(vault_pages)
+    assert exc.value.exit_code == 7 and "게시 금지" in str(exc.value)
+    assert mock_confluence.log == []
+    assert not (vault_pages / ".state" / "confluence.json").exists()
+
+
+@pytest.mark.parametrize("only", ["wiki/_lint.md", "wiki/index.md", "wiki/actions.md", "daily./2026-11-04.md"])
+def test_only_generated_or_spelled_refused(vault_pages, mock_confluence, only):
+    _setup(vault_pages, mock_confluence)
+    with pytest.raises(core.PolicyRefused):
+        _run(vault_pages, "--only", only)
+    assert mock_confluence.log == []
+
+
+# ---------------------------------------------------------------- 검토 반영: 스페이스·결정·주석
+
+
+TEAM_SPACES = [{"key": SPACE, "name": "홍길동"}, {"key": "TEAM", "name": "팀", "type": "global"}]
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_space_change_creates_in_new_space(vault_pages, edit):
+    with mock_mod.start(personal_spaces=TEAM_SPACES) as server:
+        _setup(vault_pages, server)
+        assert _run(vault_pages, "--only", "wiki/topics/캐시.md")[0] == 0
+        old = server.page_by_title(SPACE, "[KB] 캐시")
+        _setup(vault_pages, server, space_key="TEAM")
+        if edit:
+            _write(vault_pages, "wiki/topics/캐시.md", TOPIC + "\n추가 문장\n")
+        server.log.clear()
+        code, out = _run(vault_pages, "--only", "wiki/topics/캐시.md")
+        assert code == 0, out
+        new = server.page_by_title("TEAM", "[KB] 캐시")
+        assert new is not None and new["id"] != old["id"] and new["version"] == 1
+        assert not [e for e in server.log if e["method"] == "PUT"]
+        assert server.pages[old["id"]]["version"] == 1 and server.pages[old["id"]]["space"] == SPACE
+        lookup = [e for e in server.log if e["path"] == f"/rest/api/content/{old['id']}"]
+        assert lookup and "space" in lookup[0]["query"]["expand"].split(",")
+        assert _state(vault_pages)["wiki/topics/캐시.md"]["page_id"] == new["id"]
+
+
+@pytest.mark.parametrize("candidate_space", [None, {}, {"key": ""}, {"key": "~other"}, "~honggildong"])
+def test_push_one_needs_matching_space_on_state_page(candidate_space):
+    """state의 page_id 페이지에 space.key가 없거나 다르면 갱신하지 않고 새로 만든다(안전 쪽)."""
+    calls: list[str] = []
+
+    class FakeClient:
+        def find_page(self, space_key, title):
+            return None
+
+        def get_page(self, page_id):
+            page = {"id": page_id, "version": {"number": 4}}
+            if candidate_space is not None:
+                page["space"] = candidate_space
+            return page
+
+        def create_page(self, space_key, title, storage, parent_id=None):
+            calls.append("create")
+            return {"id": "9", "version": {"number": 1}}
+
+        def update_page(self, *args, **kwargs):
+            calls.append("update")
+            return {"id": "5", "version": {"number": 5}}
+
+    item = confluence_push.Item(rel="wiki/a.md", title="t", storage="<p/>", sha256="x", previous={"page_id": "5"})
+    kind, _ = confluence_push.push_one(FakeClient(), SPACE, item, lambda: None, forget=lambda: calls.append("forget"))
+    assert kind == "created" and calls == ["forget", "create"]
+
+
+def test_push_one_accepts_state_page_in_same_space_ignoring_case():
+    class FakeClient:
+        def find_page(self, space_key, title):
+            return None
+
+        def get_page(self, page_id):
+            return {"id": page_id, "version": {"number": 4}, "space": {"key": "~HongGilDong"}}
+
+        def update_page(self, page_id, title, storage, version, *, space_key=None):
+            return {"id": page_id, "version": {"number": version}}
+
+    item = confluence_push.Item(rel="wiki/a.md", title="t", storage="<p/>", sha256="x", previous={"page_id": "5"})
+    kind, page = confluence_push.push_one(FakeClient(), SPACE, item, lambda: None)
+    assert kind == "updated" and page["version"] == {"number": 5}
+
+
+def test_stale_state_entry_dropped_when_create_fails(vault_pages):
+    with mock_mod.start(personal_spaces=TEAM_SPACES) as server:
+        _setup(vault_pages, server)
+        assert _run(vault_pages, "--only", "wiki/topics/캐시.md")[0] == 0
+        server.modes["reject_title"] = "[KB] 캐시"
+        _setup(vault_pages, server, space_key="TEAM")
+        code, out = _run(vault_pages, "--only", "wiki/topics/캐시.md")
+        assert code == 1 and "모의 거부" in out
+        assert "wiki/topics/캐시.md" not in _state(vault_pages)  # 다른 스페이스의 page_id는 지웠다
+        assert not [e for e in server.log if e["method"] == "PUT"]
+
+
+@pytest.mark.parametrize(
+    "text, leaked",
+    [
+        # 항목 안의 `# ` 줄도 그 항목에 속한다
+        ("# 결정 로그\n\n## 2026-11-05 미확정\n- 상태: 제안\n- 내용: 공개 전 검토 필요\n# 메모\n- 미확정 세부: 비공개 일정 알파\n", "비공개 일정 알파"),
+        # 코드 블록 안의 상태 줄은 보지 않는다
+        ("## a\n- 상태: 제안\n```\n- 상태: 확정\n```\n- 내용: 펜스 비밀\n", "펜스 비밀"),
+        ("## a\n~~~\n- 상태: 확정\n~~~\n- 내용: 펜스만 비밀\n", "펜스만 비밀"),
+        # 상태 줄이 둘 이상이면 확정이 아니다
+        ("## a\n- 상태: 확정\n- 상태: 기각\n- 내용: 이중 상태 비밀\n", "이중 상태 비밀"),
+        ("## a\n- 상태: 확정\n### 세부\n- 상태: 제안\n- 내용: 하위 절 비밀\n", "하위 절 비밀"),
+        # HTML 주석 안의 상태 줄은 보지 않는다
+        ("## a\n<!--\n- 상태: 확정\n-->\n- 내용: 주석 비밀\n", "주석 비밀"),
+        # 상태 줄이 없으면 게시하지 않는다
+        ("## a\n- 내용: 상태 없음 비밀\n", "상태 없음 비밀"),
+        # 탭으로 띄운 `##`도 새 항목이다(앞 확정 항목에 붙지 않는다)
+        ("## a\n- 상태: 확정\n- 내용: 공개\n##\t탭 제목\n- 상태: 제안\n- 내용: 탭 비밀\n", "탭 비밀"),
+        ("## a\n- 상태: 확정\n- 내용: 공개\n  ## 들여쓴 제목\n- 상태: 제안\n- 내용: 들여쓰기 비밀\n", "들여쓰기 비밀"),
+        ("## a\n- 상태: 확정이 아님\n- 내용: 비슷한 글자 비밀\n", "비슷한 글자 비밀"),
+        ("## a\n- **상태**: 제안\n- 상태: 확정\n- 내용: 굵은 상태 비밀\n", "굵은 상태 비밀"),
+    ],
+)
+def test_keep_confirmed_decisions_fail_closed(text, leaked):
+    out = confluence_push.keep_confirmed_decisions(text)
+    assert leaked not in out, out
+
+
+def test_keep_confirmed_decisions_keeps_subsections_of_confirmed():
+    text = "# 결정\n\n## a\n- 상태: 확정 <!-- src:1 -->\n### 세부\n- 메모: 공개 세부\n```\n## 코드\n```\n\n## b\n- 상태: 제안\n"
+    out = confluence_push.keep_confirmed_decisions(text)
+    assert out.startswith("# 결정\n\n## a\n") and "공개 세부" in out and "## 코드" in out and "## b" not in out
+
+
+def test_unclosed_comment_fails_that_file(vault_pages, mock_confluence):
+    _setup(vault_pages, mock_confluence)
+    _write(vault_pages, "wiki/topics/u.md", "# u\nbefore\n<!-- src:abc unclosed UNCLOSED_SECRET\nafter\n")
+    code, out = _run(vault_pages)
+    assert code == 1
+    assert "wiki/topics/u.md" in out and "HTML 주석이 닫히지 않음" in out
+    assert len(mock_confluence.user_pages()) == 3
+    assert "wiki/topics/u.md" not in _state(vault_pages)
+    for page in mock_confluence.user_pages():
+        assert "<!--" not in page["body"] and "&lt;!--" not in page["body"] and "src:" not in page["body"]
+        assert "UNCLOSED_SECRET" not in page["body"]
+
+
+def test_comment_markers_inside_code_are_fine():
+    doc = confluence_push.prepare("wiki/topics/c.md", "# c\n`<!--` 예시\n```\n<!-- 코드 안\n```\n".encode(), "")
+    assert "`<!--` 예시" in doc.body
+    with pytest.raises(core.KbError):
+        confluence_push.prepare("wiki/topics/c.md", "# c\n`a` <!-- 열림\n".encode(), "")
+
+
+# ---------------------------------------------------------------- 검토 반영: 리다이렉트·파일별 실패·링크·해시
+
+
+@pytest.mark.parametrize("method", ["GET", "POST", "PUT"])
+def test_redirect_is_refused(vault_pages, method):
+    with mock_mod.start() as target, mock_mod.start() as server:
+        _setup(vault_pages, server)
+        if method == "PUT":
+            assert _run(vault_pages, "--only", "wiki/topics/캐시.md")[0] == 0
+            _write(vault_pages, "wiki/topics/캐시.md", TOPIC + "\n바뀐 문장\n")
+        before = _state(vault_pages)
+        server.modes.update(redirect_to=target.base_url, redirect_methods=[method])
+        server.log.clear()
+        with pytest.raises(RedirectRefused) as exc:
+            _run(vault_pages, "--only", "wiki/topics/캐시.md")
+        assert exc.value.exit_code == 4
+        assert [e["method"] for e in server.log if e["path"].startswith("/rest/api/content")][-1] == method
+        assert target.log == []  # 리다이렉트를 따라가지 않았다
+        assert _state(vault_pages) == before
+        if method != "PUT":
+            assert not (vault_pages / ".state" / "confluence.json").exists()
+
+
+def test_redirect_exits_4_via_cli(run_kb, vault_pages):
+    with mock_mod.start() as target, mock_mod.start(redirect_to="") as server:
+        server.modes["redirect_to"] = target.base_url
+        _setup(vault_pages, server)
+        result = run_kb("push")
+        assert result.returncode == 4, result.stdout + result.stderr
+        assert "리다이렉트" in result.stderr
+        assert target.log == []
+
+
+def test_duplicate_title_fails_second_file_only(vault, mock_confluence):
+    _write(vault, "wiki/topics/a.md", "---\ntitle: 같은 제목\n---\n가 본문\n")
+    _write(vault, "wiki/topics/b.md", "---\ntitle: 같은 제목\n---\n나 본문\n")
+    _write(vault, "wiki/topics/c.md", "# 다른 제목\n다 본문\n")
+    _setup(vault, mock_confluence, push_globs=["wiki/topics/*.md"])
+    code, out = _run(vault)
+    assert code == 1
+    assert sorted(p["title"] for p in mock_confluence.user_pages()) == ["[KB] 같은 제목", "[KB] 다른 제목"]
+    assert "가 본문" in _page(mock_confluence, "[KB] 같은 제목")["body"]
+    assert "  ! wiki/topics/b.md: " in out and "같은 제목" in out
+    assert set(_state(vault)) == {"wiki/topics/a.md", "wiki/topics/c.md"}
+
+
+def test_rejected_page_fails_others_pushed(vault_pages):
+    with mock_mod.start(reject_title="[KB] 캐시") as server:
+        _setup(vault_pages, server)
+        code, out = _run(vault_pages)
+        assert code == 1
+        titles = sorted(p["title"] for p in server.user_pages())
+        assert titles == ["[KB] 결정 기록", "[KB] 지식 저장고"]
+        assert "  ! wiki/topics/캐시.md: " in out and "모의 거부" in out and "400" in out
+        assert set(_state(vault_pages)) == {"wiki/decisions.md", "wiki/projects/KB.md"}
+        assert "실패 1" in out
+
+
+def test_only_still_links_other_push_globs_pages(vault_pages, mock_confluence):
+    _setup(vault_pages, mock_confluence)
+    assert _run(vault_pages, "--only", "wiki/topics/캐시.md")[0] == 0
+    assert [p["title"] for p in mock_confluence.user_pages()] == ["[KB] 캐시"]
+    assert '<ri:page ri:content-title="[KB] 지식 저장고"/>' in _page(mock_confluence, "[KB] 캐시")["body"]
+
+
+def test_front_matter_title_only_change_is_pushed(vault, mock_confluence):
+    _write(vault, "wiki/topics/plain.md", "---\ntitle: 첫 제목\n---\n링크 없는 본문\n")
+    _setup(vault, mock_confluence, push_globs=["wiki/topics/*.md"])
+    assert _run(vault)[0] == 0
+    page_id = _page(mock_confluence, "[KB] 첫 제목")["id"]
+    _write(vault, "wiki/topics/plain.md", "---\ntitle: 둘째 제목\n---\n링크 없는 본문\n")
+    mock_confluence.log.clear()
+    code, out = _run(vault)
+    assert code == 0, out
+    puts = [e for e in mock_confluence.log if e["method"] == "PUT"]
+    assert len(puts) == 1 and puts[0]["path"] == f"/rest/api/content/{page_id}"
+    assert mock_confluence.pages[page_id]["title"] == "[KB] 둘째 제목"
+
+
+def test_dry_run_needs_no_pat(vault_pages, mock_confluence):
+    _setup(vault_pages, mock_confluence, pat_ref="keyring:work-kb/nothing")
+    code, out = _run(vault_pages, "--dry-run")
+    assert code == 0, out
+    assert mock_confluence.log == []
+
+
+def test_main_refuses_agent(vault_pages, mock_confluence, monkeypatch):
+    _setup(vault_pages, mock_confluence)
+    monkeypatch.setenv("KB_AGENT", "1")
+    with pytest.raises(core.PolicyRefused):
+        confluence_push.main(["--root", str(vault_pages)])
+    assert mock_confluence.log == []

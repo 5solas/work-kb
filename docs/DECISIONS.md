@@ -242,6 +242,20 @@ Opus 3명 독립 검토(지시서·탐지 논리 / 회사 가드·데이터 안�
 - **lint**: 고아 페이지는 들어오는 위키링크도 `mentions` 항목도 없는 wiki 페이지(색인 구역·`_lint.md`·자기 링크는 링크로 안 침; index·decisions·actions·`_*.md`는 제외). 깨진 링크는 Obsidian 방식으로 해석(절대 경로·접미 경로·파일명·`.md` 생략·대소문자 무시·NFC), daily·inbox·wiki·jira의 .md만 검사하고 코드·front matter·`mentions` 구역은 건너뜀. 오래된 캐시는 완료 일감 제외(변경 없으면 `synced_at`이 안 바뀌므로). 멘션 없는 stub은 파일 수정 시각 기준. `sending`은 나이(2×write_timeout)로만 uncertain 판정. 추가 절: 포기한 편찬 단위, 포기한 이미지, 비UTF-8 파일(마커 손상에 포함). T5는 엔티티별로 관련 결정(기각 제외)을 묶어 2개 이상일 때만 보내고 큰 입력은 나눠 합친다; `--llm` 없이 돌리면 지난 T5 결과를 안내문과 함께 보존. 항상 종료 0, `_lint.md`의 `lint` 구역만 씀(마커 손상이면 stdout).
 - **confluence_push**: 페이지 매칭은 제목 → `.state/confluence.json`의 page_id(이름 바뀐 페이지 갱신) → 생성. 409는 버전 재조회 후 1회 재시도. 첫 H1은 본문에서 제거(제목으로 씀). 원시 HTML은 텍스트로, 엔티티는 XML에 맞게 변환. 변경 감지 sha256은 스페이스·제목·storage를 포함. push_globs에 걸리는 파일끼리만 페이지 링크(`--only`로 좁혀도), 임베드는 텍스트. `--dry-run`은 네트워크 호출 없음(PAT 없이 동작). 같은 제목 둘·마커 손상·4xx는 그 파일만 실패하고 계속(종료 1), 생성 403은 종료 2. `.state`는 페이지마다 잠금 아래 기록, 네트워크는 잠금 밖. mock 모드 `version_conflict_once`, `forbid_create`, `anonymous`, `personal_spaces`; 모든 스페이스에 홈페이지가 있음.
 - **init Confluence**: PAT는 `/rest/api/user/current` 성공 전엔 저장 안 함(익명 응답은 인증 실패, 종료 2). 개인 스페이스는 `~username` → `~userKey` → `type=personal` 목록(25개씩, 최대 100)으로 찾고, 자동으로 찾으면 묻지 않는다. 부모 페이지는 숫자 id 또는 `pageId=` URL, `-`로 비움. 설정되면 `enabled: true`. 마법사 순서: 환경 → Jira → Confluence → LLM → (Phase 6) 스케줄. `KB_INIT_CONFLUENCE_URL/PAT/SPACE/PARENT`. init은 자체 GET 전용 `ConfluenceProbe`를 쓴다(W5.2와 동시에 만들어져 `lib/confluence_client.py`를 쓰지 못함 — 검토에서 통합 여부 결정). doctor에 스페이스·부모 페이지·push_globs 줄 추가.
+### Phase 5 검토·수정 라운드 (2026-11-05)
+
+Opus 3명 독립 검토(지시서·Confluence DC API / 유출 안전 / 거짓 통과) → 15건 → 전부 수정. 1752개 통과. 추가 결정:
+
+- **금지 폴더 검사 강화(push)**: 글로브 표기와 **실제 경로**(`resolve()` 뒤 볼트 기준) 양쪽에 적용. 세그먼트 끝의 점·공백·`:스트림` 제거, 대소문자 무시. 볼트 아래 경로 구성 요소가 정션·심볼릭 링크면 거부(허용된 wiki를 가리켜도). 코드 거부 목록 추가: `wiki/_*.md`, `wiki/index.md`, `wiki/actions.md`(그래서 `wiki/**/*.md`·`wiki/*.md` 글로브는 lint·제안 페이지가 생긴 뒤 거부됨). `--only`도 같은 규칙. 상태 키와 `--only` 매칭은 실제 경로(디스크 대소문자·NFC).
+- **page_id 대체 경로**: `get_page`는 `expand=version,space`. 저장된 page_id는 응답의 `space.key`가 있고 `space_key`와 같을(대소문자 무시) 때만 재사용, 아니면 상태 항목을 버리고 새로 만든다. mock은 DC처럼 `expand`에 `space`가 있을 때만 `space`를 돌려준다.
+- **decisions.md 게시 필터 fail-closed**: 첫 `## ` 항목이 시작되면 다음 `## `까지의 모든 줄(H1 포함)이 그 항목. 코드 펜스·HTML 주석 안의 `상태:`는 무시. 코드 밖 `상태:` 줄이 **정확히 하나**이고 `확정`일 때만 게시. 닫히지 않은 `<!--`가 코드 밖에 남으면 그 파일 실패(종료 1), 게시 안 함.
+- 클라이언트: `personal_space()` 순서 `~username` → `~userKey` → `type=personal`, 키 비교 대소문자 무시, `confluence.timeout` 적용, 읽기 5xx 1회 재시도(쓰기는 재시도 없음). mock 모드 추가 `redirect_to`, `redirect_methods`, `reject_title`, `server_error`.
+- doctor `push_globs` 줄은 `confluence_push.collect`를 재사용해 거부되는 경로를 ✗로 보인다(종료 1에 반영).
+- **init Confluence 통일**: 자체 `ConfluenceProbe`를 없애고 `lib.confluence_client.ConfluenceClient`를 쓴다(인증 실패·익명 → 종료 2, 리다이렉트 거부 → 4, 5xx → 1회 재시도 뒤 3). 부모 페이지는 응답에 스페이스 키가 없으면 거부. 재실행 시 기존 `space_key`가 서버에 있으면 **기본값으로 제시**(Enter 유지, `1` = 찾은 개인 스페이스, 또는 키 입력); 기존 값이 없거나 같은 스페이스면 묻지 않고 선택; 기존 스페이스가 사라졌으면 개인 스페이스로 바꾸고 알린다. `KB_INIT_CONFLUENCE_SPACE`가 우선.
+- lint T5: 답한 프로필의 한도에 맞춰 남은 묶음을 다시 나눠 보내고, 끝내 못 보낸 묶음이 있으면 결과를 `partial`로 표시("묶음 N개 중 M개는 다 검사하지 못했습니다").
+- demo 테스트는 개발자 PC의 `config.local.yaml`에 의존하지 않도록 카나리 설정 루트·기록하는 가짜 keyring을 써서 "저장소 설정·실제 keyring·사용자 `KB_*`를 읽지 않음"을 단언.
+- 심볼릭 링크 생성 권한이 없는 PC에서는 심볼릭 링크 테스트 1개가 건너뛰어진다(정션 테스트는 실행됨).
+
 - **demo**: 모든 단계를 프로세스 안에서 각 모듈의 `run()`으로 실행, mock은 포트 0(`--fixed-ports`면 8081~8083). 가짜 keyring 서비스명 `work-kb-demo`. LLM 프로필은 main 하나(키 참조 없음, `trust_env: false`, 탐지 블록 미리 설정) → `DEEPINFRA_API_KEY`를 읽지 않음. mock LLM 답은 "모의"로 표시. `KB_FAKE_NOW=2026-11-05T18:30:00+09:00`(샘플 날짜에 맞춤, 사용자 값 우선). 사용자 `KB_*` 덮어쓰기 무시. 임시 볼트의 `config.yaml`은 저장소 것으로 교체. company 판정은 `config.local.yaml` 최상위 `environment:` 줄만 정규식으로 읽어 글자 그대로 company일 때만 거부(종료 7). `examples/sample-vault`나 `tests/` mock이 없으면 종료 4(D60대로 `tests/`를 빼고 복사한 회사 사본에서는 demo 불가 — 의도). `--keep DIR`은 저장소 밖의 새 폴더만. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)

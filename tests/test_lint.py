@@ -602,6 +602,100 @@ def test_t5_splits_large_input_and_merges(kb, llm):
     assert result["counts"]["contradictions"] == 1  # 같은 쌍은 합친다
 
 
+def _many_topics(root: Path, count: int = 5) -> None:
+    """t5_vault + 주제 count개(요약 400자)와 주제마다 관련 결정 하나(400자)."""
+    t5_vault(root)
+    extra = ""
+    for n in range(1, count + 1):
+        write(root, f"wiki/topics/주제{n}.md", entity("topic", f"주제{n}", summary=f"주제{n} 요약 " + "나" * 400 + "\n"))
+        extra += f"## 2026-11-0{n} 주제{n} 결정\n- 상태: 확정\n- 내용: 주제{n} " + "다" * 400 + "\n\n"
+    write(root, "wiki/decisions.md", DECISIONS.replace("<!-- kb:decisions:end -->", extra + "<!-- kb:decisions:end -->"))
+
+
+def test_t5_small_context_fallback_sends_every_group(kb, llm):
+    """답한 프로필(fallback)의 한도가 작으면 그 한도로 다시 나눠 나머지를 보낸다. 빠뜨린 채 'ok'라 하지 않는다."""
+    _many_topics(kb)
+    dead = llm(json_mode="reject")  # main: 모든 채팅 요청에 400
+    small = llm(canned={"contradictions": '{"conflicts": []}'})
+    data = {
+        "environment": "home",
+        "jira": {"project_keys": ["KB", "OPS"]},
+        "llm": {
+            "enabled": True,
+            "profiles": {
+                "main": {"base_url": f"{dead.base_url}/v1", "model": "mock", "detected": {"context_tokens": 262144}},
+                "fallback": {"base_url": f"{small.base_url}/v1", "model": "mock", "detected": {"context_tokens": 2000}},
+            },
+            "fallback_order": ["main", "fallback"],
+        },
+    }
+    config.save_local(kb, data)
+    cfg = config.load(kb)
+    groups, _ = lint._t5_groups(lint._load_vault(cfg), lint._decisions((kb / "wiki" / "decisions.md").read_bytes()))
+    assert len(groups) == 8
+    result = run(cfg, llm=True)
+
+    assert chat_requests(dead), "main을 먼저 시도해야 한다"
+    users = [body["messages"][-1]["content"] for body in chat_requests(small)]
+    assert len(users) >= 2
+    sent = "\n".join(users)
+    for group in groups:
+        assert f"## {group.header}" in sent, group.header
+        for ident, _ in group.items:
+            assert f"[{ident}]" in sent, ident
+    assert result["contradictions"]["status"] == "ok"
+    assert "- 모순 후보 없음" in lint_region(kb)
+
+
+class _HalfClient:
+    """첫 호출만 답하는 가짜 LLM 클라이언트(한도 작음). 나머지 묶음은 응답 없음."""
+
+    enabled = True
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.users: list[str] = []
+
+    def input_limit(self, task: str, profile: str | None = None) -> int:
+        return self.limit
+
+    def run_task(self, task, messages_for, *, validate, needs_vision=False):
+        from lib.llm_client import TaskOutcome
+
+        messages = messages_for(self.limit)
+        self.users.append(messages[-1]["content"])
+        if len(self.users) > 1:
+            return TaskOutcome("skipped", None, None, [{"profile": "main", "status": "network"}])
+        data = {"conflicts": []}
+        validate(data)
+        return TaskOutcome("ok", data, "main", [{"profile": "main", "status": "ok"}])
+
+
+def test_t5_unsent_groups_make_partial_with_count(kb):
+    _many_topics(kb)
+    cfg = local(kb, llm={"enabled": True, "profiles": {"main": {"base_url": "http://127.0.0.1:9/v1", "model": "mock"}}})
+    vault = lint._load_vault(cfg)
+    decisions = lint._decisions((kb / "wiki" / "decisions.md").read_bytes())
+    client = _HalfClient(limit=1500)
+    outcome = lint.contradictions(cfg, vault, decisions, client=client)
+    assert len(client.users) >= 2
+    assert outcome["status"] == "partial"
+    groups = outcome["groups"]
+    sections: dict[str, str] = {}
+    for part in client.users[0].split("\n## ")[1:]:
+        header, _, body = part.partition("\n")
+        sections[header] = body
+    unchecked = sum(
+        1 for g in lint._t5_groups(vault, decisions)[0]
+        if any(f"[{ident}]" not in sections.get(g.header, "") for ident, _ in g.items)
+    )
+    assert 1 <= unchecked < groups
+    assert f"묶음 {groups}개 중 {unchecked}개는 다 검사하지 못했습니다" in outcome["note"]
+    section = lint._t5_section(vault, outcome, None)
+    assert any(f"{unchecked}개는 다 검사하지 못했습니다" in note for note in section.notes)
+    assert "- 모순 후보 없음" in section.notes  # 부분 결과도 개수는 센다(빠진 묶음은 위 안내로)
+
+
 # ---------------------------------------------------------------- 단위
 
 

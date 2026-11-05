@@ -23,7 +23,8 @@
 - 마커 손상 파일: 관리 구역 마커가 깨졌거나(D24) UTF-8이 아닌 파일.
 - 모순 후보(`--llm`, T5): 엔티티 요약과 관련 결정을 LLM에 보내 `{"conflicts":[{a,b,why}]}`. 기본은 꺼짐이고
   `--llm` 없이 돌면 이전 `--llm` 결과를 그대로 둔다. LLM이 꺼져 있거나 회사 환경 공개 주소면 안내 한 줄.
-  `--llm`이 없으면 LLM 클라이언트를 만들지도 않는다(네트워크 없음).
+  `--llm`이 없으면 LLM 클라이언트를 만들지도 않는다(네트워크 없음). 답한 프로필(fallback)의 입력 한도가
+  더 작아 덜 보냈으면 그 한도로 다시 나눠 나머지를 보낸다. 그래도 못 본 묶음이 있으면 'partial'과 개수를 적는다(D41).
 """
 from __future__ import annotations
 
@@ -859,6 +860,27 @@ def _fit(groups: Sequence[_Group], budget: int) -> list[_Group]:
     return out
 
 
+def _t5_rest(chunk: Sequence[_Group], chosen: Sequence[_Group]) -> list[_Group]:
+    """_fit이 보내지 못한 나머지. 요약([S])은 되풀이하고, 요약이 없으면 보낸 결정 하나를 짝으로 붙인다."""
+    done: dict[str, set[str]] = {}
+    for group in chosen:
+        done.setdefault(group.header, set()).update(ident for ident, _ in group.items)
+    rest: list[_Group] = []
+    for group in chunk:
+        sent_ids = done.get(group.header, set())
+        left = [item for item in group.items if not item[0].startswith("S") and item[0] not in sent_ids]
+        if not left:
+            continue
+        head = [item for item in group.items if item[0].startswith("S")]
+        items = [*head, *left]
+        if len(items) < 2:
+            partner = [item for item in group.items if item[0] in sent_ids and not item[0].startswith("S")]
+            items = [*partner[-1:], *left]
+        if len(items) >= 2:
+            rest.append(_Group(group.header, items))
+    return rest
+
+
 def norm_id(value: Any) -> str | None:
     match = _ID.match(str(value or "").strip())
     return f"{match.group(1).upper()}{int(match.group(2))}" if match else None
@@ -917,14 +939,23 @@ def _run_t5(client: LlmClient, vault: _Vault, decisions: Sequence[_Decision], re
         return result
     system_tokens = estimate_tokens(prompts.system_prompt(TASK)) + PROMPT_RESERVE_TOKENS
     budget = max(client.input_limit(TASK) - system_tokens, 200)
-    chunks = _t5_chunks(groups, budget)
+    queue = _t5_chunks(groups, budget)
+    wanted: dict[str, set[str]] = {}
+    for group in groups:
+        wanted.setdefault(group.header, set()).update(ident for ident, _ in group.items)
+    checked: dict[str, set[str]] = {header: set() for header in wanted}
     seen: set[tuple[str, str]] = set()
     ok = 0
-    for chunk in chunks:
+    rounds_left = sum(len(ids) for ids in wanted.values()) + len(queue)  # 진전이 없을 때의 안전판
+    while queue and rounds_left > 0:
+        rounds_left -= 1
+        chunk = queue.pop(0)
         sent: set[str] = set()
+        last: dict[str, Any] = {"chosen": [], "limit": 0}
 
-        def messages_for(limit: int, chunk: Sequence[_Group] = chunk, sent: set[str] = sent) -> list[dict]:
+        def messages_for(limit: int, chunk: Sequence[_Group] = chunk, sent: set[str] = sent, last: dict = last) -> list[dict]:
             chosen = _fit(chunk, max(limit - system_tokens, 200))
+            last.update(chosen=chosen, limit=limit)  # 마지막 호출 = 답한 프로필(run_task는 프로필마다 한 번 부른다)
             sent.clear()
             sent.update(ident for group in chosen for ident, _ in group.items)
             return prompts.build_messages(TASK, _t5_user(chosen))
@@ -937,6 +968,11 @@ def _run_t5(client: LlmClient, vault: _Vault, decisions: Sequence[_Decision], re
         if outcome.status != "ok" or not outcome.data:
             continue
         ok += 1
+        for group in last["chosen"]:
+            checked.setdefault(group.header, set()).update(ident for ident, _ in group.items)
+        rest = _t5_rest(chunk, last["chosen"])
+        if rest:  # 답한 프로필의 한도가 작아 덜 보냈다 → 그 한도로 다시 나눠 나머지를 보낸다
+            queue[0:0] = _t5_chunks(rest, max(int(last["limit"]) - system_tokens, 200))
         result["profile"] = result["profile"] or outcome.profile
         for item in outcome.data["conflicts"]:
             a, b = norm_id(item["a"]), norm_id(item["b"])
@@ -948,10 +984,14 @@ def _run_t5(client: LlmClient, vault: _Vault, decisions: Sequence[_Decision], re
                 "a": a, "b": b, "why": _one_line(item["why"], MAX_WHY),
                 "a_label": labels.get(a or "", _code(item["a"])), "b_label": labels.get(b or "", _code(item["b"])),
             })
-    if ok == len(chunks):
+    unchecked = sum(1 for header, ids in wanted.items() if ids - checked.get(header, set()))
+    if ok and not unchecked:
         result["status"] = "ok"
     elif ok:
-        result.update(status="partial", note=f"묶음 {len(chunks)}개 중 {len(chunks) - ok}개는 LLM 응답을 받지 못했습니다")
+        result.update(
+            status="partial",
+            note=f"묶음 {len(groups)}개 중 {unchecked}개는 다 검사하지 못했습니다 (LLM 응답을 받지 못했거나 입력 한도를 넘음)",
+        )
     else:
         result.update(status="skipped", note="LLM 응답을 받지 못해 모순 검사를 건너뛰었습니다 (연결·형식 오류, `.state/logs` 참고)")
     return result

@@ -11,7 +11,8 @@ LLM 연결 점검은 프로필마다 `GET {base_url}/models` 한 번이다(D28, 
 `llm_client.assert_host_allowed`로 회사 차단을 한 번 더 확인한다.
 Jira가 ✓이면 이어서 서버 버전, sprint 필드(D51), jql_mine·뷰 JQL(maxResults=0, D49)을 lib/jira_client로 확인한다.
 Confluence가 ✓이면 이어서 스페이스(`/rest/api/space?spaceKey=`)와 부모 페이지(`/rest/api/content/{id}`, 같은
-스페이스인지)를 확인한다. push_globs에 맞는 파일 수는 늘 '-'로 알린다(Confluence가 활성일 때).
+스페이스인지)를 확인한다. push_globs는 push와 같은 규칙(`confluence_push.collect`)으로 골라, 금지 경로를
+고르면 ✗, 아니면 게시할 .md 파일 수를 '-'로 알린다(Confluence가 활성일 때).
 
 탐지 재검증(D48): 기록된 `detected`가 있고 연결된 프로필마다 채팅 3회 이하로 확인하고 저장하지 않는다.
 모든 채팅은 `LlmClient`(회사 차단, D44)로, 실제 작업과 같은 방법(기록된 토글·JSON 모드)으로 보낸다.
@@ -510,7 +511,7 @@ _FIX_CONFLUENCE = "kb.py init --section confluence"
 
 @check("Confluence 세부")
 def check_confluence_details(ctx: Context) -> None:
-    """Confluence가 활성일 때: (연결됐으면) 스페이스·부모 페이지, 그리고 push_globs에 맞는 파일 수('-')."""
+    """Confluence가 활성일 때: (연결됐으면) 스페이스·부모 페이지, 그리고 push_globs(금지 경로면 ✗, 아니면 파일 수 '-')."""
     cfg = ctx.cfg
     if cfg is None or not cfg.local_exists or not _truthy(cfg.get("confluence.enabled"), True):
         return
@@ -588,32 +589,37 @@ def _confluence_parent(ctx: Context, base: str, token: str, conn: Mapping[str, A
     ctx.report.ok(name, f"{data.get('title') or '?'} ({page_id})")
 
 
-def push_glob_files(cfg: Any) -> tuple[list[str], list[str]]:
-    """(push_globs 목록, 맞는 파일의 볼트 상대 경로 목록)."""
-    raw = cfg.get("confluence.push_globs")
+def _confluence_globs(ctx: Context) -> None:
+    """push와 같은 규칙(`confluence_push.collect`)으로 고른다. 금지 경로를 고르면 ✗, 아니면 게시할 .md 수('-')."""
+    name = "Confluence push_globs"
+    raw = ctx.cfg.get("confluence.push_globs")
     if isinstance(raw, str):
         raw = [raw]
     globs = [str(g).strip() for g in raw if isinstance(g, str) and g.strip()] if isinstance(raw, (list, tuple)) else []
-    root = Path(cfg.root)
-    found: set[str] = set()
-    for pattern in globs:
-        try:
-            matches = list(root.glob(pattern.replace("\\", "/")))
-        except (ValueError, NotImplementedError, OSError):
-            continue
-        for path in matches:
-            if path.is_file():
-                found.add(path.relative_to(root).as_posix())
-    return globs, sorted(found)
-
-
-def _confluence_globs(ctx: Context) -> None:
-    name = "Confluence push_globs"
-    globs, files = push_glob_files(ctx.cfg)
-    if not globs:
+    if not globs and not raw:
         ctx.report.info(name, "비어 있습니다. 푸시할 파일이 없습니다 (config.yaml의 confluence.push_globs)")
         return
+    try:
+        import confluence_push
+
+        selection = confluence_push.collect(ctx.cfg)
+    except ImportError as exc:
+        ctx.report.info(name, f"확인하지 못했습니다 ({exc.name or exc}) → 의존성 줄을 먼저 고치세요")
+        return
+    except core.KbError as exc:
+        ctx.report.fail(name, f"{exc} → config.yaml의 confluence.push_globs를 고치세요")
+        return
     shown = ", ".join(globs)
+    if selection.refused:
+        listed = "; ".join(f"{rel}: {reason}" for rel, reason in selection.refused[:5])
+        more = f" 외 {len(selection.refused) - 5}개" if len(selection.refused) > 5 else ""
+        ctx.report.fail(
+            name,
+            f"게시 금지 경로를 고릅니다 ({listed}{more}). kb.py push는 종료 7로 거부합니다 "
+            "→ config.yaml의 confluence.push_globs를 wiki/ 아래(wiki/projects/*.md 등)로만 두세요",
+        )
+        return
+    files = selection.files
     if files:
         ctx.report.info(name, f"{len(files)}개 파일 ({shown}). 푸시는 kb.py push로 직접 합니다")
     else:

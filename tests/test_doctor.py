@@ -436,6 +436,54 @@ def test_redetect_refused_for_agent_and_needs_local_config(run_kb, vault):
     assert run_kb("doctor", "--json", env={"KB_AGENT": "1"}).returncode == 1  # 그냥 doctor는 허용
 
 
+# ---------------------------------------------------------------- Confluence push_globs (프로세스 안)
+
+
+def _globs_line(vault, push_globs) -> tuple[doctor.Report, tuple[str, str]]:
+    config.save_local(vault, {"environment": "home", "confluence": {"enabled": True, "push_globs": push_globs}})
+    ctx = doctor.Context(root_arg=str(vault), report=doctor.Report())
+    ctx.cfg = config.load(vault)
+    doctor._confluence_globs(ctx)
+    [check] = [c for c in ctx.report.checks if c.name == "Confluence push_globs"]
+    return ctx.report, (check.state, check.text)
+
+
+def _write_vault(vault, *rels: str) -> None:
+    for rel in rels:
+        path = vault / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# x\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "push_globs, needle",
+    [
+        (["wiki/projects/*.md", "daily/*.md"], "daily/*.md"),
+        (["daily./*.md"], "daily./*.md"),
+        (["wiki/*.md"], "wiki/_lint.md"),
+        (["**/*.md"], "inbox/메모.md"),
+    ],
+)
+def test_doctor_push_globs_refused_is_fail(vault, push_globs, needle):
+    _write_vault(vault, "wiki/projects/KB.md", "wiki/_lint.md", "daily/2026-11-05.md", "inbox/메모.md")
+    report, (state, text) = _globs_line(vault, push_globs)
+    assert state == "✗", text
+    assert needle in text and "게시 금지" in text and "wiki/ 아래" in text
+    assert report.exit_code() == 1
+
+
+def test_doctor_push_globs_counts_only_allowed_md(vault):
+    _write_vault(vault, "wiki/projects/KB.md", "wiki/topics/배포.md", "wiki/decisions.md", "wiki/people/홍길동.md")
+    (vault / "wiki" / "topics" / "그림.png").write_bytes(b"\x89PNG")
+    _, (state, text) = _globs_line(vault, ["wiki/projects/*.md", "wiki/topics/*", "wiki/decisions.md"])
+    assert state == "-" and text.startswith("3개 파일 (")
+
+
+def test_doctor_push_globs_bad_value_is_fail(vault):
+    _, (state, text) = _globs_line(vault, [123])
+    assert state == "✗" and "push_globs" in text
+
+
 # ---------------------------------------------------------------- PowerShell·시간대 (프로세스 안)
 
 

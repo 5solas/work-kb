@@ -5,9 +5,10 @@
   (3xx → `RedirectRefused`, ConfigError 4). 그 밖의 4xx → `ConfluenceError`(Confluence가 준 문장을 담음),
   404는 `NotFound`, 409는 `VersionConflict`. 읽기(GET)가 5xx면 1초 쉬고 한 번만 다시 묻는다.
   쓰기(POST·PUT)는 다시 보내지 않는다(5xx → NetworkError, after_send=True).
-- 페이지 조회·생성·갱신은 언제나 `expand=version`을 붙인다. 갱신은 호출자가 `지금 버전 + 1`을 넘긴다.
+- 페이지 조회·생성·갱신은 언제나 `expand=version`을 붙인다(id로 읽을 때는 `version,space`). 갱신은 호출자가
+  `지금 버전 + 1`을 넘긴다. 시간 제한은 `confluence.timeout`(초, 기본 30).
 - 개인 스페이스(D55): `/user/current`(익명이면 중단) → `/rest/api/space?spaceKey=~<username>` →
-  `type=personal` 목록(페이지 넘김). 본인 스페이스를 못 찾으면 후보 목록만 돌려주고 고르는 일은 호출자가 한다.
+  `spaceKey=~<userKey>` → `type=personal` 목록(페이지 넘김). 키는 대소문자 없이 비교한다. 본인 스페이스를 못 찾으면 후보 목록만 돌려주고 고르는 일은 호출자가 한다.
 """
 from __future__ import annotations
 
@@ -56,7 +57,7 @@ class PersonalSpace:
     """개인 스페이스 탐지 결과(D55).
 
     - `user`: `/rest/api/user/current` 응답.
-    - `own`: `~<username>`으로 찾은 본인 스페이스. 없으면 None.
+    - `own`: `~<username>`, 다음 `~<userKey>`로 찾은 본인 스페이스. 없으면 None.
     - `candidates`: `own`이 있으면 `[own]`, 없으면 `type=personal` 목록 전부(남의 것일 수 있으므로
       하나뿐이어도 사용자에게 번호로 고르게 한다). 비었으면 Confluence 화면에서 개인 스페이스를 만들어야 한다.
     """
@@ -277,10 +278,18 @@ class ConfluenceClient:
                 "Confluence가 익명 사용자로 인식합니다. PAT가 틀렸거나 만료되었습니다. "
                 "`python scripts/kb.py init --section confluence`로 다시 입력하세요"
             )
-        own_key = f"~{username.strip()}"
-        own = next((s for s in self._space_results({"spaceKey": own_key}) if s.get("key") == own_key), None)
-        if own is not None:
-            return PersonalSpace(user=user, own=own, candidates=[own])
+        keys = [f"~{username.strip()}"]
+        user_key = user.get("userKey")
+        if isinstance(user_key, str) and user_key.strip():
+            keys.append(f"~{user_key.strip()}")
+        for own_key in dict.fromkeys(keys):
+            wanted = own_key.casefold()
+            own = next(
+                (s for s in self._space_results({"spaceKey": own_key}) if str(s.get("key") or "").casefold() == wanted),
+                None,
+            )
+            if own is not None:
+                return PersonalSpace(user=user, own=own, candidates=[own])
         return PersonalSpace(user=user, own=None, candidates=self.personal_spaces())
 
     # ------------------------------------------------------------ 페이지
@@ -298,9 +307,12 @@ class ConfluenceClient:
         return None
 
     def get_page(self, page_id: str) -> dict | None:
-        """페이지 하나(version 포함). 없으면 None."""
+        """페이지 하나(version·space 포함). 없으면 None.
+
+        expand를 주면 DC 기본값(history,space,version)을 대신하므로 space를 꼭 함께 청한다.
+        """
         try:
-            data = self._get(f"/content/{quote(str(page_id), safe='')}", {"expand": "version"})
+            data = self._get(f"/content/{quote(str(page_id), safe='')}", {"expand": "version,space"})
         except NotFound:
             return None
         if not isinstance(data, dict):

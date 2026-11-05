@@ -2,16 +2,20 @@
 
 `kb.py push [--dry-run] [--only GLOB|경로 ...]`
 
-- 대상은 `confluence.push_globs`로 고른 `.md` 파일뿐이다. daily·inbox·jira·raw·_trash·.state 아래이거나
-  볼트 밖이면 globs에 적혀 있어도 코드에서 거부한다(종료 7, 아무것도 보내지 않음).
+- 대상은 `confluence.push_globs`로 고른 `.md` 파일뿐이다. daily·inbox·jira·raw·_trash·.state 아래,
+  `wiki/_*.md`·`wiki/index.md`·`wiki/actions.md`, 볼트 밖이면 globs에 적혀 있어도 코드에서 거부한다
+  (종료 7, 아무것도 보내지 않음). glob이 적은 이름과 실제 위치(resolve) 둘 다 보며, 이름 끝의 점·공백과
+  `:스트림`은 떼고 비교한다. 볼트 아래 경로에 심볼릭 링크·정션이 끼어 있어도 거부한다.
 - 파일마다: front matter 제거 → `mentions` 구역은 본문까지, 나머지 관리 구역은 마커만 제거 →
-  `wiki/decisions.md`는 `- 상태: 확정` 항목만 남김 → 남은 HTML 주석 제거 → 첫 H1 제거(제목으로 씀) →
+  `wiki/decisions.md`는 상태가 `확정` 하나뿐인 항목만 남김 → HTML 주석 제거(닫히지 않은 `<!--`가 코드 밖에
+  남으면 그 파일은 실패) → 첫 H1 제거(제목으로 씀) →
   위키링크 처리 → `markdown`(tables, fenced_code, 원시 HTML은 글자로) → storage XHTML(XML 검사).
 - 위키링크: `[[KB-12]]` → Jira 링크, push_globs에 드는 페이지 → Confluence 페이지 링크(제목으로),
   그 밖(daily·사람 등) → 글자. 코드 안의 위키링크는 그대로 둔다.
 - 제목: `title_prefix` + (front matter `title` | 첫 H1 | 파일 이름).
 - 제목으로 찾아 있으면 갱신(버전 + 1, 409면 버전을 다시 읽어 한 번 더), 없으면 `.state`의 page_id로
-  찾아 갱신(제목이 바뀐 경우), 그래도 없으면 부모 아래에 생성(`parent_page_id`가 비면 스페이스 홈 아래).
+  찾아 갱신(제목이 바뀐 경우, `expand=version,space`로 읽어 같은 스페이스일 때만. 아니면 그 state 항목을
+  지운다), 그래도 없으면 부모 아래에 생성(`parent_page_id`가 비면 스페이스 홈 아래).
 - `.state/confluence.json`: {rel: {page_id, version, sha256, pushed_at}}. sha256(스페이스·제목·storage)이
   같으면 보내지 않는다.
 - `--dry-run`: 네트워크 없이 계획만 출력한다. 아무것도 쓰지 않는다.
@@ -22,6 +26,7 @@ from __future__ import annotations
 import fnmatch
 import html
 import html.entities
+import os
 import re
 import sys
 import unicodedata
@@ -40,6 +45,7 @@ STATE = "confluence"
 LOCK_OWNER = "confluence_push"
 DECISIONS_REL = "wiki/decisions.md"
 FORBIDDEN_DIRS = frozenset({"daily", "inbox", "jira", "raw", "_trash", ".state"})
+DENY_WIKI_FILES = frozenset({"index.md", "actions.md"})  # 그리고 wiki/_*.md
 DROP_REGIONS = ("mentions",)
 STORAGE_ROOT = (
     '<ac:root xmlns:ac="http://atlassian.com/content" xmlns:ri="http://atlassian.com/resource/identifier" '
@@ -50,12 +56,14 @@ _COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 _WIKILINK = re.compile(r"(!?)\[\[([^\[\]\n]+?)\]\]")
 _JIRA_KEY = re.compile(r"^(?:jira/)?([A-Z][A-Z0-9_]+-[1-9][0-9]*)$")
 _H1 = re.compile(r"^#[ \t]+(.+?)[ \t]*#*[ \t]*$")
-_HEADING12 = re.compile(r"^(#{1,2})[ \t]+\S")
+_ENTRY_HEADING = re.compile(r"^ {0,3}##(?:[ \t]|$)")
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _CONFIRMED = re.compile(r"^\s*[-*+][ \t]*상태[ \t]*[:：][ \t]*\**확정\**(?:\s|<!--.*?-->)*$")
+_STATUS = re.compile(r"^\s*(?:[-*+>][ \t]*)*[*_]*상태[*_]*[ \t]*[:：]")
 _XML_BAD_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 _ENTITY = re.compile(r"&([A-Za-z][A-Za-z0-9]*);")
 _XML_ENTITIES = frozenset({"amp", "lt", "gt", "quot", "apos"})
+_INLINE_CODE = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)")
 _CODE_SPAN = re.compile(r"<(pre|code)\b[^>]*>.*?</\1>", re.DOTALL)
 
 
@@ -69,16 +77,45 @@ def _norm_rel(text: str) -> str:
     return rel
 
 
+def _win_segment(part: str) -> str:
+    """Windows가 실제로 여는 이름: `:스트림`(`::$INDEX_ALLOCATION` 등)과 끝의 점·공백을 뗀다."""
+    return part.split(":", 1)[0].rstrip(". ")
+
+
 def forbidden_reason(rel: str) -> str | None:
-    """게시하면 안 되는 상대 경로면 그 이유, 아니면 None."""
+    """게시하면 안 되는 상대 경로(또는 glob 패턴)면 그 이유, 아니면 None.
+
+    - 볼트 밖(절대 경로, `..`), 금지 폴더(daily·inbox·jira·raw·_trash·.state) 아래.
+    - 자동 생성·미확정 목록 페이지: `wiki/_*.md`(_lint·_proposals 등), `wiki/index.md`, `wiki/actions.md`.
+    각 폴더·파일 이름은 Windows처럼 끝의 점·공백과 `:스트림`을 떼고 대소문자 없이 비교한다
+    (`daily./`, `DAILY /`, `daily::$INDEX_ALLOCATION/`도 daily/다).
+    """
     rel = _norm_rel(rel)
     if not rel or rel.startswith("/") or re.match(r"^[A-Za-z]:", rel):
         return "볼트 밖(절대 경로)"
-    parts = [p for p in rel.split("/") if p not in ("", ".")]
-    if any(p == ".." for p in parts):
+    raw_parts = [p for p in rel.split("/") if p not in ("", ".")]
+    if any(p == ".." for p in raw_parts):
         return "볼트 밖(..)"
-    if parts and parts[0].casefold() in FORBIDDEN_DIRS:
-        return f"'{parts[0]}/'는 외부 게시 금지 폴더"
+    parts: list[str] = []
+    for raw in raw_parts:
+        seg = _win_segment(raw)
+        if not seg:
+            return f"'{raw}'는 쓸 수 없는 경로 이름"
+        parts.append(seg.casefold())
+    if parts and parts[0] in FORBIDDEN_DIRS:
+        return f"'{_win_segment(raw_parts[0])}/'는 외부 게시 금지 폴더"
+    if len(parts) == 2 and parts[0] == "wiki" and (parts[1].startswith("_") or parts[1] in DENY_WIKI_FILES):
+        return "자동 생성·미확정 목록 페이지라 게시 금지 (wiki/_*.md · wiki/index.md · wiki/actions.md)"
+    return None
+
+
+def _link_in_path(root: Path, path: Path) -> str | None:
+    """볼트 루트 아래 경로 가운데 심볼릭 링크나 정션인 첫 부분(볼트 상대 경로). 없으면 None."""
+    current = root
+    for part in path.relative_to(root).parts:
+        current = current / part
+        if current.is_symlink() or os.path.isjunction(current):
+            return current.relative_to(root).as_posix()
     return None
 
 
@@ -88,6 +125,28 @@ def _glob_reason(pattern: str) -> str | None:
     `*/…`·`**/…`처럼 첫 폴더가 와일드카드인 패턴은 여기서 막지 않고, 고른 파일마다 다시 확인한다.
     """
     return forbidden_reason(pattern)
+
+
+def _check_file(root: Path, root_resolved: Path, path: Path, rel: str) -> tuple[str, str | None]:
+    """(실제 볼트 상대 경로, 거부 이유 또는 None).
+
+    glob이 적은 이름(`rel`)과 실제로 가리키는 곳(resolve한 경로) 둘 다 금지 규칙에 걸리지 않아야 하고,
+    볼트 아래 경로 어느 부분도 심볼릭 링크·정션이면 안 된다.
+    """
+    reason = forbidden_reason(rel)
+    if reason:
+        return rel, reason
+    try:
+        rel_real = _norm_rel(path.resolve().relative_to(root_resolved).as_posix())
+    except (OSError, ValueError):
+        return rel, "볼트 밖(링크)"
+    reason = forbidden_reason(rel_real)
+    if reason:
+        return rel_real, f"실제 위치 {rel_real}: {reason}"
+    link = _link_in_path(root, path)
+    if link:
+        return rel_real, f"{link}가 심볼릭 링크·정션이라 게시하지 않음 (실제 위치 {rel_real})"
+    return rel_real, None
 
 
 @dataclass
@@ -123,19 +182,14 @@ def collect(cfg: Config) -> Selection:
             if not path.is_file() or not core.is_scannable(path):
                 continue
             rel = _norm_rel(path.relative_to(root).as_posix())
-            reason = forbidden_reason(rel)
-            if reason is None:
-                try:
-                    path.resolve().relative_to(root_resolved)
-                except ValueError:
-                    reason = "볼트 밖(링크)"
+            rel_real, reason = _check_file(root, root_resolved, path, rel)
             if reason:
                 refused.append((rel, reason))
                 continue
             if path.suffix.lower() != ".md":
-                skipped.append(rel)
+                skipped.append(rel_real)
                 continue
-            found.setdefault(rel, path)
+            found.setdefault(rel_real, path)
     files = sorted(found.items(), key=lambda item: item[0])
     return Selection(files=files, refused=refused, skipped=sorted(set(skipped)))
 
@@ -177,15 +231,41 @@ def apply_only(cfg: Config, files: list[tuple[str, Path]], only: Iterable[str]) 
 # ---------------------------------------------------------------- 마크다운 손질
 
 
+def _entry_confirmed(entry: list[str]) -> bool:
+    """항목의 상태 줄(코드 블록·HTML 주석 밖)이 꼭 하나이고 그것이 `확정`이면 True. 아니면 False(게시 안 함)."""
+    text = _COMMENT.sub(lambda m: "\n" * m.group(0).count("\n"), "".join(entry))
+    fence: str | None = None
+    statuses: list[str] = []
+    for line in text.split("\n")[1:]:  # 첫 줄은 `## ` 제목
+        bare = unicodedata.normalize("NFC", line.rstrip("\r"))
+        fence_match = _FENCE.match(bare)
+        if fence is not None:
+            if fence_match and fence_match.group(1)[0] == fence[0] and len(fence_match.group(1)) >= len(fence):
+                fence = None
+            continue
+        if fence_match:
+            fence = fence_match.group(1)
+            continue
+        if _STATUS.match(bare):
+            statuses.append(bare)
+    return len(statuses) == 1 and bool(_CONFIRMED.match(statuses[0]))
+
+
 def keep_confirmed_decisions(text: str) -> str:
-    """`## ` 항목 가운데 `- 상태: 확정` 줄이 있는 것만 남긴다. 첫 항목 앞과 `# ` 절은 그대로 둔다."""
+    """`## ` 항목 가운데 상태가 `확정`인 것만 남긴다(안전 쪽으로 닫힘).
+
+    - 첫 `## ` 항목 앞의 줄은 그대로 둔다.
+    - 첫 항목이 시작되면 다음 `## `까지 모든 줄(`# `·`### ` 포함)이 그 항목에 속한다.
+    - 상태는 코드 블록·HTML 주석 밖의 `- 상태:` 줄로 본다. 꼭 하나이고 `확정`일 때만 게시한다
+      (상태 줄이 없거나 둘 이상이면 게시하지 않는다).
+    """
     lines = text.splitlines(keepends=True)
     out: list[str] = []
     entry: list[str] | None = None
     fence: str | None = None
 
     def flush() -> None:
-        if entry is not None and any(_CONFIRMED.match(unicodedata.normalize("NFC", ln.rstrip("\r\n"))) for ln in entry):
+        if entry is not None and _entry_confirmed(entry):
             out.extend(entry)
 
     for line in lines:
@@ -196,17 +276,30 @@ def keep_confirmed_decisions(text: str) -> str:
                 fence = None
         elif fence_match:
             fence = fence_match.group(1)
-        elif _HEADING12.match(bare):
+        elif _ENTRY_HEADING.match(bare):
             flush()
-            if bare.startswith("## "):
-                entry = [line]
-            else:
-                entry = None
-                out.append(line)
+            entry = [line]
             continue
         (entry if entry is not None else out).append(line)
     flush()
     return "".join(out)
+
+
+def _unclosed_comment(text: str) -> bool:
+    """닫힌 주석을 지운 뒤에도 코드(펜스 블록·`…`) 밖에 `<!--`가 남았으면 True."""
+    fence: str | None = None
+    for line in text.split("\n"):
+        fence_match = _FENCE.match(line)
+        if fence is not None:
+            if fence_match and fence_match.group(1)[0] == fence[0] and len(fence_match.group(1)) >= len(fence):
+                fence = None
+            continue
+        if fence_match:
+            fence = fence_match.group(1)
+            continue
+        if "<!--" in _INLINE_CODE.sub("", line):
+            return True
+    return False
 
 
 def _split_h1(text: str) -> tuple[str | None, str]:
@@ -246,6 +339,8 @@ def prepare(rel: str, data: bytes, prefix: str) -> Doc:
     if _norm_rel(rel).casefold() == DECISIONS_REL:
         text = keep_confirmed_decisions(text)
     text = _COMMENT.sub("", text)
+    if _unclosed_comment(text):
+        raise core.KbError(f"{rel}: HTML 주석이 닫히지 않음 (`<!--`에 맞는 `-->`가 없습니다). 고친 뒤 다시 게시하세요")
     h1, text = _split_h1(text)
     fm_title = fields.get("title") if isinstance(fields, Mapping) else None
     name = fm_title.strip() if isinstance(fm_title, str) and fm_title.strip() else (h1 or PurePosixPath(rel).stem)
@@ -403,23 +498,47 @@ def content_sha(space_key: str, title: str, storage: str) -> str:
     return core.sha256_hex(f"{space_key}\n{title}\n{storage}".encode("utf-8"))
 
 
-def _save_entry(cfg: Config, rel: str, entry: Mapping[str, Any]) -> None:
+def _save_entry(cfg: Config, rel: str, entry: Mapping[str, Any] | None) -> None:
+    """state 항목을 쓴다. entry가 None이면 그 항목을 지운다."""
     with core.kb_lock(cfg.root, LOCK_OWNER):
         state = core.load_state(cfg.root, STATE)
-        state[rel] = dict(entry)
+        if entry is None:
+            if rel not in state:
+                return
+            state.pop(rel)
+        else:
+            state[rel] = dict(entry)
         core.save_state(cfg.root, STATE, state)
 
 
-def push_one(client: ConfluenceClient, space_key: str, item: Item, parent: Callable[[], str | None]) -> tuple[str, dict]:
-    """('created'|'updated', 페이지). 제목 → state의 page_id → 생성 순서로 찾는다."""
+def _same_space(page: Mapping[str, Any] | None, space_key: str) -> bool:
+    """페이지 응답의 `space.key`가 있고 space_key와 같으면(대소문자 무시) True. 없으면 False(안전 쪽)."""
+    space = page.get("space") if isinstance(page, Mapping) else None
+    key = space.get("key") if isinstance(space, Mapping) else None
+    return isinstance(key, str) and bool(key.strip()) and key.strip().casefold() == space_key.strip().casefold()
+
+
+def push_one(
+    client: ConfluenceClient,
+    space_key: str,
+    item: Item,
+    parent: Callable[[], str | None],
+    *,
+    forget: Callable[[], None] | None = None,
+) -> tuple[str, dict]:
+    """('created'|'updated', 페이지). 제목 → state의 page_id(같은 스페이스일 때만) → 생성 순서로 찾는다.
+
+    state의 page_id가 없어졌거나 다른 스페이스의 페이지면 `forget()`으로 그 state 항목을 지우고 새로 만든다.
+    """
     page = client.find_page(space_key, item.title)
     if page is None:
         prev_id = item.previous.get("page_id") if isinstance(item.previous, Mapping) else None
         if prev_id:
             candidate = client.get_page(str(prev_id))
-            space = candidate.get("space") if isinstance(candidate, Mapping) else None
-            if candidate is not None and (not isinstance(space, Mapping) or space.get("key") in (None, space_key)):
+            if candidate is not None and _same_space(candidate, space_key):
                 page = candidate
+            elif forget is not None:
+                forget()
     if page is None:
         created = client.create_page(space_key, item.title, item.storage, parent())
         return "created", created
@@ -536,7 +655,9 @@ def run(
         try:
             for item in to_send:
                 try:
-                    kind, page = push_one(client, space_key, item, parent)
+                    kind, page = push_one(
+                        client, space_key, item, parent, forget=lambda rel=item.rel: _save_entry(cfg, rel, None)
+                    )
                 except (core.AuthError, core.NetworkError, core.ConfigError):
                     raise
                 except core.KbError as exc:
