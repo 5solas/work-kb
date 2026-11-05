@@ -68,6 +68,9 @@ COMMANDS: dict[str, Command] = {
     "lint": Command("lint", help="C단계: 점검 보고 wiki/_lint.md (--llm: 모순 후보 T5)"),
     "push": Command("confluence_push", agent_ok=False, help="Confluence 개인 스페이스로 wiki 페이지 게시 (--dry-run, --only)"),
     "demo": Command("demo", agent_ok=False, help="모의 서버 3개로 전체 흐름 시연 (임시 볼트)"),
+    # Phase 6
+    "schedule": Command("schedule", agent_ok=False, help="작업 스케줄러 XML·schtasks 명령 생성 (등록은 하지 않음)"),
+    "wheels": Command("wheels", agent_ok=False, help="오프라인 설치용 wheels/ 내려받기"),
 }
 
 ALIASES: dict[str, str] = {"jira_sync": "sync"}
