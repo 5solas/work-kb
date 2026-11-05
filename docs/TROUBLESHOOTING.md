@@ -52,7 +52,7 @@
 
 - 증상: 터미널 출력이 깨지거나 파일을 읽다 `UnicodeDecodeError`.
 - 원인: 콘솔·편집기가 cp949(기본 ANSI)로 읽고 쓴다. 이 저장소의 파일은 모두 UTF-8이다.
-- 명령: `setx PYTHONUTF8 1` 후 새 터미널. 콘솔은 `chcp 65001`. 메모장 대신 Emacs·Obsidian으로 편집(메모장 저장은 BOM·cp949를 만들 수 있다). Emacs는 `work-kb.el`이 코드 루트·볼트 아래 `.md`를 UTF-8로 읽게 등록한다 — 경로가 다르면 `work-kb-root`/`work-kb-vault`를 확인한다.
+- 명령: `setx PYTHONUTF8 1` 후 새 터미널. 콘솔은 `chcp 65001`. 메모장 대신 Emacs·Obsidian으로 편집(메모장 저장은 BOM·cp949를 만들 수 있다). Emacs는 `work-kb.el`이 코드 루트·볼트 아래 `.md`를 UTF-8로 읽게 등록한다 — 경로가 다르면 `work-kb-root`/`work-kb-vault`를 확인한다. init 파일에서 `(setq work-kb-vault …)`는 `(load …work-kb.el)`보다 **먼저** 두고, load 뒤에 바꿀 때는 `setopt`(또는 `customize-set-variable`)를 쓴다(`docs/README.md` 6절).
 
 ### 한글 경로에서 도구가 실패
 
@@ -139,7 +139,7 @@
 
 ### 일감이 이동(moved)되었다
 
-- 증상: `jira/OLD-1.md`에 `moved_to`가 있고 내용이 비어 있다.
+- 증상: `jira/OLD-1.md`의 front matter에 `in_scope: false`와 `moved_to: NEW-KEY`가 붙었다(본문은 옛 내용 그대로). 이 일감은 `일감.base` 표에서 더 이상 보이지 않는다.
 - 원인: Jira에서 일감이 다른 프로젝트로 옮겨졌다(키가 바뀜).
 - 명령: `python scripts/kb.py sync --key NEW-KEY`. 새 키의 프로젝트가 `project_keys`에 없으면 `python scripts/kb.py init --section jira`에서 추가한다. `today --check-done`은 `moved_to`를 따라간다.
 
@@ -153,7 +153,7 @@
 
 - 증상: `.base` 파일이 빈 화면·오류, 또는 표가 보이지 않는다.
 - 원인: Obsidian이 Bases를 지원하지 않는 오래된 버전이거나 코어 플러그인이 꺼져 있다. 정렬(`sort`) 문법은 앱 버전에 따라 다를 수 있다(DECISIONS: 사용자 확인 대기).
-- 명령: Obsidian을 업데이트하고 설정 → 코어 플러그인에서 Bases 켜기. 파일이 아직 없으면 `python scripts/kb.py sync` 뒤 확인. 자세한 점검 목록은 `obsidian/setup.md`. 안 되면 Bases 없이도 `jira/_views/*.md` 표로 같은 정보를 볼 수 있다.
+- 명령: Obsidian을 업데이트하고 설정 → 코어 플러그인에서 Bases 켜기. `.base` 파일은 코드가 만들지 않는다. 파일이 없으면(볼트를 저장소와 따로 둔 경우 등) 저장소의 `jira/_views/일감.base`와 `wiki/엔티티.base` 두 파일을 볼트의 같은 경로로 복사한다. 파일은 있는데 표가 비어 있으면 `python scripts/kb.py sync`·`python scripts/kb.py link`를 실행한다. 자세한 점검 목록은 `obsidian/setup.md`. 안 되면 Bases 없이도 `jira/_views/*.md` 표로 같은 정보를 볼 수 있다.
 
 ## 스케줄
 

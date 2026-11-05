@@ -26,8 +26,15 @@ def _err(text: str) -> None:
     if stream is not None:
         stream.write(text)
         return
+    root = HERE.parent
+    args = sys.argv[1:]
+    for i, arg in enumerate(args):  # 스케줄 작업은 볼트를 --root로 넘기므로 그 볼트의 로그에 적는다
+        if arg == "--root" and i + 1 < len(args) and Path(args[i + 1]).is_dir():
+            root = Path(args[i + 1])
+        elif arg.startswith("--root=") and Path(arg[7:]).is_dir():
+            root = Path(arg[7:])
     try:
-        log_dir = HERE.parent / ".state" / "logs"
+        log_dir = root / ".state" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         with open(log_dir / "kb.log", "a", encoding="utf-8") as fh:
             fh.write(text if text.endswith("\n") else text + "\n")

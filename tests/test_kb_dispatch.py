@@ -127,7 +127,10 @@ def test_agent_ok_sub_allows_only_listed_subcommand(monkeypatch):
         with pytest.raises(core.PolicyRefused):
             kb.main(argv)
     assert len(calls) == 1
-    assert kb.COMMANDS_REAL["act"].agent_ok_sub == ("list",) if hasattr(kb, "COMMANDS_REAL") else True
+
+
+def test_real_act_agent_ok_sub():
+    assert kb.COMMANDS["act"].agent_ok_sub == ("list", "transitions")
 
 
 # ---------------------------------------------------------------- _preflight (D02)
@@ -183,18 +186,95 @@ def test_preflight_without_stderr_writes_log(monkeypatch, tmp_path):
     assert "pip install -r requirements.txt" in log
 
 
-def test_run_main_without_stderr_logs_error(monkeypatch, tmp_path):
+def _scheduled_task_dirs(monkeypatch, tmp_path):
+    """스케줄 작업처럼: KB_ROOT 없음, 작업 폴더는 저장소, 볼트는 --root로만 넘어온다."""
+    repo = tmp_path / "저장소"
+    vault = tmp_path / "내 볼트 (KB)"
+    repo.mkdir()
+    vault.mkdir()
+    monkeypatch.delenv("KB_ROOT", raising=False)
+    monkeypatch.chdir(repo)
     monkeypatch.setattr(sys, "stderr", None)
-    monkeypatch.setenv("KB_ROOT", str(tmp_path))
+    return repo, vault
+
+
+def test_preflight_without_stderr_logs_to_root_vault(monkeypatch, tmp_path):
+    _hide_modules(monkeypatch, "yaml")
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(kb, "HERE", tmp_path / "repo" / "scripts")
+    vault = tmp_path / "한글 볼트"
+    vault.mkdir()
+    monkeypatch.setattr(sys, "argv", ["kb.py", "sync", "--root", str(vault)])
+    with pytest.raises(SystemExit):
+        kb._preflight()
+    assert (vault / ".state" / "logs" / "kb.log").exists()
+    assert not (tmp_path / "repo" / ".state").exists()
+
+
+def test_run_main_without_stderr_logs_error(monkeypatch, tmp_path):
+    repo, vault = _scheduled_task_dirs(monkeypatch, tmp_path)
 
     def main(argv):
         raise core.ConfigError("설정이 없습니다")
 
     with pytest.raises(SystemExit) as info:
-        core.run_main(main, [])
+        core.run_main(main, ["sync", "--root", str(vault)])
     assert info.value.code == 4
-    log = (tmp_path / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+    log = (vault / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
     assert "설정이 없습니다" in log
+    assert not (repo / ".state").exists()
+
+
+def test_run_main_without_stderr_root_equals_form(monkeypatch, tmp_path):
+    repo, vault = _scheduled_task_dirs(monkeypatch, tmp_path)
+
+    def main(argv):
+        raise core.ConfigError("설정이 없습니다")
+
+    with pytest.raises(SystemExit):
+        core.run_main(main, ["sync", f"--root={vault}"])
+    assert "설정이 없습니다" in (vault / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+    assert not (repo / ".state").exists()
+
+
+def test_run_main_without_stderr_missing_root_falls_back(monkeypatch, tmp_path):
+    # --root 폴더가 없으면 그 폴더를 만들지 않고 KB_ROOT/현재 폴더에 남긴다.
+    repo, vault = _scheduled_task_dirs(monkeypatch, tmp_path)
+    missing = tmp_path / "없는 볼트"
+
+    def main(argv):
+        raise core.ConfigError("볼트 루트 폴더가 없습니다")
+
+    with pytest.raises(SystemExit):
+        core.run_main(main, ["sync", "--root", str(missing)])
+    assert not missing.exists()
+    assert "볼트 루트 폴더가 없습니다" in (repo / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+
+
+def test_run_main_without_stderr_logs_unexpected_traceback(monkeypatch, tmp_path):
+    repo, vault = _scheduled_task_dirs(monkeypatch, tmp_path)
+    monkeypatch.setattr(core, "_SECRETS", set())
+    core.register_secret("s3cr3t-토큰-값")
+
+    def main(argv):
+        raise RuntimeError("unexpected bug s3cr3t-토큰-값")
+
+    with pytest.raises(SystemExit) as info:
+        core.run_main(main, ["sync", "--root", str(vault)])
+    assert info.value.code == 1
+    log = (vault / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+    assert "Traceback" in log and "RuntimeError: unexpected bug" in log
+    assert "s3cr3t-토큰-값" not in log
+    assert not (repo / ".state").exists()
+
+
+def test_run_main_with_stderr_propagates_unexpected(monkeypatch, tmp_path):
+    def main(argv):
+        raise RuntimeError("unexpected bug")
+
+    with pytest.raises(RuntimeError, match="unexpected bug"):
+        core.run_main(main, ["--root", str(tmp_path)])
+    assert not (tmp_path / ".state").exists()
 
 
 def test_preflight_old_python_exit_4(monkeypatch, capsys):

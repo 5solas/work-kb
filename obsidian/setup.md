@@ -8,7 +8,7 @@ Obsidian은 **열람 창**이다. 쓰기는 Emacs와 `kb.py`가 한다. `jira/`�
 
 - **볼트 루트 = 저장소 루트**(`work-kb/`, `AGENTS.md`가 있는 폴더). "폴더를 볼트로 열기"로 연다.
 - 기존 개인 볼트(OneDrive 등)와 섞지 말고 새 볼트로 연다.
-- `KB_ROOT`(Emacs는 `work-kb-vault`)로 볼트를 저장소와 다른 곳에 두었다면 그 폴더를 연다. 이때 `jira/_views/일감.base`와 `wiki/엔티티.base`를 볼트의 같은 경로로 복사한다.
+- `KB_ROOT`(Emacs는 `work-kb-vault`)로 볼트를 저장소와 다른 곳에 두었다면 그 폴더를 연다. 이때 저장소의 두 `.base` 파일 `jira/_views/일감.base`와 `wiki/엔티티.base`를 볼트의 같은 경로로 손으로 복사한다. `sync`·`link`는 `.base` 파일을 만들지 않는다(표 내용만 채운다).
 
 ## 2. 폴더
 

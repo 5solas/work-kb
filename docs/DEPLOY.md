@@ -9,7 +9,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| Python | **3.13 또는 3.14** (64비트). 3.15는 PyYAML wheel이 아직 없어 설치가 막힌다(`kb.py`가 안내를 출력). 더 낮은 버전은 거부된다 |
+| Python | **3.13 또는 3.14** (64비트) 권장. 3.15는 PyPI에 PyYAML wheel이 없다. 인터넷이 되면 pip가 원본(sdist)에서 순수 Python으로 빌드하지만(느리고 libyaml 가속 없음), `--no-index --find-links wheels` 설치는 실패한다. 더 낮은 버전은 거부된다 |
 | pip | `python -m venv` + `pip`면 충분하다. 다른 도구는 필요 없다 |
 | Emacs / Obsidian | Emacs 30 이상, Obsidian(Bases 지원 버전) |
 | 네트워크 | 사내 Jira·Confluence·LLM 서버에 닿으면 된다. pip가 막혀 있으면 `wheels/`로 설치 |
@@ -57,7 +57,7 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 ```
 
 - `python`이 없으면 `py -3.14 -m venv .venv`. `py -3`이 동작하지 않는 PC도 있으니 안 되면 `python`을 쓴다.
-- 3.15: PyYAML wheel이 없어 `pip`가 소스 빌드를 시도하다 실패한다. 3.14 또는 3.13으로 venv를 만든다.
+- 3.15: PyPI에 PyYAML wheel이 없다. 인터넷이 되면 `pip`가 원본(sdist)에서 순수 Python wheel을 빌드해 설치한다(느리고 libyaml 가속 없음). `--no-index --find-links wheels`는 `wheels/`에 3.15용 wheel이 없어 실패한다. 3.14 또는 3.13으로 venv를 만드는 것을 권장한다.
 - 스크립트는 `.venv\Scripts\python.exe scripts\kb.py …`로 실행한다. (스케줄과 Emacs는 이 경로를 자동으로 쓴다.)
 - `PYTHONUTF8=1`이 없어도 `kb.py`와 Emacs·스케줄은 `-X utf8`을 직접 넘기지만, 터미널에서 직접 칠 때를 위해 설정해 둔다.
 - wheels 만들기(집): `python scripts/kb.py wheels --targets 3.13,3.14`. 결과는 `wheels/`와 `wheels/MANIFEST.txt`. 상세는 `docs/PACKAGING.md`.
@@ -95,8 +95,9 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 기대하는 출력:
 
 - `✓` 줄: Python, 의존성, config.yaml, config.local.yaml(`environment: company`), 공개 호스트 차단, Jira, Confluence, LLM 프로필, 쓰기 권한.
-- `-` 줄은 정상이다(종료 코드에 영향 없음): `keyring` 백엔드 이름, `Jira 서버` 버전, `sprint 필드`, 볼트 경로의 한글 안내, PowerShell 실행 정책, 시간대, Emacs·Obsidian 경로, 푸시 대상 파일 수(`푸시는 kb.py push로 직접 합니다`), `/models`가 없는 서버의 "연결됨, /models 없음".
+- `-` 줄은 정상이다(종료 코드에 영향 없음): `keyring` 백엔드 이름, `Jira 서버` 버전, `sprint 필드`, 볼트 경로의 한글 안내, PowerShell 실행 정책(막히지 않았을 때), 시간대, Emacs·Obsidian 경로, 푸시 대상 파일 수(`푸시는 kb.py push로 직접 합니다`), `/models`가 없는 서버의 "연결됨, /models 없음".
 - `✗` 줄이 있으면 줄 끝의 `→ 해결 방법`을 따른다. 대부분 `docs/TROUBLESHOOTING.md`에 있다.
+- **허용되는 ✗ 하나**: 그룹 정책(GPO)이 PowerShell 실행 정책을 `Restricted`·`AllSigned`로 막아 PowerShell 줄이 ✗이면, 사용자가 고칠 수 없으므로 이것만은 ✗인 채로 진행한다(doctor는 종료 1). 클립보드 이미지 캡처(`C`) 대신 `F`(파일 선택)로 캡처한다. 다른 ✗는 모두 고친 뒤 진행한다.
 - **공개 호스트 ✗(종료 5)**: 진행 금지. `kb.py init --section llm`으로 사내 주소로 고친다.
 - 탐지 확인: 프로필별 줄에 `json_mode`·`vision`·`reasoning_toggle` 결과가 요약된다. `method: none`이면 TROUBLESHOOTING의 수동 설정을 본다.
 
@@ -122,7 +123,7 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 
 > Obsidian: 볼트 열기, `obsidian/setup.md`.
 
-볼트 루트를 열고 `obsidian/setup.md`의 설정과 확인 목록을 따른다. Bases 파일(`jira/_views/일감.base`, `wiki/엔티티.base`)은 첫 `sync`·`link` 뒤에 생긴다.
+볼트 루트를 열고 `obsidian/setup.md`의 설정과 확인 목록을 따른다. Bases 파일(`jira/_views/일감.base`, `wiki/엔티티.base`)은 저장소에 들어 있어 1단계 복사본에 이미 있다(코드가 만들어 주지 않는다). 볼트를 저장소와 따로 두었다면 두 파일을 볼트의 같은 경로로 손으로 복사한다(`obsidian/setup.md` 1절). 표는 첫 `sync`·`link` 뒤에 채워진다.
 
 ### 9. 스케줄 등록
 

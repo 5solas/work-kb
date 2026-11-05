@@ -29,21 +29,23 @@ $env:KB_REQUIRE_LIVE='1'   # 키가 없으면 skip 대신 fail
 
 자료는 모두 허구다(홍길동·김철수, 회사 이름 없음).
 
-## 요약 (2026-11-05 실행, .venv·.venv313 각 1회, 5 passed, 채팅 POST 10회)
+## 요약 (첫 실행들에서, 2026-11-05, .venv·.venv313 각 1회, 5 passed)
+
+아래 숫자는 이 파일 끝의 자동 기록(마지막 실행)과 맞춘 것이다. 실행마다 토큰 수는 조금씩 달라진다.
 
 - **추론 토글**: Nemotron-3.5-Super-VL은 `method: param`, `reasoning_effort`, 켜기 `medium` / 끄기 `none`.
-  첫 후보에서 잡혔다. 근거는 생각 흔적(trace)이다: 기준선과 `medium`은 생각 있음(90토큰), `none`은 생각 없음(3토큰).
+  첫 후보에서 잡혔다. 근거는 생각 흔적(trace)이다: 기준선(90토큰)과 `medium`(89토큰)은 생각 있음, `none`은 생각 없음(3토큰).
 - **생각 필드**: DeepInfra는 생각을 `message.reasoning_content`로 준다. content 안 `<think>`는 없었다.
-  `usage.completion_tokens_details.reasoning_tokens`도 온다(켜짐 86, 꺼짐 0).
+  `usage.completion_tokens_details.reasoning_tokens`도 온다(기준선 86, `medium` 85, 꺼짐 0).
 - **기준선**: 아무 토글 없이 보내면 생각 켜짐(`baseline_reasoning: true`).
 - **JSON 모드**: `response_format: json_object`가 된다(끄기 상태). T2에서 `reasoning_effort: medium` +
   `response_format`도 400 없이 content에 JSON을 줬다. D38 재시도는 일어나지 않았다.
 - **비전**: 된다(빨강 PNG에 "빨강"). T6 화이트보드에서 `KB-12`·`김철수`를 읽었다(kind photo).
 - **컨텍스트**: `/models`의 `metadata.context_length` = 262144(`context_source: models`).
-- **탐지 POST 수**: 5회(기준선 1 + 토글 2 + JSON 1 + 비전 1), 약 6초.
+- **탐지 POST 수**: 5회(기준선 1 + 토글 2 + JSON 1 + 비전 1), 4.9초. 한 실행의 채팅 POST는 모두 10회(상한 20).
 - **대체 프로필**: 없는 모델 id는 **404** `model_not_found`(400 아님). run_task가 fallback(Gemma)으로 넘어가 ok.
   Gemma는 탐지 결과가 없어 `response_format` 없이 프롬프트 강제 JSON으로 보냈고, 생각 필드 없이 바로 JSON을 줬다.
-- **T1**: 3줄 한 묶음 1회, 출력 28토큰(상한 2560). **T2**: 결정 1건·할 일 1건, 출력 1340토큰 중 생각 1233(두 번째 실행 972 중 863).
+- **T1**: 3줄 한 묶음 1회, 출력 28토큰(상한 2560). **T2**: 결정 1건·할 일 1건, 출력 1294토큰 중 생각 1184.
 
 ## 관찰 (자동 기록)
 

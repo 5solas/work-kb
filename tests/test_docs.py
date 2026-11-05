@@ -1,9 +1,10 @@
-"""docs/README.md·DEPLOY.md·TROUBLESHOOTING.md가 코드와 맞는지 검사한다.
+"""docs/*.md·obsidian/setup.md·AGENTS.md가 코드와 맞는지 검사한다.
 
-- 문서에 나오는 `kb.py <명령>`은 kb.COMMANDS에 있고, 그 줄의 `--옵션`은 그 명령의 --help에 있다.
+- 문서에 나오는 `kb.py <명령>`은 kb.COMMANDS(또는 별칭)에 있고, 같은 줄에서 그 뒤에 오는 `--옵션`은
+  그 명령의 --help에 있다(뒤따르는 pip·schtasks·git 등 다른 명령의 옵션은 보지 않는다).
 - DEPLOY.md에 §9 체크리스트 11단계가 순서대로, 원문 그대로 들어 있다.
 - README의 종료 코드·Emacs 키가 코어·work-kb.el과 같다.
-- 문서에 실제 회사·호스트가 없다.
+- 문서에 실제 회사·호스트(`*.invalid`·127.0.0.1·localhost만)와 비밀값 모양이 없다.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import os
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -21,6 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 DOCS = ROOT / "docs"
 DOC_FILES = ("README.md", "DEPLOY.md", "TROUBLESHOOTING.md")
+# 명령·옵션·호스트·비밀값 검사 대상: docs/*.md 전부(SCHEDULING·PACKAGING·LIVE·DECISIONS 포함),
+# obsidian/setup.md, AGENTS.md. 저장소 기준 POSIX 경로.
+CHECKED_DOCS = tuple(
+    [f"docs/{p.name}" for p in sorted(DOCS.glob("*.md"))] + ["obsidian/setup.md", "AGENTS.md"]
+)
 
 CHECKLIST = [
     "저장소 폴더 복사(`config.local.yaml`, `.state/`, `_trash/`, `examples/`, 집에서 만든 daily 제외).",
@@ -66,19 +72,51 @@ def _command_help(command: str) -> str:
     return text
 
 
-_CMD_RE = re.compile(r"kb\.py\s+([a-z][a-z-]*)([^`\n]*)")
+def _read_rel(rel: str) -> str:
+    return (ROOT / rel).read_text(encoding="utf-8")
+
+
+_CMD_RE = re.compile(r"kb\.py\s+([a-z][a-z_-]*)([^`\n]*)")
 _FLAG_RE = re.compile(r"(?<![\w-])--[a-z][a-z-]*")
+# `kb.py 명령` 뒤 조각은 다음 셸 명령(구분자, 또는 pip·schtasks·git 등)에서 끊는다: 그 옵션은 kb.py 것이 아니다.
+_NEXT_COMMAND = re.compile(r"\s(?:;|&&|\|\||\||→)\s|(?<![\w-])(?:pip|schtasks|git|python|py|emacs|emacsclient)(?:\.exe)?\s")
 
 
 def _mentions(text: str):
     """(명령, 그 명령 줄 조각의 --옵션 목록). 표 줄이 `kb.py 명령`으로 시작하면 줄 전체의 옵션을 본다."""
     for line in text.splitlines():
-        row = re.match(r"\|\s*`kb\.py\s+([a-z][a-z-]*)`", line)
+        row = re.match(r"\|\s*`kb\.py\s+([a-z][a-z_-]*)`", line)
         if row:
             yield row.group(1), _FLAG_RE.findall(line)
             continue
         for match in _CMD_RE.finditer(line):
-            yield match.group(1), _FLAG_RE.findall(match.group(2))
+            fragment = _NEXT_COMMAND.split(match.group(2), maxsplit=1)[0]
+            yield match.group(1), _FLAG_RE.findall(fragment)
+
+
+# 기록 문서가 검토 때 '고르지 않은 안'으로 적어 둔 명령 (문서, 명령). 새 문서에는 늘리지 않는다.
+HISTORICAL_MENTIONS = {("docs/DECISIONS.md", "daily_prepare")}
+
+
+def _known_commands() -> set[str]:
+    kb = _kb()
+    return set(kb.COMMANDS) | set(kb.ALIASES)
+
+
+def _canonical(command: str) -> str:
+    return _kb().ALIASES.get(command, command)
+
+
+def test_mentions_cut_at_other_commands():
+    text = (
+        "kb.py wheels --dir x; pip install --no-index --find-links wheels\n"
+        "kb.py schedule --print → schtasks /Create /TN a /XML b /F\n"
+        "kb.py sync --full && git status --short\n"
+        "| `kb.py act` | --retry-failed |\n"
+    )
+    assert list(_mentions(text)) == [
+        ("wheels", ["--dir"]), ("schedule", ["--print"]), ("sync", ["--full"]), ("act", ["--retry-failed"])
+    ]
 
 
 @pytest.mark.parametrize("name", DOC_FILES)
@@ -87,20 +125,30 @@ def test_doc_exists_and_utf8(name):
     assert len(text) > 500
 
 
-@pytest.mark.parametrize("name", DOC_FILES)
+def test_checked_docs_cover_all_docs():
+    assert {"docs/SCHEDULING.md", "docs/PACKAGING.md", "docs/LIVE.md", "docs/DECISIONS.md",
+            "obsidian/setup.md", "AGENTS.md"} <= set(CHECKED_DOCS)
+    assert {f"docs/{name}" for name in DOC_FILES} <= set(CHECKED_DOCS)
+
+
+@pytest.mark.parametrize("name", CHECKED_DOCS)
 def test_mentioned_commands_exist(name):
-    commands = _kb().COMMANDS
+    known = _known_commands()
     seen = set()
-    for command, _flags in _mentions(_read(name)):
+    for command, _flags in _mentions(_read_rel(name)):
         seen.add(command)
-        assert command in commands, f"{name}: kb.py {command}는 COMMANDS에 없다"
-    assert seen
+        if (name, command) in HISTORICAL_MENTIONS:
+            continue
+        assert command in known, f"{name}: kb.py {command}는 COMMANDS에 없다"
+    if PurePosixPath(name).name in DOC_FILES:
+        assert seen
 
 
-@pytest.mark.parametrize("name", DOC_FILES)
+@pytest.mark.parametrize("name", CHECKED_DOCS)
 def test_mentioned_flags_in_help(name):
     commands = _kb().COMMANDS
-    for command, flags in _mentions(_read(name)):
+    for command, flags in _mentions(_read_rel(name)):
+        command = _canonical(command)
         if not flags or command not in commands:
             continue
         module = commands[command].module
@@ -176,12 +224,33 @@ def test_troubleshooting_topics():
         assert needle in text, needle
 
 
-def test_no_real_hosts_or_secrets():
-    pattern = re.compile(r"https?://([A-Za-z0-9.-]+)")
-    allowed = ("example.invalid", "127.0.0.1", "localhost")
-    for name in DOC_FILES:
-        text = _read(name)
-        for host in pattern.findall(text):
-            assert host.endswith(allowed) or host in allowed, f"{name}: 허용되지 않은 호스트 {host}"
-        assert not re.search(r"Bearer [A-Za-z0-9]", text)
-        assert not re.search(r"[A-Za-z0-9]{32,}", text)
+_HOST_RE = re.compile(r"https?://([A-Za-z0-9.-]+)")
+
+
+def _host_allowed(host: str) -> bool:
+    """문서에 쓸 수 있는 호스트: `*.invalid`, 127.0.0.1, localhost (DECISIONS)."""
+    host = host.rstrip(".").lower()
+    return host in ("invalid", "127.0.0.1", "localhost") or host.endswith(".invalid")
+
+
+def _doc_problems(name: str, text: str) -> list[str]:
+    problems = [f"{name}: 허용되지 않은 호스트 {h}" for h in _HOST_RE.findall(text) if not _host_allowed(h)]
+    if re.search(r"Bearer [A-Za-z0-9]", text):
+        problems.append(f"{name}: Bearer 토큰")
+    for run in re.findall(r"(?<![A-Za-z0-9])[A-Za-z0-9]{32,}(?![A-Za-z0-9])", text):
+        problems.append(f"{name}: 키 모양 {run[:6]}…({len(run)}자)")
+    return problems
+
+
+def test_doc_problem_rule_self_check():
+    assert not _doc_problems("x.md", "http://jira.example.invalid/a http://127.0.0.1:8081 http://localhost/x")
+    assert _doc_problems("x.md", "https://jira.realcorp.co.kr/browse/KB-1")
+    assert _doc_problems("x.md", "https://api.deepinfra.com/v1/openai")
+    assert _doc_problems("x.md", "Authorization: Bearer abc")
+    assert _doc_problems("x.md", "Kq7" * 11)
+
+
+@pytest.mark.parametrize("name", CHECKED_DOCS)
+def test_no_real_hosts_or_secrets(name):
+    problems = _doc_problems(name, _read_rel(name))
+    assert not problems, "\n".join(problems)

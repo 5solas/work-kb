@@ -42,7 +42,7 @@ work-kb/
 └── docs/                         이 문서들
 ```
 
-볼트(daily/ inbox/ wiki/ 등)를 코드 폴더와 따로 둘 수도 있다. 모든 명령의 `--root`(또는 환경변수 `KB_ROOT`)로 볼트 루트를 준다.
+볼트(daily/ inbox/ wiki/ 등)를 코드 폴더와 따로 둘 수도 있다. 명령의 `--root`(또는 환경변수 `KB_ROOT`)로 볼트 루트를 준다(`wheels`는 `--root`를 받기만 하고 무시한다. 늘 저장소 폴더에서 동작한다).
 
 ## 3. daily 형식과 캡처 규칙
 
@@ -75,7 +75,7 @@ date: 2026-11-05
 
 ## 4. 명령 표
 
-모든 명령은 `python scripts/kb.py <명령> [옵션]`. 모든 명령이 `--root`를 받는다. 옵션 전체는 `python scripts/kb.py <명령> --help`.
+모든 명령은 `python scripts/kb.py <명령> [옵션]`. 모든 명령이 `--root`를 받는다(`wheels`만은 받아도 무시하고 저장소 폴더에서 동작한다). 옵션 전체는 `python scripts/kb.py <명령> --help`.
 `KB_AGENT=1` 세션에서는 읽기 계열만 허용된다(5절 참고, 아래 표의 "에이전트" 열).
 
 | 명령 | 하는 일 | 주요 옵션 | 에이전트 |
@@ -141,12 +141,15 @@ Emacs 30 이상(Windows). 외부 패키지는 필수가 아니다(`transient` �
 ### 로드
 
 ```elisp
-(load "D:/work/work-kb/emacs/work-kb.el")
 (setq work-kb-root "D:/work/work-kb")        ; 코드 루트 (scripts/kb.py가 있는 곳)
 ;; (setq work-kb-vault "D:/notes/work-kb")   ; 볼트가 따로 있을 때. nil이면 코드 루트
 ;; (setq work-kb-python '("py" "-3"))        ; nil이면 자동
+(load "D:/work/work-kb/emacs/work-kb.el")
 ```
 
+- **`setq`는 `load`보다 먼저** 둔다. `work-kb.el`은 코드 루트·볼트 아래 `.md`를 UTF-8로 읽도록 등록하는데,
+  `setq`는 변수의 설정 함수(`:set`)를 거치지 않아 load 뒤에 바꾼 경로가 등록에서 빠질 수 있다. load 뒤에 값을 바꿀 때는
+  `setq` 대신 `(setopt work-kb-vault "D:/notes/work-kb")`(또는 `customize-set-variable`)를 쓴다. 이쪽은 바꿀 때 등록도 다시 한다.
 - `work-kb-root`: 기본은 `work-kb.el`의 상위 폴더.
 - `work-kb-vault`: 기본 nil(코드 루트와 같음).
 - `work-kb-python`: nil이면 `<root>/.venv/Scripts/python.exe` → PATH의 `python`(WindowsApps 별칭 제외) → `py -3` 순. 항상 `-X utf8`로 실행한다. 문자열 하나 또는 목록.

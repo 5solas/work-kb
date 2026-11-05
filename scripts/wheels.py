@@ -229,6 +229,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--dir", default=DEFAULT_DIR, help="받을 폴더. 상대 경로는 저장소 폴더 기준 (기본: wheels)")
     parser.add_argument("--no-sdist", action="store_true", help="Python 3.15용 PyYAML 원본(sdist)을 받지 않는다")
     parser.add_argument("--dry-run", action="store_true", help="실행할 pip 명령만 보여 주고 아무것도 받지 않는다")
+    # 모든 명령이 --root를 받는다(README). wheels는 저장소 폴더만 쓰므로 받기만 하고 무시한다.
+    parser.add_argument("--root", default=None, help="받기만 하고 무시한다 (wheels는 저장소 폴더만 쓴다)")
     args = parser.parse_args(argv)
 
     targets = parse_targets(args.targets)

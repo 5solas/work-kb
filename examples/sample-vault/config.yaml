@@ -17,6 +17,10 @@ jira:
     review: "reporter = currentUser() AND status = 'In Review'"
   poll_minutes: 15
   max_results: 500
+  # 전체 동기화 주기(시간). 범위에서 빠진 일감(담당 변경·삭제·이동)을 정리한다.
+  full_every_hours: 24
+  # `today --check-done`이 제안하는 완료 전환 이름(앞에서부터 시도). 자동 전환은 없다.
+  done_transition_names: [Done, 완료]
 
 confluence:
   title_prefix: "[KB] "
@@ -24,13 +28,16 @@ confluence:
 
 llm:
   # reasoning은 따옴표 필수. 따옴표가 없으면 YAML이 on/off를 참·거짓으로 읽는다(D27).
+  # max_output_tokens: 작업별 출력 상한(D41). 탐지 결과가 method: none이고 기준 상태가 추론 켜짐이면 하한 2048.
+  # tag의 max_output_tokens는 **줄 하나당** 값이다. T1은 여러 줄(최대 40줄)을 한 요청에 묶으므로
+  # compile은 요청 상한으로 줄당 값 × 묶음 크기(최대 16384)를 준다.
   tasks:
-    tag:            {profile: main, reasoning: "off", max_input_tokens: 2000}
-    decisions:      {profile: main, reasoning: "on",  max_input_tokens: 30000}
-    entity_summary: {profile: main, reasoning: "off", max_input_tokens: 20000}
-    topic_proposal: {profile: main, reasoning: "on",  max_input_tokens: 60000}
-    image_ingest:   {profile: main, reasoning: "off", max_input_tokens: 8000}
-    contradictions: {profile: main, reasoning: "on",  max_input_tokens: 60000}
+    tag:            {profile: main, reasoning: "off", max_input_tokens: 2000,  max_output_tokens: 64}
+    decisions:      {profile: main, reasoning: "on",  max_input_tokens: 30000, max_output_tokens: 8192}
+    entity_summary: {profile: main, reasoning: "off", max_input_tokens: 20000, max_output_tokens: 2048}
+    topic_proposal: {profile: main, reasoning: "on",  max_input_tokens: 60000, max_output_tokens: 8192}
+    image_ingest:   {profile: main, reasoning: "off", max_input_tokens: 8000,  max_output_tokens: 2048}
+    contradictions: {profile: main, reasoning: "on",  max_input_tokens: 60000, max_output_tokens: 8192}
   temperature: 0
   timeout_sec: 180
   # 회사 환경에서 LLM 주소가 이 목록에 걸리면 실행을 거부한다.

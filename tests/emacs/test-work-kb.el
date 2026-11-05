@@ -143,6 +143,45 @@
               (should (eq buffer-file-coding-system 'utf-8-unix)))))
       (let ((work-kb-vault nil)) (work-kb--register-coding)))))
 
+(defun work-kb-test--md-decoding (dir)
+  "DIR 아래 daily/x.md를 읽을 때 고를 인코딩의 기본형 (등록 안 됐으면 nil 또는 다른 값)."
+  (let ((found (find-operation-coding-system 'insert-file-contents
+                                             (expand-file-name "daily/x.md" dir))))
+    (and (consp found) (coding-system-base (car found)))))
+
+(ert-deftest work-kb-test-vault-coding-setq-after-load ()
+  "README 순서: (load …) 뒤에 (setq work-kb-vault …)를 해도 볼트 .md가 UTF-8로 등록된다."
+  (let ((vault (work-kb-test--make-vault "나중 볼트"))
+        (old-vault (default-value 'work-kb-vault)))
+    (unwind-protect
+        (progn
+          (load work-kb-test--el nil t)
+          (should-not (eq (work-kb-test--md-decoding vault) 'utf-8))
+          (setq work-kb-vault vault)
+          (should (eq (work-kb-test--md-decoding vault) 'utf-8))
+          ;; 다른 볼트로 바꾸면 이전 볼트 패턴은 지워진다.
+          (let ((other (work-kb-test--make-vault "다른 볼트")))
+            (setq work-kb-vault other)
+            (should (eq (work-kb-test--md-decoding other) 'utf-8))
+            (should-not (eq (work-kb-test--md-decoding vault) 'utf-8))))
+      (setq work-kb-vault old-vault)
+      (work-kb--register-coding))))
+
+(ert-deftest work-kb-test-vault-coding-lazy-in-accessors ()
+  "감시자가 없어도(값이 등록과 달라도) 경로 함수가 부를 때 다시 등록한다."
+  (let ((vault (work-kb-test--make-vault "지연 볼트"))
+        (old-vault (default-value 'work-kb-vault)))
+    (remove-variable-watcher 'work-kb-vault #'work-kb--coding-watcher)
+    (unwind-protect
+        (progn
+          (setq work-kb-vault vault)
+          (should-not (eq (work-kb-test--md-decoding vault) 'utf-8))
+          (should (equal (work-kb--vault) vault))
+          (should (eq (work-kb-test--md-decoding vault) 'utf-8)))
+      (add-variable-watcher 'work-kb-vault #'work-kb--coding-watcher)
+      (setq work-kb-vault old-vault)
+      (work-kb--register-coding))))
+
 ;;;; 키
 
 (ert-deftest work-kb-test-every-key-bound ()

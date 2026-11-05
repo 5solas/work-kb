@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+import traceback
 import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, NoReturn
@@ -112,21 +113,59 @@ def read_argv_stdin() -> list[str]:
     return data
 
 
-def report_error(message: str) -> None:
-    """stderr가 있으면 거기에, 없으면(pythonw.exe 스케줄 작업) `.state/logs/kb.log`에 남긴다."""
+def root_from_argv(args: list[str]) -> str | None:
+    """argv에서 `--root` 값을 미리 꺼낸다(argparse보다 먼저, 오류 로그 위치를 정하려고).
+
+    `--root 값`과 `--root=값`을 모두 읽고, 여러 번이면 argparse처럼 마지막 값을 쓴다. `--` 뒤는 보지 않는다.
+    """
+    found: str | None = None
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            break
+        if arg == "--root" and i + 1 < len(args):
+            found = args[i + 1]
+            i += 2
+            continue
+        if arg.startswith("--root="):
+            found = arg[len("--root="):]
+        i += 1
+    return found or None
+
+
+def _error_log_root(args: list[str] | None) -> str:
+    """stderr가 없을 때 오류를 적을 볼트 루트: argv의 `--root` → KB_ROOT → 현재 폴더.
+
+    스케줄 작업은 KB_ROOT 없이 `--root <볼트>`만 넘기고 작업 폴더는 저장소이므로, `--root`가 먼저다.
+    `--root` 폴더가 없으면(오류의 원인일 수 있다) 그 폴더를 만들지 않고 다음 후보로 넘어간다.
+    """
+    candidate = root_from_argv(args or [])
+    if candidate:
+        path = Path(candidate).expanduser()
+        if path.is_dir():
+            return str(path.resolve())
+    return os.environ.get("KB_ROOT") or os.getcwd()
+
+
+def report_error(message: str, args: list[str] | None = None) -> None:
+    """stderr가 있으면 거기에, 없으면(pythonw.exe 스케줄 작업) `<볼트>/.state/logs/kb.log`에 남긴다."""
     stream = getattr(sys, "stderr", None)
     if stream is not None:
         print(message, file=stream)
         return
-    root = os.environ.get("KB_ROOT") or os.getcwd()
     try:
-        get_logger(root).error(message)
+        get_logger(_error_log_root(args)).error(redact(message))
     except Exception:  # 로그조차 못 쓰면 조용히 종료 코드만 남긴다
         pass
 
 
 def run_main(main: Callable[[list[str]], int | None], argv: list[str] | None = None) -> NoReturn:
-    """스크립트 진입점. KbError를 한국어 한 줄과 종료 코드로 바꾼다."""
+    """스크립트 진입점. KbError를 한국어 한 줄과 종료 코드로 바꾼다.
+
+    stderr가 없으면(pythonw.exe) 그 밖의 예외도 traceback을 kb.log에 남기고 종료 코드 1로 끝낸다.
+    stderr가 있으면 그대로 다시 던져 콘솔에 traceback이 보이게 한다.
+    """
     setup_stdio()
     args = list(sys.argv[1:] if argv is None else argv)
     try:
@@ -135,10 +174,15 @@ def run_main(main: Callable[[list[str]], int | None], argv: list[str] | None = N
         code = main(args)
     except KbError as exc:
         message = redact(str(exc)) or exc.__class__.__name__
-        report_error(f"오류: {message}")
+        report_error(f"오류: {message}", args)
         code = exc.exit_code
     except KeyboardInterrupt:
-        report_error("중단됨")
+        report_error("중단됨", args)
+        code = 1
+    except Exception:
+        if getattr(sys, "stderr", None) is not None:
+            raise
+        report_error(f"예상하지 못한 오류:\n{traceback.format_exc()}", args)
         code = 1
     sys.exit(int(code or 0))
 

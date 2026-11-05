@@ -164,6 +164,27 @@ def test_dry_run_prints_commands_and_downloads_nothing(tmp_path, monkeypatch, ca
     assert not dest.exists()
 
 
+def test_root_is_accepted_and_ignored(tmp_path, monkeypatch, capsys):
+    # README: 모든 명령이 --root를 받는다. wheels는 저장소 폴더만 쓰므로 받기만 하고 무시한다.
+    def boom(*a, **k):
+        raise AssertionError("dry-run이 pip를 실행했다")
+
+    monkeypatch.setattr(wheels.subprocess, "run", boom)
+    vault = tmp_path / "내 볼트"
+    assert wheels.main(["--dry-run", "--root", str(vault), "--targets", "3.14", "--no-sdist"]) == 0
+    out = capsys.readouterr().out
+    assert str(wheels.CODE_ROOT / "requirements.txt") in out
+    assert str(wheels.CODE_ROOT / wheels.DEFAULT_DIR) in out  # 기본 폴더는 볼트가 아니라 저장소 기준
+    assert str(vault) not in out
+    assert not vault.exists()
+
+
+def test_wheels_cli_help_mentions_root(run_kb):
+    result = run_kb("wheels", "--help")
+    assert result.returncode == 0
+    assert "--root" in result.stdout and "무시" in result.stdout
+
+
 def test_main_downloads_per_target_and_writes_manifest(tmp_path, monkeypatch, capsys):
     pip = FakePip()
     monkeypatch.setattr(wheels.subprocess, "run", pip)

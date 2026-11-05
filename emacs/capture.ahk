@@ -14,7 +14,8 @@
 ;   2. Emacs를 서버 모드로 띄운다. init 파일에 다음 두 줄:
 ;        (load "<저장소>/emacs/work-kb.el")
 ;        (server-start)
-;      Emacs가 떠 있지 않거나 서버가 없으면 emacsclient가 오류를 내고 이 스크립트가 알림 창을 띄운다.
+;      EmacsClient 경로가 틀려 실행하지 못하면 이 스크립트가 알림 창을 띄운다.
+;      Emacs 서버가 떠 있지 않으면 emacsclientw가 자기 오류 창을 띄운다(이 스크립트는 그 결과를 알지 못한다).
 ;   3. 아래 EmacsClient 경로를 내 PC에 맞게 고친다. PATH에 있으면 이름만 써도 된다.
 ;      emacsclientw.exe는 emacsclient.exe와 인수가 같고 콘솔 창을 띄우지 않는다.
 ;   4. 이 파일을 더블클릭해 실행한다. 로그온 때 자동 실행하려면

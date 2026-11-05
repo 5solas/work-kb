@@ -239,7 +239,12 @@ def write_all(planned: Iterable[Planned]) -> None:
 
 
 def create_command(item: Planned) -> str:
-    return f"schtasks /Create /TN {item.task.name} /XML {quote_arg(str(item.path))} /F"
+    """등록 명령. /XML 경로는 늘 큰따옴표로 감싼다.
+
+    PowerShell은 따옴표 없는 인수의 `(`·`)`·`;`·`&` 등을 문법으로 읽으므로 공백이 없어도 깨진다.
+    Windows 경로에는 `"`가 들어갈 수 없어 그대로 감싸면 된다. 작업 이름은 `[a-z0-9-]+` 평면 이름이라 감싸지 않는다(D58).
+    """
+    return f'schtasks /Create /TN {item.task.name} /XML "{item.path}" /F'
 
 
 def command_lines(planned: list[Planned]) -> list[str]:

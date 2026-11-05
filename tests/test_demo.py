@@ -1,4 +1,5 @@
-"""scripts/demo.py (W5.4) 테스트. `demo` 마커: 기본 실행에서 빠지고 `pytest -m demo`로 돈다.
+"""scripts/demo.py (W5.4) 테스트. 전체 흐름만 `demo` 마커: 기본 실행에서 빠지고 `pytest -m demo`로 돈다.
+거부·사전 점검 테스트는 마커가 없어 기본 실행에서 돈다.
 
 전체 흐름(모의 서버 3개 → 임시 설정 → sync → link → ingest → compile → lint → push)을 프로세스 안에서
 돌리고 다음을 단언한다(D46): 모의 LLM이 채팅·이미지 요청을 1건 이상 받음, 모의 Confluence에 페이지가 있음,
@@ -23,7 +24,7 @@ import mock_jira
 from lib import core
 from lib import secrets as kb_secrets
 
-pytestmark = pytest.mark.demo
+# 전체 흐름(데모를 끝까지 돌리는 테스트)만 `demo` 마커를 단다. 거부·사전 점검은 기본 실행에서 돈다.
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".venv", ".venv313", "__pycache__", ".pytest_cache", ".git"}
@@ -169,6 +170,7 @@ def canary(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- 전체 흐름
 
 
+@pytest.mark.demo
 def test_full_flow_hits_mocks_and_leaves_repo_untouched(refs, monkeypatch, canary):
     monkeypatch.setenv("DEEPINFRA_API_KEY", "di-표식-키-읽히면-안됨")
     monkeypatch.setenv("KB_JIRA_MAX_RESULTS", "1")  # 사용자의 KB_* 덮어쓰기는 데모 설정에 섞이지 않아야 한다
@@ -236,6 +238,7 @@ def test_full_flow_hits_mocks_and_leaves_repo_untouched(refs, monkeypatch, canar
         assert f"] {name}" in head
 
 
+@pytest.mark.demo
 def test_keep_leaves_vault_outside_temp(tmp_path):
     keep = tmp_path / "남길 볼트 (데모)"
     result, output = run_demo(keep=keep)
@@ -249,6 +252,7 @@ def test_keep_leaves_vault_outside_temp(tmp_path):
     assert "남겨 둔 볼트" in output
 
 
+@pytest.mark.demo
 def test_failed_step_gives_nonzero_exit_and_flow_continues(monkeypatch):
     import confluence_push
 
@@ -337,6 +341,7 @@ def test_fixed_port_taken_is_clear_error_and_cleans_up(monkeypatch):
         holder.stop()
 
 
+@pytest.mark.demo
 def test_ports_are_ephemeral_by_default():
     result, output = run_demo()
     assert result["exit_code"] == 0, output
@@ -351,6 +356,7 @@ def test_ports_are_ephemeral_by_default():
 # ---------------------------------------------------------------- kb.py 경유
 
 
+@pytest.mark.demo
 def test_kb_demo_subprocess(run_kb):
     proc = run_kb("demo", timeout=300)
     assert proc.returncode == 0, proc.stdout + proc.stderr

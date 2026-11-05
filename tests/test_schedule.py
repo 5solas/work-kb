@@ -222,6 +222,18 @@ def test_quote_arg_round_trips(arg):
     assert split_args(schedule.quote_arg(arg)) == [arg]
 
 
+@pytest.mark.parametrize("folder", ["업무(KB)", "a;b", "plain", "공백 있는 폴더"])
+def test_create_command_always_quotes_xml_path(tmp_path, folder, no_subprocess):
+    # PowerShell은 따옴표 없는 `(`·`;`를 문법으로 읽는다. 공백이 없어도 /XML 경로는 늘 감싼다.
+    xml_dir = tmp_path / folder
+    planned = schedule.generate(root=ROOT, company=False, xml_dir=xml_dir, out=lambda _: None)
+    for item in planned:
+        line = schedule.create_command(item)
+        assert f'/XML "{item.path}" /F' in line
+        assert line.startswith(f"schtasks /Create /TN {item.task.name} /XML ")
+        assert create_lines(line) == {item.task.name: item.path}
+
+
 # ---------------------------------------------------------------- XML
 
 

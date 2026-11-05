@@ -100,19 +100,41 @@
                  (regexp-quote (char-to-string ch))))
              text ""))
 
-(defun work-kb--register-coding ()
-  "코드 루트와 볼트 아래 `.md'를 UTF-8(EOL 자동)로 읽게 등록한다."
+(defvar work-kb--coding-registered-for 'none
+  "마지막으로 인코딩을 등록한 (루트 . 볼트) 값. 설정값과 다르면 다시 등록한다.")
+
+(defun work-kb--register-coding-for (root vault)
+  "ROOT와 VAULT 아래 `.md'를 UTF-8(EOL 자동)로 읽게 등록한다. 전에 넣은 패턴은 지운다."
   (setq file-coding-system-alist
         (cl-remove-if (lambda (entry) (member (car-safe entry) work-kb--coding-patterns))
                       file-coding-system-alist))
   (setq work-kb--coding-patterns nil)
-  (dolist (dir (delete-dups (delq nil (list (bound-and-true-p work-kb-root)
-                                            (bound-and-true-p work-kb-vault)))))
+  (dolist (dir (delete-dups (delq nil (list root vault))))
     (when (and (stringp dir) (not (string-empty-p dir)))
       (let ((re (concat "\\`" (work-kb--ci-regexp (file-name-as-directory (expand-file-name dir)))
                         ".*\\.[mM][dD]\\'")))
         (modify-coding-system-alist 'file re 'utf-8)
-        (push re work-kb--coding-patterns)))))
+        (push re work-kb--coding-patterns))))
+  (setq work-kb--coding-registered-for (cons root vault)))
+
+(defun work-kb--register-coding ()
+  "코드 루트와 볼트 아래 `.md'를 UTF-8(EOL 자동)로 읽게 등록한다."
+  (work-kb--register-coding-for (bound-and-true-p work-kb-root)
+                                (bound-and-true-p work-kb-vault)))
+
+(defun work-kb--ensure-coding ()
+  "설정값이 마지막 등록과 다르면 다시 등록한다 (load 뒤에 setq한 경우 대비)."
+  (unless (equal work-kb--coding-registered-for
+                 (cons (bound-and-true-p work-kb-root) (bound-and-true-p work-kb-vault)))
+    (work-kb--register-coding)))
+
+(defun work-kb--coding-watcher (symbol newval _operation where)
+  "`work-kb-root'·`work-kb-vault'가 바뀌면(load 뒤 setq 포함) 새 값으로 다시 등록한다.
+변수 감시자는 값이 바뀌기 직전에 불리므로 NEWVAL을 직접 쓴다. 버퍼 지역 값(WHERE)은 무시한다."
+  (unless where
+    (work-kb--register-coding-for
+     (if (eq symbol 'work-kb-root) newval (bound-and-true-p work-kb-root))
+     (if (eq symbol 'work-kb-vault) newval (bound-and-true-p work-kb-vault)))))
 
 (defun work-kb--set-and-register (symbol value)
   (set-default symbol value)
@@ -167,12 +189,14 @@
 
 (defun work-kb--root ()
   "코드 루트 (끝에 /). 없으면 사용자 오류."
+  (work-kb--ensure-coding)
   (unless (and (stringp work-kb-root) (file-directory-p work-kb-root))
     (user-error "work-kb-root를 설정하세요 (scripts/kb.py가 있는 폴더): %S" work-kb-root))
   (file-name-as-directory (expand-file-name work-kb-root)))
 
 (defun work-kb--vault ()
   "볼트 루트 (끝에 /)."
+  (work-kb--ensure-coding)
   (let ((dir (or work-kb-vault (work-kb--root))))
     (unless (file-directory-p dir)
       (user-error "볼트 폴더가 없습니다: %s" dir))
@@ -1544,6 +1568,10 @@ merge_with 주제에 별칭을 더한다, D22). 비우면 열기만 한다. 끝�
 
 (add-hook 'find-file-hook #'work-kb--find-file-hook)
 
+;; README는 `(load …)' 뒤에 `(setq work-kb-vault …)'를 쓴다. setq는 :set을 거치지 않으므로
+;; 변수 감시자로 다시 등록하고, 경로 함수(`work-kb--root'·`work-kb--vault')도 늦게라도 맞춘다.
+(add-variable-watcher 'work-kb-root #'work-kb--coding-watcher)
+(add-variable-watcher 'work-kb-vault #'work-kb--coding-watcher)
 (work-kb--register-coding)
 (work-kb-rebind-prefix work-kb-prefix-key)
 

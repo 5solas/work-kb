@@ -343,33 +343,44 @@ def _artefact_group(rel: str) -> str:
 
 # ── 추적 파일 훑기 ────────────────────────────────────────────
 
-TEXT_SUFFIXES = {".py", ".md", ".yaml", ".yml", ".txt", ".el", ".ahk", ".ps1", ".json", ".jsonl", ".base", ".ini", ".toml", ".cfg", ""}
-# 이름이 점으로 시작하는 파일(.gitignore 등)은 suffix가 ""라 함께 훑는다.
 HARD_SKIP = {".git"}
+# 이진 파일: NUL 바이트(UTF-16 BOM이 없을 때) 또는 PNG·JPEG·ZIP(whl·docx 포함)·GIF 매직 넘버. 확장자로 고르지 않는다.
+BINARY_MAGIC = (b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff", b"PK\x03\x04", b"PK\x05\x06", b"GIF87a", b"GIF89a")
+UTF16_BOMS = ((b"\xff\xfe", "utf-16-le"), (b"\xfe\xff", "utf-16-be"))
 
 
-def _tracked_text_files() -> list[tuple[str, str]]:
-    """.gitignore가 무시하지 않는 텍스트 파일 (POSIX 상대 경로, 내용)."""
+def _decode_text(data: bytes) -> str | None:
+    """텍스트면 문자열, 이진이면 None. UTF-16 BOM을 풀고, UTF-8이 아니면 바꿔 읽는다(ASCII 키 모양은 남는다)."""
+    for bom, codec in UTF16_BOMS:
+        if data.startswith(bom):
+            return data[len(bom):].decode(codec, errors="replace")
+    if data.startswith(BINARY_MAGIC) or b"\x00" in data:
+        return None
+    return data.decode("utf-8-sig", errors="replace")
+
+
+def _tracked_files(root: Path = ROOT) -> list[tuple[str, bytes, str]]:
+    """.gitignore가 무시하지 않는 이진이 아닌 모든 파일 (POSIX 상대 경로, 원본 바이트, 해독한 내용)."""
     found = []
-    for dirpath, dirnames, filenames in os.walk(ROOT):
-        rel_dir = Path(dirpath).relative_to(ROOT).as_posix()
+    for dirpath, dirnames, filenames in os.walk(root):
+        rel_dir = Path(dirpath).relative_to(root).as_posix()
         rel_dir = "" if rel_dir == "." else rel_dir + "/"
         dirnames[:] = [d for d in dirnames if d not in HARD_SKIP and not _ignored(rel_dir + d + "/")]
         for name in filenames:
             rel = rel_dir + name
-            if PurePosixPath(name).suffix.lower() not in TEXT_SUFFIXES or _ignored(rel):
+            if _ignored(rel):
                 continue
-            path = ROOT / rel
-            if path.stat().st_size > 4_000_000:
-                continue
-            try:
-                found.append((rel, path.read_bytes().decode("utf-8-sig")))
-            except UnicodeDecodeError:
-                continue  # 이진 또는 UTF-8이 아닌 파일(인코딩 테스트가 따로 본다)
+            data = (root / rel).read_bytes()
+            text = _decode_text(data)
+            if text is not None:
+                found.append((rel, data, text))
     return found
 
 
-TRACKED_TEXT = _tracked_text_files()
+TRACKED = _tracked_files()
+TRACKED_TEXT = [(rel, text) for rel, _, text in TRACKED]
+# 실제 키와 바이트 단위로 비교한다(값은 어디에도 출력하지 않는다). conftest가 환경을 지우기 전에 읽어 둔다.
+REAL_DEEPINFRA_KEY = os.environ.get("DEEPINFRA_API_KEY", "").strip()
 
 
 def test_scan_sees_the_repo():
@@ -389,16 +400,45 @@ API_KEY_LINE = re.compile(r"""["']?\bapi_key["']?\s*:\s*["']?([^"'\s,#}]*)""")
 REF_PREFIXES = ("keyring:", "env:")
 
 
+FIXTURE_ALNUM_ALLOWED: set[str] = set()  # fixture에 있는 알려진 가짜 값(키 모양이면 여기에 명시)
+
+
 def _secret_hits(rel: str, text: str) -> list[str]:
     hits = [f"Bearer {m.group(1)[:6]}…" for m in BEARER.finditer(text)]
-    if not rel.startswith("tests/fixtures/"):
-        for m in LONG_ALNUM.finditer(text):
-            run = m.group(0)
-            if run in ALNUM_ALLOWED or HEX.fullmatch(run):
-                continue
-            if re.search(r"\d", run) and re.search(r"[A-Za-z]", run):
-                hits.append(f"키 모양 {run[:6]}…({len(run)}자)")
+    allowed = ALNUM_ALLOWED | (FIXTURE_ALNUM_ALLOWED if rel.startswith("tests/fixtures/") else set())
+    for m in LONG_ALNUM.finditer(text):
+        run = m.group(0)
+        if run in allowed or HEX.fullmatch(run):
+            continue
+        if re.search(r"\d", run) and re.search(r"[A-Za-z]", run):
+            hits.append(f"키 모양 {run[:6]}…({len(run)}자)")
     return hits
+
+
+def _real_key_parts(key: str) -> list[str]:
+    """실제 키와, 대시로 나눈 16자 이상 조각(앞뒤를 바꿔 붙여도 잡히게)."""
+    if not key:
+        return []
+    return [key] + [part for part in re.split(r"[-_]", key) if len(part) >= 16 and part != key]
+
+
+def _real_key_hits(data: bytes, text: str, key: str) -> list[str]:
+    """원본 바이트와 해독한 내용(UTF-16 등)에 실제 키가 있는가. 값은 돌려주지 않는다."""
+    for part in _real_key_parts(key):
+        if part.encode("utf-8") in data or part in text:
+            return ["DEEPINFRA_API_KEY 값(또는 그 조각)이 들어 있음"]
+    return []
+
+
+def _scan_problems(files: list[tuple[str, bytes, str]], key: str = "") -> list[str]:
+    problems = []
+    for rel, data, text in files:
+        problems += [f"{rel}: {hit}" for hit in _secret_hits(rel, text)]
+        problems += [f"{rel}: {hit}" for hit in _real_key_hits(data, text, key)]
+        shipped = not (rel.startswith("tests/test_") or rel.startswith("tests/fixtures/"))
+        if shipped:  # 테스트 파일은 비밀값 거부를 검사하려고 가짜 값을 일부러 쓴다
+            problems += [f"{rel}: {hit}" for hit in _api_key_hits(text)]
+    return problems
 
 
 def _api_key_hits(text: str) -> list[str]:
@@ -414,7 +454,7 @@ def test_secret_detectors_self_check():
     fake = "Kq7" * 11  # 33자(16진수가 아님), 소스에는 이어진 형태로 남지 않는다
     assert _secret_hits("x.md", "Authorization: Bearer " + fake)
     assert _secret_hits("x.md", "DEEPINFRA_API_KEY=" + fake)
-    assert not _secret_hits("tests/fixtures/x.md", "k " + fake)
+    assert _secret_hits("tests/fixtures/x.md", "k " + fake)  # fixture도 훑는다(허용 목록만 예외)
     assert not _secret_hits("x.md", "Bearer PAT · Bearer x · Bearer sk-test-secret-123456")
     assert not _secret_hits("x.md", "sha256 " + "0a" * 32 + " " + "0123456789ABCDEFGHJKMNPQRSTVWXYZ")
     assert _api_key_hits("    api_key: " + fake)
@@ -422,13 +462,58 @@ def test_secret_detectors_self_check():
     assert not _api_key_hits("api_key_ref: keyring:work-kb/llm\napi_key: env:X\napi_key: ''\n")
 
 
+def test_decode_text_detects_binary_and_utf16():
+    assert _decode_text(b"\x89PNG\r\n\x1a\n" + b"abc") is None
+    assert _decode_text(b"\xff\xd8\xff\xe0" + b"abc") is None
+    assert _decode_text(b"PK\x03\x04" + b"abc") is None
+    assert _decode_text(b"abc\x00def") is None
+    assert _decode_text(b"\xff\xfe" + "키 값".encode("utf-16-le")) == "키 값"
+    assert _decode_text(b"\xfe\xff" + "키 값".encode("utf-16-be")) == "키 값"
+    assert _decode_text("한글".encode("cp949")) is not None  # UTF-8이 아니어도 텍스트로 훑는다
+
+
+def _plant_tree(root: Path, key: str) -> None:
+    """심어 둔 비밀값: 전에 놓치던 자리(fixture, .bat, UTF-16 문서, 확장자 없는 파일)."""
+    files = {
+        "tests/fixtures/llm/PLANT2.json": json.dumps({"auth": key}).encode("utf-8"),
+        "scripts/PLANT3.bat": f"set DEEPINFRA_API_KEY={key}\r\n".encode("utf-8"),
+        "docs/PLANT4.md": b"\xff\xfe" + f"키: {key}\n".encode("utf-16-le"),
+        "tests/fixtures/PLANT6.md": f"값 {key}\n".encode("utf-8"),
+        "scripts/PLANT7": f"KEY={key}\n".encode("utf-8"),
+        "examples/PLANT8.png": b"\x89PNG\r\n\x1a\n" + key.encode("utf-8"),  # 이진은 훑지 않는다
+    }
+    for rel, data in files.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+
+def test_scan_catches_planted_secrets(tmp_path):
+    fake = "-".join(["Zq", "Xw", "Kq7" * 10 + "Ab"])  # 2-2-32 영숫자, 진짜 키와 같은 모양
+    _plant_tree(tmp_path, fake)
+    files = _tracked_files(tmp_path)
+    names = {rel for rel, _, _ in files}
+    assert "examples/PLANT8.png" not in names
+    problems = _scan_problems(files)
+    for rel in ("tests/fixtures/llm/PLANT2.json", "scripts/PLANT3.bat", "docs/PLANT4.md",
+                "tests/fixtures/PLANT6.md", "scripts/PLANT7"):
+        assert any(p.startswith(rel + ": 키 모양") for p in problems), (rel, problems)
+
+
+def test_scan_compares_real_key_without_printing(tmp_path):
+    # 키 모양 규칙에 걸리지 않는 값(짧은 조각·대시)이라도 실제 키와 같으면 잡는다.
+    key = "ab-cd-" + "q" * 10 + "-" + "w" * 18
+    path = tmp_path / "notes" / "x.cfg"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"\xff\xfe" + ("k=" + "w" * 18).encode("utf-16-le"))
+    problems = _scan_problems(_tracked_files(tmp_path), key)
+    assert problems == ["notes/x.cfg: DEEPINFRA_API_KEY 값(또는 그 조각)이 들어 있음"]
+    assert not any(key in p or "w" * 18 in p for p in problems)
+    assert _scan_problems(_tracked_files(tmp_path), "") == []
+
+
 def test_no_secrets_in_tracked_files():
-    problems = []
-    for rel, text in TRACKED_TEXT:
-        problems += [f"{rel}: {hit}" for hit in _secret_hits(rel, text)]
-        shipped = not (rel.startswith("tests/test_") or rel.startswith("tests/fixtures/"))
-        if shipped:  # 테스트 파일은 비밀값 거부를 검사하려고 가짜 값을 일부러 쓴다
-            problems += [f"{rel}: {hit}" for hit in _api_key_hits(text)]
+    problems = _scan_problems(TRACKED, REAL_DEEPINFRA_KEY)
     assert not problems, "\n".join(problems)
 
 
@@ -527,6 +612,12 @@ CONNECTION_KEYS = {
     "environment", "base_url", "project_keys", "space_key", "parent_page_id", "pat_ref", "api_key_ref",
     "profiles", "fallback_order", "ca_bundle", "proxy", "proxies", "username", "user",
 }
+
+
+def test_sample_vault_config_is_repo_copy():
+    # examples/sample-vault/README.md: "저장소 config.yaml의 복사본". README의 A단계 흐름이 이 파일을 그대로 읽는다.
+    sample = (ROOT / "examples" / "sample-vault" / "config.yaml").read_bytes()
+    assert sample == (ROOT / "config.yaml").read_bytes(), "config.yaml을 examples/sample-vault/에 다시 복사하세요"
 
 
 @pytest.mark.parametrize("rel", ["config.yaml", "examples/sample-vault/config.yaml"])
