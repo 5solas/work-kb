@@ -96,6 +96,7 @@ date: 2026-11-05
 | `kb.py schedule` | 작업 스케줄러 XML과 `schtasks` 명령 생성(등록은 하지 않음) | `--print` `--xml-dir` `--company` | 거부 |
 | `kb.py wheels` | 오프라인 설치용 `wheels/` 내려받기 | `--targets` `--dir` | 거부 |
 | `kb.py demo` | 모의 서버 3개로 전체 흐름 시연 (임시 볼트) | `--keep` `--fixed-ports` | 거부 |
+| `kb.py serve` | 편집기용 상주 서버: 표준 입출력으로 JSON을 한 줄씩 주고받으며 빠른 명령(`status` `search` `today` `link` 등)을 같은 프로세스에서 실행 | `--idle-sec` | 허용 |
 
 `kb.py demo`는 `tests/`의 모의 서버를 쓴다. 회사 배포는 `tests/`를 제외하므로 **demo는 집 전용**이다.
 

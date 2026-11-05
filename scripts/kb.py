@@ -1,7 +1,8 @@
 """work-kb 단일 진입점.
 
 사용법: python scripts/kb.py <명령> [옵션]
-        python scripts/kb.py --argv-stdin   (stdin에서 UTF-8 JSON 배열로 인수를 받음, Emacs 연동)
+        python scripts/kb.py --argv-stdin   (stdin에서 UTF-8 JSON 배열로 인수를 받음, 편집기 연동)
+        python scripts/kb.py serve          (편집기용 상주 서버, scripts/serve.py)
 
 명령 모듈은 필요할 때만 가져온다. 명령 표의 agent_ok가 거짓이면 KB_AGENT=1 세션에서 거부한다.
 """
@@ -93,6 +94,8 @@ COMMANDS: dict[str, Command] = {
     # Phase 6
     "schedule": Command("schedule", agent_ok=False, help="작업 스케줄러 XML·schtasks 명령 생성 (등록은 하지 않음)"),
     "wheels": Command("wheels", agent_ok=False, help="오프라인 설치용 wheels/ 내려받기"),
+    # Neovim 프런트엔드
+    "serve": Command("serve", help="편집기용 상주 서버: 빠른 명령(status·search·today·link 등)을 한 프로세스에서 실행 (stdin/stdout JSON 줄)"),
 }
 
 ALIASES: dict[str, str] = {"jira_sync": "sync"}

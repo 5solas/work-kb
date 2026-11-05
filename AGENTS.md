@@ -115,6 +115,7 @@ python scripts/kb.py doctor
 python scripts/kb.py act list
 python scripts/kb.py act transitions KB-12
 python scripts/kb.py proposals list
+python scripts/kb.py serve
 ```
 
 | 명령 | 하는 일 |
@@ -130,5 +131,6 @@ python scripts/kb.py proposals list
 | `doctor` | 연결·환경 점검(`--redetect`는 거부) |
 | `act list`, `act transitions KEY` | outbox 보기, 가능한 전환 보기(읽기) |
 | `proposals list` | 주제 제안 보기 |
+| `serve` | 편집기(Neovim)가 띄워 두는 상주 서버. 빠른 읽기 계열 명령만 처리하고 요청마다 위 거부 규칙을 똑같이 적용한다. 끝나지 않는 명령이므로 에이전트가 직접 띄울 일은 없다 |
 
 `KB_AGENT=1`에서 거부되는 명령(사람만 실행한다): `init`, `act`의 쓰기(`comment`, `transition`, `assign`, `worklog`, `create`, `promote`, `flush`), `proposals accept`, `push`, `demo`, `schedule`, `wheels`, `doctor --redetect`.
