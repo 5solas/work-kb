@@ -2,6 +2,22 @@
 
 > 이 파일은 구축 중 작업 문서입니다. 충돌 시 우선순위: 1장 → 2장 → 부록 A(원 설계) → 지시서. 1~3장은 한국어이고, 부록 A–C는 구축 중 작업 자료라 영어 원문 그대로 둡니다(구축 단계 부록에 한해 지시서 §3.10에서 의도적으로 벗어남).
 
+## 0. 상태 요약과 사용자 확인 대기 (2026-11-05 기준)
+
+Phase 0~6 구축 완료. 자동 관문은 전부 통과했고(§3의 Phase별 기록), 아래는 코드로 확인할 수 없어 **사용자가 직접 확인해야 하는 항목**이다(D31). 확인되면 이 목록에서 지운다.
+
+| Phase | 항목 | 방법 |
+|---|---|---|
+| 1 | Emacs 텍스트 캡처 | `C-c k c` → 입력 → `C-c C-c` → 오늘 daily `## 기록` 끝에 `- HH:MM …` 줄 |
+| 1 | 클립보드 이미지 캡처 | 화면 캡처 후 `C-c k C` → `raw/assets/…png`와 `![[…]]` 줄; 텍스트만 복사한 뒤 `C-c k C`는 안내만 |
+| 1 | 파일 이미지 캡처 | dired에서 `C-c k F` |
+| 1 | 접두 키 교체 | `(setq work-kb-prefix-key "C-c c")` 뒤 재로드 → `C-c c c` 동작 |
+| 1 | 클립보드 테스트 | 일반 PowerShell: `$env:KB_REQUIRE_CLIPBOARD='1'; .venv\Scripts\python.exe -m pytest -q tests/test_clip_image.py` (빌드 셸에서는 클립보드를 열 수 없었음) |
+| 2 | Obsidian Bases | `jira/_views/일감.base`, `wiki/엔티티.base`를 열어 표·그룹·정렬 확인(`sort` 키 문법은 문서에 없어 미확인) |
+| 6 | 스케줄 등록 | `kb.py schedule --print`가 낸 `/Create` 하나 등록 → `/Run` → `/Query` → `/Delete` |
+| 6 | capture.ahk (선택) | AutoHotkey v2 설치 후 Ctrl+Alt+Shift+C/V |
+| 회사 | §9 전체 | 실제 Jira·Confluence·사내 LLM은 집에서 확인 불가. `doctor`와 `sync --jql … --dry-run`으로 첫 실행 확인 |
+
 ## 1. 지시서와 달라지는 점
 
 모두 `docs/DECISIONS.md`에 근거와 함께 기록한다.
