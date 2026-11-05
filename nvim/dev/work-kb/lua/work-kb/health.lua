@@ -41,7 +41,7 @@ function M.check()
   if bound then
     health.ok("접두 키: " .. bound.prefix)
   else
-    health.info("접두 키가 붙어 있지 않습니다 (setup의 prefix, 또는 <Plug>(work-kb-…) 매핑)")
+    health.info("접두 키가 붙어 있지 않습니다 (setup의 prefix, 또는 require(\"work-kb\").call(\"<이름>\")을 부르는 매핑)")
   end
 
   health.start("work-kb: Python")

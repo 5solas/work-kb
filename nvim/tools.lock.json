@@ -1,0 +1,9 @@
+{
+  "comment": "mason tool versions. install.ps1 -Only tools runs: nvim --headless \"+MasonInstall lua-language-server@3.19.2 pyright@1.1.414 ruff@0.17.3 stylua@v2.6.0\" +qa (pyright needs npm: scoop nodejs-lts)",
+  "tools": {
+    "lua-language-server": "3.19.2",
+    "pyright": "1.1.414",
+    "ruff": "0.17.3",
+    "stylua": "v2.6.0"
+  }
+}

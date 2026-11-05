@@ -163,7 +163,7 @@ function M.python_command()
     return { "py", "-3" }
   end
   local dir = root:sub(-1) == "/" and root or (root .. "/")
-  ui().fail(string.format("Python을 찾지 못했습니다. %s.venv를 만들거나 work-kb-python을 설정하세요", dir))
+  ui().fail(string.format("Python을 찾지 못했습니다. %s.venv를 만들거나 setup()의 python을 설정하세요", dir))
 end
 
 ---------------------------------------------------------------- 출력 버퍼
@@ -330,8 +330,42 @@ end
 
 ---------------------------------------------------------------- 프로세스 (이음매)
 
+---한 번 실행의 환경에 얹는 값. 출력을 버퍼에 담지 않아야 stdout·stderr가 쓴 순서대로 한 파이프에 도착한다
+---(상주 서버의 출력 순서와 같아진다).
+M.ONESHOT_ENV = { PYTHONUNBUFFERED = "1" }
+
+---지금 프로세스의 환경을 물려받고 OVERRIDES(이름 → 값, false면 지움)를 얹은 "이름=값" 목록.
+---Windows 환경 변수 이름은 대소문자를 가리지 않으므로 같은 이름(대소문자 무시)은 바꿔 쓴다.
+---@param overrides table<string, string|false>
+---@return string[]
+function M.environ(overrides)
+  local env, names = {}, {}
+  for k, v in pairs(uv.os_environ()) do
+    env[k] = v
+    names[k:upper()] = k
+  end
+  for k, v in pairs(overrides or {}) do
+    local existing = names[k:upper()]
+    if existing then
+      env[existing] = nil
+      names[k:upper()] = nil
+    end
+    if v ~= false and v ~= nil then
+      env[k] = tostring(v)
+      names[k:upper()] = k
+    end
+  end
+  local list = {}
+  for k, v in pairs(env) do
+    table.insert(list, k .. "=" .. v)
+  end
+  table.sort(list)
+  return list
+end
+
 ---하위 프로세스를 띄운다. 테스트는 이 함수를 바꿔 끼운다.
 ---spec = { cmd = {...}, cwd = 폴더, stdin = 문자열|nil, keep_stdin = bool, merge = bool(기본 true),
+---         env = { 이름 = 값|false }|nil (지금 환경에 얹을 값; false는 지움, nil이면 그대로 물려받음),
 ---         on_stdout = fn(data), on_stderr = fn(data) (merge가 거짓일 때), on_exit = fn(code, signal) }
 ---콜백은 모두 vim.schedule로 메인 루프에서, 출력이 모두 온 뒤 on_exit 순서로 부른다.
 ---돌려주는 표: { pid, write = fn(s), close_stdin = fn(), kill = fn(), alive = fn() -> bool }
@@ -398,6 +432,7 @@ function M._spawn(spec)
     args = args,
     cwd = spec.cwd,
     stdio = stdio,
+    env = spec.env and M.environ(spec.env) or nil,
     hide = true,
   }, function(code, signal)
     exited, exit_code, exit_signal = true, code, signal
@@ -557,6 +592,7 @@ function M.run(args, opts)
       cwd = root,
       stdin = M.json_array(args),
       merge = true,
+      env = vim.deepcopy(M.ONESHOT_ENV),
       on_stdout = function(data)
         if not handle.cancelled then
           out.write(data)

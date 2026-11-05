@@ -1,14 +1,16 @@
 -- work-kb: 업무 메모 캡처와 위키 연결 (Neovim 0.12, Windows).
 --
 -- 설치 (lazy.nvim 예):
---   { dir = "D:/work/work-kb/nvim", opts = { root = "D:/work/work-kb", vault = "D:/notes/work-kb" } }
--- 또는: vim.opt.rtp:append("D:/work/work-kb/nvim"); require("work-kb").setup({ ... })
+--   { dir = "D:/work/work-kb/nvim/dev/work-kb", opts = { root = "D:/work/work-kb", vault = "D:/notes/work-kb" } }
+-- 또는: vim.opt.rtp:append("D:/work/work-kb/nvim/dev/work-kb"); require("work-kb").setup({ ... })
+-- root를 주지 않으면 이 파일의 실제 경로(정션·심볼릭 링크를 푼 것)에서 정한다 (첫 사용 때).
 --
 -- 키 (접두 키 다음, 기본 <leader>k):
 --   c 캡처        C 클립보드 이미지   F 이미지 파일   i inbox 메모
 --   t 오늘 daily  s 검색             o 커서 위치 열기  l link 실행
 --   ? 상태        j Jira 작업        g 편찬(ingest → compile)  G 편찬 미리 보기(--dry-run)
 --   a 주제 제안 승인
+-- 비주얼 모드: c·i는 선택한 글을 캡처·inbox 버퍼에 미리 넣는다.
 -- 같은 명령: :WorkKb <이름>. 직접 붙이기: vim.keymap.set("n", "<F8>c", function() require("work-kb").call("capture") end)
 -- 또는 setup({ prefix = "<F8>" }). 접두 키를 바꾸려면 setup을 다시 부른다 (옛 키는 떼어 낸다).
 --
@@ -92,20 +94,53 @@ function M.call(entry)
   return ok
 end
 
-M._bound = nil -- { prefix = "<leader>k", lhs = { ... } }
+---비주얼 모드 키 (x): 선택한 글을 캡처·inbox 버퍼에 미리 넣는다 (Emacs: region이 있으면 그 글).
+---fn은 선택 글 하나를 받는다: capture.open(prefill), capture.inbox(prefill).
+M.visual_keys = {
+  { key = "c", name = "capture", module = "work-kb.capture", fn = "open" },
+  { key = "i", name = "capture-inbox", module = "work-kb.capture", fn = "inbox" },
+}
+
+---비주얼 모드에서 ENTRY를 부른다: 비주얼 모드를 빠져나와 선택 글을 읽고 그 글로 부른다.
+function M.call_visual(entry)
+  local ok, text = pcall(function()
+    return require("work-kb.ui").selection()
+  end)
+  if not ok then
+    echo_error(tostring(text))
+    return false
+  end
+  return M.call({
+    name = entry.name,
+    module = entry.module,
+    fn = entry.fn,
+    arg = function()
+      return text
+    end,
+  })
+end
+
+M._bound = nil -- { prefix = "<leader>k", lhs = { ... }, xlhs = { ... } }
 
 local DESC = "work-kb: "
 
----접두 키에 키를 붙인다. 전에 붙인 접두와 다르면 옛 키는 아직 work-kb 것일 때만 뗀다.
----PREFIX가 false·nil·""이면 붙이지 않는다.
+local function del_if_ours(mode, lhs)
+  local current = vim.fn.maparg(lhs, mode, false, true)
+  if type(current) == "table" and type(current.desc) == "string" and current.desc:sub(1, #DESC) == DESC then
+    pcall(vim.keymap.del, mode, lhs)
+  end
+end
+
+---접두 키에 키를 붙인다 (보통 모드 n 전부, 비주얼 모드 x의 c·i). 전에 붙인 접두와 다르면 옛 키는
+---아직 work-kb 것일 때만 뗀다. PREFIX가 false·nil·""이면 붙이지 않는다.
 function M.rebind_prefix(prefix)
   local old = M._bound
   if old and old.prefix ~= prefix then
     for _, lhs in ipairs(old.lhs) do
-      local current = vim.fn.maparg(lhs, "n", false, true)
-      if type(current) == "table" and type(current.desc) == "string" and current.desc:sub(1, #DESC) == DESC then
-        pcall(vim.keymap.del, "n", lhs)
-      end
+      del_if_ours("n", lhs)
+    end
+    for _, lhs in ipairs(old.xlhs or {}) do
+      del_if_ours("x", lhs)
     end
     M._bound = nil
   end
@@ -121,7 +156,15 @@ function M.rebind_prefix(prefix)
     end, { desc = DESC .. entry.name, silent = true })
     table.insert(lhs_list, lhs)
   end
-  M._bound = { prefix = prefix, lhs = lhs_list }
+  local xlhs_list = {}
+  for _, entry in ipairs(M.visual_keys) do
+    local lhs = prefix .. entry.key
+    vim.keymap.set("x", lhs, function()
+      M.call_visual(entry)
+    end, { desc = DESC .. entry.name .. " (선택 글)", silent = true })
+    table.insert(xlhs_list, lhs)
+  end
+  M._bound = { prefix = prefix, lhs = lhs_list, xlhs = xlhs_list }
   return prefix
 end
 
@@ -167,30 +210,25 @@ local function create_command()
   })
 end
 
----경로 PATH가 볼트(또는 코드 루트) 아래인가. 대소문자 무시 (Windows). 실패하면 거짓.
+---경로 PATH가 볼트 아래인가 (Emacs work-kb--vault-file-p: 볼트를 설정했으면 볼트, 아니면 코드 루트).
+---코드 루트는 config.root()로 정한다 (정션 아래 설치에서도 실제 저장소). 대소문자 무시 (Windows).
+---실패하면 거짓.
 local function in_vault(path)
   local config = require("work-kb.config")
-  local ok, dirs = pcall(function()
+  local ok, dir = pcall(function()
     local cfg = config.get()
-    local out = {}
-    for _, dir in ipairs({ cfg.vault, cfg.root }) do
-      if type(dir) == "string" and dir ~= "" then
-        table.insert(out, config.normalize(dir):lower())
-      end
+    if type(cfg.vault) == "string" and cfg.vault ~= "" then
+      return config.normalize(cfg.vault)
     end
-    return out
+    return config.root()
   end)
-  if not ok then
+  if not ok or type(dir) ~= "string" then
     return false
   end
+  dir = dir:lower()
   local file = vim.fs.normalize(path):lower()
-  for _, dir in ipairs(dirs) do
-    local prefix = dir:sub(-1) == "/" and dir or (dir .. "/")
-    if file:sub(1, #prefix) == prefix then
-      return true
-    end
-  end
-  return false
+  local prefix = dir:sub(-1) == "/" and dir or (dir .. "/")
+  return file:sub(1, #prefix) == prefix
 end
 
 local function server_cfg()

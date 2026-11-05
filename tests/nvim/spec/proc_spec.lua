@@ -67,7 +67,7 @@ describe("proc", function()
     seams({}, false)
     local err = H.fails_with(function()
       proc().python_command()
-    end, string.format("Python을 찾지 못했습니다. %s/.venv를 만들거나 work-kb-python을 설정하세요", base))
+    end, string.format("Python을 찾지 못했습니다. %s/.venv를 만들거나 setup()의 python을 설정하세요", base))
     H.ok(require("work-kb.ui").is_user_error(err))
   end)
 
@@ -93,6 +93,81 @@ describe("proc", function()
     H.eq(call.stdin, '["search","--root","' .. vault .. '","한글 😀 질의","a\\"b\\\\c\\n"]')
     H.eq(call.argv, { "search", "--root", vault, "한글 😀 질의", 'a"b\\c\n' })
     H.eq(call.spec.merge, true, "stdout·stderr를 한 파이프로")
+    H.eq(call.spec.env, { PYTHONUNBUFFERED = "1" }, "한 번 실행은 버퍼 없이 (서버와 같은 출력 순서)")
+  end)
+
+  it("환경: 지금 환경을 물려받고 얹은 값은 대소문자 무시로 바꾸고 false는 지운다", function()
+    local p = proc()
+    H.patch(vim.uv, "os_environ", function()
+      return { Path = "C:\\bin", PythonUnbuffered = "0", PSModulePath = "x", HOME = "C:\\사용자" }
+    end)
+    H.eq(p.environ({ PYTHONUNBUFFERED = "1", PSMODULEPATH = false, NEW = "새 값" }), {
+      "HOME=C:\\사용자",
+      "NEW=새 값",
+      "PYTHONUNBUFFERED=1",
+      "Path=C:\\bin",
+    })
+    H.eq(p.environ(nil), { "HOME=C:\\사용자", "PSModulePath=x", "Path=C:\\bin", "PythonUnbuffered=0" })
+  end)
+
+  it("실제 _spawn의 env: 물려받은 환경 + 얹은 값, 지운 값은 자식에 없다", function()
+    vim.env.WORK_KB_TEST_INHERITED = "물려받음 😀"
+    vim.env.WORK_KB_TEST_DROPPED = "지울 값"
+    local done, chunks = false, {}
+    local ok, err = pcall(function()
+      proc()._spawn({
+        cmd = {
+          H.python(),
+          "-X",
+          "utf8",
+          "-c",
+          "import os, json, sys; sys.stdout.buffer.write(json.dumps({k: os.environ.get(k) for k in ('WORK_KB_TEST_INHERITED', 'WORK_KB_TEST_DROPPED', 'PYTHONUNBUFFERED', 'SYSTEMROOT')}, ensure_ascii=False).encode('utf-8'))",
+        },
+        cwd = H.repo,
+        env = { PYTHONUNBUFFERED = "1", WORK_KB_TEST_DROPPED = false },
+        on_stdout = function(data)
+          table.insert(chunks, data)
+        end,
+        on_exit = function()
+          done = true
+        end,
+      })
+      H.ok(H.wait(function()
+        return done
+      end, 30000), "자식이 끝나지 않음")
+    end)
+    vim.env.WORK_KB_TEST_INHERITED = nil
+    vim.env.WORK_KB_TEST_DROPPED = nil
+    H.ok(ok, tostring(err))
+    local got = vim.json.decode(table.concat(chunks))
+    H.eq(got.WORK_KB_TEST_INHERITED, "물려받음 😀")
+    H.eq(got.WORK_KB_TEST_DROPPED, vim.NIL)
+    H.eq(got.PYTHONUNBUFFERED, "1")
+    H.ok(type(got.SYSTEMROOT) == "string" and got.SYSTEMROOT ~= "", "SYSTEMROOT를 물려받음")
+  end)
+
+  it("한 번 실행: flush 없는 print·stderr도 쓴 순서대로 한 버퍼에 (PYTHONUNBUFFERED)", function()
+    H.configure({ python = H.python() })
+    local code = table.concat({
+      "import sys",
+      "print('요약 1')",
+      "print('건너뜀: a', file=sys.stderr)",
+      "print('요약 2')",
+      "print('건너뜀: b', file=sys.stderr)",
+      "sys.exit(3)",
+    }, "\n")
+    H.rewrite_spawn(function(spec)
+      return { spec.cmd[1], "-X", "utf8", "-c", code }
+    end)
+    local handle = proc().run({ "link" }, { buffer = " *work-kb-test-order*", on_exit = function() end })
+    H.eq(handle.via, "process")
+    H.eq(proc().wait(handle, 30000), 3)
+    H.eq(H.buffer_text(" *work-kb-test-order*"), "요약 1\n건너뜀: a\n요약 2\n건너뜀: b\n")
+    -- 대조: 버퍼를 쓰는 Python이면 stderr(줄 단위)가 먼저, stdout(블록 단위)은 끝날 때 온다.
+    H.patch(proc(), "ONESHOT_ENV", { PYTHONUNBUFFERED = false })
+    handle = proc().run({ "link" }, { buffer = " *work-kb-test-order*", on_exit = function() end })
+    H.eq(proc().wait(handle, 30000), 3)
+    H.eq(H.buffer_text(" *work-kb-test-order*"), "건너뜀: a\n건너뜀: b\n요약 1\n요약 2\n")
   end)
 
   it("실제 Python 왕복: 한글 😀이 그대로, CR 없음, 상태 문구 없음, stdout·stderr 도착 순서", function()

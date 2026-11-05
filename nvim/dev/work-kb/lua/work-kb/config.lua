@@ -3,16 +3,28 @@
 
 local M = {}
 
----코드 루트 기본값: 이 파일은 <루트>/nvim/dev/work-kb/lua/work-kb/config.lua에 있으므로 그 앞부분이 루트다.
----문자열만 다루고 파일 시스템은 보지 않는다.
-local function default_root()
+---이 파일의 경로 (슬래시). 불러온 경로 그대로라 정션·심볼릭 링크를 거쳤으면 그 경로다.
+local function source_path()
   local source = debug.getinfo(1, "S").source or ""
   if source:sub(1, 1) ~= "@" then
     return nil
   end
-  local path = source:sub(2):gsub("\\", "/")
-  local root = path:match("^(.*)/nvim/dev/work%-kb/lua/work%-kb/[^/]+$")
-  return root
+  return (source:sub(2):gsub("\\", "/"))
+end
+
+---<루트>/nvim/dev/work-kb/lua/work-kb/<파일>에서 <루트>를 꺼낸다 (문자열만).
+local function root_from_path(path)
+  if not path then
+    return nil
+  end
+  return path:gsub("\\", "/"):match("^(.*)/nvim/dev/work%-kb/lua/work%-kb/[^/]+$")
+end
+
+---코드 루트 기본값: 이 파일은 <루트>/nvim/dev/work-kb/lua/work-kb/config.lua에 있으므로 그 앞부분이 루트다.
+---문자열만 다루고 파일 시스템은 보지 않는다. %LOCALAPPDATA%\nvim이 <저장소>\nvim을 가리키는 정션이면
+---이 값은 저장소가 아니라 ...\AppData\Local이 된다: 실제 루트는 root()가 처음 불릴 때 실제 경로로 정한다.
+local function default_root()
+  return root_from_path(source_path())
 end
 
 M.defaults = {
@@ -29,6 +41,10 @@ M.defaults = {
 }
 
 local state = nil
+-- setup에 root를 주지 않았는가 (그러면 root()가 플러그인 파일의 실제 경로에서 루트를 정한다).
+local root_is_default = true
+-- 실제 경로로 정한 기본 루트 (root()가 처음 불릴 때 채운다; false = 정하지 못함).
+local real_default_root = nil
 
 local function copy(value)
   if type(value) ~= "table" then
@@ -42,6 +58,7 @@ local function copy(value)
 end
 
 ---opts를 기본값 위에 얹어 저장한다. 없는 키는 기본값. `root = false`는 '설정 안 함'.
+---I/O는 하지 않는다 (기본 루트의 실제 경로는 root()가 처음 불릴 때 정한다).
 ---@param opts table|nil
 function M.setup(opts)
   opts = opts or {}
@@ -61,6 +78,8 @@ function M.setup(opts)
   if cfg.vault == false then
     cfg.vault = nil
   end
+  root_is_default = opts.root == nil
+  real_default_root = nil
   state = cfg
   return state
 end
@@ -100,11 +119,33 @@ local function fail(msg)
   require("work-kb.ui").fail(msg)
 end
 
----코드 루트. 없거나 폴더가 아니면 사용자 오류 (work-kb--root와 같은 문구).
+---플러그인 파일의 실제 경로(정션·심볼릭 링크를 푼 것)에서 정한 코드 루트. 정하지 못하면 nil.
+function M.real_default_root()
+  local path = source_path()
+  if not path then
+    return nil
+  end
+  local real = vim.uv.fs_realpath(path)
+  return root_from_path(real or path)
+end
+
+---코드 루트. 없거나 폴더가 아니면 사용자 오류 (work-kb--root와 같은 문구, 옵션 이름은 setup()의 root).
+---root를 설정하지 않았으면 플러그인 파일의 실제 경로에서 정하고, 그 아래 scripts/kb.py가 있어야 한다.
 function M.root()
   local root = M.get().root
+  if root_is_default and type(root) == "string" then
+    if real_default_root == nil then
+      real_default_root = M.real_default_root() or false
+    end
+    if real_default_root then
+      root = real_default_root
+    end
+    if is_dir(root) and not vim.uv.fs_stat(root .. "/scripts/kb.py") then
+      fail(string.format("코드 루트에 scripts/kb.py가 없습니다: %s. setup()의 root를 설정하세요", M.normalize(root)))
+    end
+  end
   if type(root) ~= "string" or root == "" or not is_dir(root) then
-    fail(string.format("work-kb-root를 설정하세요 (scripts/kb.py가 있는 폴더): %s", lisp_repr(root)))
+    fail(string.format("setup()의 root를 설정하세요 (scripts/kb.py가 있는 폴더): %s", lisp_repr(root)))
   end
   return M.normalize(root)
 end

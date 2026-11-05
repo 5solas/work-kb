@@ -122,6 +122,52 @@ function M.confirm(msg)
   end
 end
 
+---지금 버퍼의 마지막 비주얼 선택 글 (Emacs region; '<·'> 표시와 visualmode()).
+---글자 단위·줄 단위·블록 모두, 여러 바이트 글자는 통째로 ('selection' 옵션을 따른다). 줄은 \n으로 잇고
+---끝 줄바꿈은 붙이지 않는다. 선택한 적이 없으면 nil. 비주얼 모드 안에서 부르면 먼저 빠져나온다.
+---`$`로 줄 끝까지 넓힌 블록은 비주얼 모드 안에서 부를 때만 알아본다 (빠져나온 뒤에는 그 정보가 없다).
+---블록 선택을 `$`로 줄 끝까지 넓힌 경우 (getregion은 이것을 모른다): 각 줄의 왼쪽 화면 열부터 줄 끝까지.
+local function block_to_eol(start, finish)
+  local left = math.min(vim.fn.virtcol({ start[2], start[3] }, 1)[1], vim.fn.virtcol({ finish[2], finish[3] }, 1)[1])
+  local out = {}
+  for lnum = math.min(start[2], finish[2]), math.max(start[2], finish[2]) do
+    local line = vim.fn.getline(lnum)
+    if vim.fn.strdisplaywidth(line) < left then
+      table.insert(out, "")
+    else
+      local col = vim.fn.virtcol2col(0, lnum, left) -- 그 화면 열을 덮는 글자의 첫 바이트 (1부터)
+      table.insert(out, line:sub(math.max(col, 1)))
+    end
+  end
+  return out
+end
+
+---@return string|nil
+function M.selection()
+  local mode = vim.fn.mode()
+  local to_eol = false
+  if mode == "v" or mode == "V" or mode == "\22" then
+    to_eol = mode == "\22" and vim.fn.getcurpos()[5] == vim.v.maxcol
+    vim.api.nvim_feedkeys(vim.keycode("<Esc>"), "nx", false)
+  end
+  local kind = vim.fn.visualmode()
+  local start = vim.fn.getpos("'<")
+  local finish = vim.fn.getpos("'>")
+  if kind == "" or start[2] == 0 or finish[2] == 0 then
+    return nil
+  end
+  local ok, lines
+  if to_eol and kind == "\22" then
+    ok, lines = pcall(block_to_eol, start, finish)
+  else
+    ok, lines = pcall(vim.fn.getregion, start, finish, { type = kind })
+  end
+  if not ok or type(lines) ~= "table" then
+    return nil
+  end
+  return table.concat(lines, "\n")
+end
+
 ---BUFNR을 초점을 옮기지 않고 보인다 (Emacs display-buffer). 이미 보이면 그 창을 돌려준다.
 ---@param bufnr integer
 ---@return integer|nil window

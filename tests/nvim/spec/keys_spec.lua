@@ -141,12 +141,13 @@ describe("keys", function()
       end)
       H.eq(package.loaded["work-kb.server"], nil, "꺼진 뒤에는 예약된 시작이 아무것도 하지 않는다")
       -- 키를 눌러야 기능 모듈을 불러온다: 없는 모듈은 그때 오류로 보인다.
+      -- (실제 기능 모듈은 다른 작업에서 생기므로 없는 것이 확실한 모듈 이름으로 본다.)
       local echoed = {}
       H.patch(vim.api, "nvim_echo", function(chunks)
         table.insert(echoed, chunks[1][1])
       end)
-      require("work-kb").call("jira")
-      H.ok(echoed[1] and echoed[1]:find("work%-kb%.jira"), "없는 모듈 오류: " .. tostring(echoed[1]))
+      require("work-kb").call({ name = "없는", module = "work-kb.no-such-module", fn = "run" })
+      H.ok(echoed[1] and echoed[1]:find("work%-kb%.no%-such%-module"), "없는 모듈 오류: " .. tostring(echoed[1]))
     end)
     cleanup()
     for name in pairs(package.loaded) do
@@ -180,6 +181,12 @@ describe("keys", function()
       vim.cmd.edit(vim.fn.fnameescape(outside .. "/inbox/밖 메모.md"))
       H.eq(vim.bo.fileformat, vim.split(before, ",")[1], "볼트 밖은 Neovim 기본")
       vim.cmd("bwipeout!")
+      -- 볼트를 따로 설정했으면 코드 루트는 볼트가 아니다 (Emacs work-kb--vault-file-p: vault 또는 root)
+      local in_root = H.repo .. "/tests/nvim/없는 새 메모 " .. tostring(vim.uv.hrtime()) .. ".md"
+      vim.cmd.edit(vim.fn.fnameescape(in_root))
+      H.eq(vim.bo.fileformat, vim.split(before, ",")[1], "볼트가 따로 있으면 코드 루트는 Neovim 기본")
+      vim.cmd("bwipeout!")
+      H.ok(not H.exists(in_root), "파일을 만들지 않는다")
     end)
     cleanup()
     H.ok(ok, tostring(err))
@@ -191,6 +198,87 @@ describe("keys", function()
     H.eq(startup.plugin, 1)
     H.eq(startup.command, true)
     H.eq(startup.loaded, {})
+  end)
+
+  it("비주얼 모드 c·i: 선택 글로 capture.open·capture.inbox (Emacs region 미리 넣기)", function()
+    local saved = package.loaded["work-kb.capture"]
+    local calls = {}
+    package.loaded["work-kb.capture"] = {
+      open = function(...)
+        table.insert(calls, { "open", select("#", ...), ... })
+      end,
+      inbox = function(...)
+        table.insert(calls, { "inbox", select("#", ...), ... })
+      end,
+      capture = function(...)
+        table.insert(calls, { "capture", select("#", ...), ... })
+      end,
+    }
+    local buf = vim.api.nvim_create_buf(false, true)
+    local ok, err = pcall(function()
+      require("work-kb").setup({ root = H.repo, prefix = "<leader>k", server = { enable = false } })
+      for _, key in ipairs({ "c", "i" }) do
+        local m = vim.fn.maparg("<leader>k" .. key, "x", false, true)
+        H.ok(type(m) == "table" and m.callback, "x 키가 없음: " .. key)
+        H.ok(m.desc:find("^work%-kb: "), "설명: " .. tostring(m.desc))
+      end
+      vim.api.nvim_set_current_buf(buf)
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "앞 가나다 😀 뒤", "둘째 줄" })
+      -- 글자 단위: '가'부터 '😀'까지 (여러 바이트 글자를 통째로)
+      vim.api.nvim_win_set_cursor(0, { 1, #"앞 " })
+      vim.api.nvim_feedkeys(vim.keycode("v4l<leader>kc"), "x", false)
+      H.eq(calls[1], { "open", 1, "가나다 😀" })
+      H.eq(vim.fn.mode(), "n", "비주얼 모드를 빠져나온다")
+      -- 줄 단위: 두 줄 (끝 줄바꿈 없음)
+      vim.api.nvim_win_set_cursor(0, { 1, 0 })
+      vim.api.nvim_feedkeys(vim.keycode("Vj<leader>ki"), "x", false)
+      H.eq(calls[2], { "inbox", 1, "앞 가나다 😀 뒤\n둘째 줄" })
+      H.eq(vim.fn.mode(), "n")
+      -- 보통 모드 c는 그대로 capture() (인수 없음)
+      vim.api.nvim_feedkeys(vim.keycode("<leader>kc"), "x", false)
+      H.eq(calls[3], { "capture", 0 })
+      H.eq(#calls, 3)
+      -- 접두 키를 옮기면 x 키도 옮긴다; 사용자가 덮어쓴 x 키는 남긴다
+      vim.keymap.set("x", "<leader>ki", function() end, { desc = "사용자 x 매핑" })
+      require("work-kb").setup({ root = H.repo, prefix = "<F8>", server = { enable = false } })
+      H.eq(vim.fn.maparg("<leader>kc", "x"), "", "옛 x 키가 남음")
+      H.eq(vim.fn.maparg("<leader>ki", "x", false, true).desc, "사용자 x 매핑")
+      H.ok(vim.fn.maparg("<F8>c", "x", false, true).callback, "새 x 키")
+      H.ok(vim.fn.maparg("<F8>i", "x", false, true).callback, "새 x 키")
+      pcall(vim.keymap.del, "x", "<leader>ki")
+      require("work-kb").setup({ root = H.repo, prefix = false, server = { enable = false } })
+      H.eq(vim.fn.maparg("<F8>c", "x"), "")
+      H.eq(vim.fn.maparg("<F8>i", "x"), "")
+    end)
+    package.loaded["work-kb.capture"] = saved
+    cleanup()
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    H.ok(ok, tostring(err))
+  end)
+
+  it("비주얼 모드 키의 사용자 오류도 문구만 보인다", function()
+    local saved = package.loaded["work-kb.capture"]
+    package.loaded["work-kb.capture"] = {
+      open = function()
+        require("work-kb.ui").fail("빈 내용입니다 (취소: C-c C-k)")
+      end,
+    }
+    local echoed = {}
+    H.patch(vim.api, "nvim_echo", function(chunks)
+      table.insert(echoed, chunks[1])
+    end)
+    local buf = vim.api.nvim_create_buf(false, true)
+    local ok, err = pcall(function()
+      require("work-kb").setup({ root = H.repo, prefix = "<leader>k", server = { enable = false } })
+      vim.api.nvim_set_current_buf(buf)
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "글" })
+      vim.api.nvim_feedkeys(vim.keycode("v<leader>kc"), "x", false)
+      H.eq(echoed[#echoed], { "빈 내용입니다 (취소: C-c C-k)", "ErrorMsg" })
+    end)
+    package.loaded["work-kb.capture"] = saved
+    cleanup()
+    pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    H.ok(ok, tostring(err))
   end)
 
   it("사용자 오류는 traceback 없이 문구만 보인다", function()
