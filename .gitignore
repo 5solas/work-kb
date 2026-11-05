@@ -12,6 +12,12 @@ __pycache__/
 .pytest_cache/
 .obsidian/
 
+# 실행 중 생기는 임시·백업 파일 (atomic_write 임시 .<이름>.<pid>.tmp, Emacs 백업·자동 저장·잠금)
+.*.tmp
+*~
+\#*\#
+.#*
+
 # 앱이 생성하는 볼트 내용 (코드 저장소와 분리, docs/DECISIONS.md 참고)
 /daily/*.md
 /inbox/*

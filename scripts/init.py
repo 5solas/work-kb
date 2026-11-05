@@ -17,7 +17,12 @@
    프로필에 기록. 보조(fallback) 프로필도 같은 절차(선택). 회사 환경에서 공개 호스트면 아무것도 보내기 전에
    거부한다(`llm_client.assert_host_allowed`, 종료 5). 키는 자격 증명 저장소 work-kb/llm(보조 프로필이
    다른 키면 work-kb/llm-<이름>)에 저장하고 설정에는 참조만 쓴다.
-5. 확인된 PAT·키를 자격 증명 저장소에 저장(같은 값이면 건너뜀) → config.local.yaml 저장
+5. 스케줄(§6.11 5단계, Phase 6, `kb.py init`에서만): 등록 명령을 만들지 묻고(기본값 y) → `schedule.generate`가
+   `.state/schedule/*.xml`(UTF-16)을 쓰고 `schtasks /Create …` 명령을 출력한다. **실행하지 않는다**(사용자가 직접,
+   docs/SCHEDULING.md). environment가 company면 ingest·compile 작업은 꺼진 상태(D59). 비대화형이면 묻지 않고
+   `kb.py schedule` 안내만 한다. 이 질문에서 입력이 끝나거나(EOF) XML을 쓰지 못해도 취소하지 않고 건너뛴다
+   (설정 파일을 바꾸지 않는 마지막 선택 단계라서).
+6. 확인된 PAT·키를 자격 증명 저장소에 저장(같은 값이면 건너뜀) → config.local.yaml 저장
    (config.save_local, 비밀값은 쓰지 않는다) → doctor 실행, 그 종료 코드를 돌려준다.
 
 재실행하면 기존 config.local.yaml 값이 기본값이다. 입력이 끝나면(EOF) 취소하고 종료 1, 설정 파일과
@@ -1128,6 +1133,38 @@ def save_detected(config_dir: Path | str, name: str, detected: Any) -> None:
     config.save_local(config_dir, data)
 
 
+# ---------------------------------------------------------------- 단계: 스케줄
+
+
+def step_schedule(wizard: Wizard, data: dict) -> None:
+    """§6.11 5단계: 작업 스케줄러 등록 명령을 만든다. schtasks는 실행하지 않는다(사용자가 직접)."""
+    wizard.out("\n[5] 스케줄")
+    if not wizard.interactive:
+        wizard.out("  비대화형이라 건너뜁니다. 등록 명령은 kb.py schedule로 만드세요 (docs/SCHEDULING.md)")
+        return
+    try:
+        wanted = _confirm(wizard, "작업 스케줄러 등록 명령을 만들까요? (y/n, 명령만 출력하고 실행하지 않음)", "y")
+    except (EOFError, Cancelled):
+        # 설정 파일을 바꾸지 않는 마지막 선택 단계라, 입력이 끝나도 앞 단계의 설정은 저장한다
+        wizard.out("  입력이 끝나 스케줄 단계를 건너뜁니다. 나중에 kb.py schedule로 만들 수 있습니다")
+        return
+    if not wanted:
+        wizard.out("  건너뜁니다. 나중에 kb.py schedule로 만들 수 있습니다 (docs/SCHEDULING.md)")
+        return
+    import schedule
+
+    company = _environment_of(data) == "company"
+    vault = Path(wizard.cfg.root) if wizard.cfg is not None else wizard.root
+    try:
+        schedule.generate(
+            root=wizard.root, vault=vault, company=company, out=lambda line: wizard.out(f"  {line}" if line else "")
+        )
+    except (core.KbError, OSError) as exc:
+        wizard.out(f"  XML을 쓰지 못했습니다: {core.redact(str(exc))}. 나중에 kb.py schedule로 다시 만드세요")
+        return
+    wizard.out("  위 schtasks 명령은 실행하지 않았습니다. 확인한 뒤 직접 실행하세요 (docs/SCHEDULING.md)")
+
+
 FULL_STEPS = [step_environment, step_jira, step_confluence, step_llm]
 SECTION_STEPS = {"jira": [step_jira], "confluence": [step_confluence_section], "llm": [step_llm_section]}
 
@@ -1173,8 +1210,12 @@ def run_wizard(
     ask_secret: AskSecret | None = None,
     out: Callable[[str], None] | None = None,
     run_doctor: bool = True,
+    schedule_step: bool = False,
 ) -> int:
-    """마법사 전체 또는 한 구역을 돌리고 config.local.yaml을 저장한다. doctor를 돌리면 그 종료 코드."""
+    """마법사 전체 또는 한 구역을 돌리고 config.local.yaml을 저장한다. doctor를 돌리면 그 종료 코드.
+
+    schedule_step: 전체 마법사 끝에 스케줄 단계(step_schedule)를 붙인다. `kb.py init`은 켜고 부른다.
+    """
     from lib import config
 
     cfg = config.load(root)
@@ -1183,7 +1224,10 @@ def run_wizard(
     existing = read_local(config_dir)
     if section is not None and not cfg.local_exists:
         raise core.ConfigError(f"{local_path}이(가) 없습니다. 먼저 `python scripts/kb.py init`으로 전체 설정을 하세요")
-    steps = SECTION_STEPS[section] if section is not None else FULL_STEPS
+    if section is not None:
+        steps = SECTION_STEPS[section]
+    else:
+        steps = FULL_STEPS + ([step_schedule] if schedule_step else [])
     say = out or print
     wizard = Wizard(config_dir, ask=ask, ask_secret=ask_secret, out=say, steps=steps, values=values, cfg=cfg)
     if cfg.local_exists:
@@ -1361,7 +1405,7 @@ def main(argv: list[str]) -> int:
     if args.non_interactive != args.from_env:
         raise core.ConfigError("--non-interactive와 --from-env는 함께 씁니다 (KB_INIT_* 환경변수에서 값을 읽음)")
     values = {name: os.environ.get(name, "") for name in ENV_FIELDS.values()} if args.from_env else None
-    return run_wizard(args.root, section=args.section, values=values, out=_flush_print)
+    return run_wizard(args.root, section=args.section, values=values, out=_flush_print, schedule_step=True)
 
 
 if __name__ == "__main__":

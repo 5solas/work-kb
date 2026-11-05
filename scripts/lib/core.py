@@ -112,6 +112,19 @@ def read_argv_stdin() -> list[str]:
     return data
 
 
+def report_error(message: str) -> None:
+    """stderr가 있으면 거기에, 없으면(pythonw.exe 스케줄 작업) `.state/logs/kb.log`에 남긴다."""
+    stream = getattr(sys, "stderr", None)
+    if stream is not None:
+        print(message, file=stream)
+        return
+    root = os.environ.get("KB_ROOT") or os.getcwd()
+    try:
+        get_logger(root).error(message)
+    except Exception:  # 로그조차 못 쓰면 조용히 종료 코드만 남긴다
+        pass
+
+
 def run_main(main: Callable[[list[str]], int | None], argv: list[str] | None = None) -> NoReturn:
     """스크립트 진입점. KbError를 한국어 한 줄과 종료 코드로 바꾼다."""
     setup_stdio()
@@ -122,10 +135,10 @@ def run_main(main: Callable[[list[str]], int | None], argv: list[str] | None = N
         code = main(args)
     except KbError as exc:
         message = redact(str(exc)) or exc.__class__.__name__
-        print(f"오류: {message}", file=sys.stderr)
+        report_error(f"오류: {message}")
         code = exc.exit_code
     except KeyboardInterrupt:
-        print("중단됨", file=sys.stderr)
+        report_error("중단됨")
         code = 1
     sys.exit(int(code or 0))
 

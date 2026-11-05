@@ -65,9 +65,7 @@ compile과 ingest는 daily, inbox, raw를 바이트 그대로 둔다. 그 밖의
 - people 페이지에 개인 정보를 적지 않는다.
 - 파일을 손으로 편집하지 않는다. 도구 명령만 쓴다.
 
-`KB_AGENT=1`이면 외부 쓰기와 설정 변경은 거부된다.
-- 거부: `act` 쓰기, `flush`, `push`, `demo`, `init`, `proposals accept`, `doctor --redetect`
-- 허용: `status`, `search`, `today`, `link`, `sync`, `compile`, `ingest`, `lint`, `act list`, `act transitions`(읽기)
+`KB_AGENT=1`이면 외부 쓰기와 설정 변경은 거부된다(종료 7). 허용·거부 목록은 `## 명령`에 있다.
 
 ## 태그
 
@@ -99,13 +97,38 @@ B단계(compile·ingest)의 입력과 출력. 출력은 **JSON 객체 하나만*
 
 ## 명령
 
+세션을 시작할 때 `KB_AGENT=1`을 설정한다(PowerShell: `$env:KB_AGENT = "1"`). 명령은 저장소 루트에서 `python scripts/kb.py <명령>`으로 부른다. 전체 목록은 `python scripts/kb.py --help`, 옵션은 `python scripts/kb.py <명령> --help`.
+
+에이전트가 쓸 수 있는 명령:
+
 ```
 python scripts/kb.py status
-python scripts/kb.py sync
+python scripts/kb.py search "..."
+python scripts/kb.py today
+python scripts/kb.py today --check-done
 python scripts/kb.py link
+python scripts/kb.py sync
 python scripts/kb.py compile
 python scripts/kb.py ingest
 python scripts/kb.py lint
-python scripts/kb.py today
-python scripts/kb.py search "..."
+python scripts/kb.py doctor
+python scripts/kb.py act list
+python scripts/kb.py act transitions KB-12
+python scripts/kb.py proposals list
 ```
+
+| 명령 | 하는 일 |
+|---|---|
+| `status` | 마지막 동기화, 대기 outbox, 미처리 제안·이미지, 프로필별 연결·탐지, environment. 아무것도 쓰지 않는다 |
+| `search "..."` | daily·inbox·wiki·jira에서 낱말 찾기(`--in`, `--limit`, `--json`) |
+| `today` | 오늘 daily 뼈대와 `today`·`carryover` 구역. `--check-done`은 완료 전환 제안만 출력(읽기) |
+| `link` | A단계. Jira 키·`@이름`을 엔티티 페이지 `mentions`에 엮는다(LLM 없음) |
+| `sync` | Jira 일감을 `jira/`로 받는다(Jira 읽기만) |
+| `compile` | B단계 편찬(LLM). LLM이 없으면 조용히 건너뛴다 |
+| `ingest` | B단계 이미지 읽기(비전 LLM) |
+| `lint` | C단계 점검 보고 `wiki/_lint.md` |
+| `doctor` | 연결·환경 점검(`--redetect`는 거부) |
+| `act list`, `act transitions KEY` | outbox 보기, 가능한 전환 보기(읽기) |
+| `proposals list` | 주제 제안 보기 |
+
+`KB_AGENT=1`에서 거부되는 명령(사람만 실행한다): `init`, `act`의 쓰기(`comment`, `transition`, `assign`, `worklog`, `create`, `promote`, `flush`), `proposals accept`, `push`, `demo`, `schedule`, `wheels`, `doctor --redetect`.

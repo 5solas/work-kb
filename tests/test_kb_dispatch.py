@@ -171,6 +171,32 @@ def test_preflight_python_315_adds_pyyaml_hint(monkeypatch, capsys):
     assert "Python 3.15에는 PyYAML wheel이 아직 없습니다" in err
 
 
+def test_preflight_without_stderr_writes_log(monkeypatch, tmp_path):
+    # pythonw.exe(스케줄 작업)에서는 sys.stderr가 None이다. 메시지는 .state/logs/kb.log로 간다.
+    _hide_modules(monkeypatch, "yaml")
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setattr(kb, "HERE", tmp_path / "scripts")
+    with pytest.raises(SystemExit) as info:
+        kb._preflight()
+    assert info.value.code == 4
+    log = (tmp_path / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+    assert "pip install -r requirements.txt" in log
+
+
+def test_run_main_without_stderr_logs_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "stderr", None)
+    monkeypatch.setenv("KB_ROOT", str(tmp_path))
+
+    def main(argv):
+        raise core.ConfigError("설정이 없습니다")
+
+    with pytest.raises(SystemExit) as info:
+        core.run_main(main, [])
+    assert info.value.code == 4
+    log = (tmp_path / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+    assert "설정이 없습니다" in log
+
+
 def test_preflight_old_python_exit_4(monkeypatch, capsys):
     monkeypatch.setattr(sys, "version_info", (3, 12, 9, "final", 0))
     with pytest.raises(SystemExit) as info:

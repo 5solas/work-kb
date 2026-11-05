@@ -20,10 +20,25 @@ if str(HERE) not in sys.path:
 _REQUIRED = (("yaml", "pyyaml"), ("requests", "requests"), ("keyring", "keyring"), ("markdown", "markdown"), ("PIL", "pillow"))
 
 
+def _err(text: str) -> None:
+    """stderr가 없으면(pythonw.exe) 저장소의 .state/logs/kb.log에 적는다. 표준 라이브러리만 쓴다."""
+    stream = getattr(sys, "stderr", None)
+    if stream is not None:
+        stream.write(text)
+        return
+    try:
+        log_dir = HERE.parent / ".state" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / "kb.log", "a", encoding="utf-8") as fh:
+            fh.write(text if text.endswith("\n") else text + "\n")
+    except OSError:
+        pass
+
+
 def _preflight() -> None:
     """표준 라이브러리만으로 Python 버전과 의존성을 확인한다(D02). 실패하면 종료 4."""
     if sys.version_info < (3, 13):
-        sys.stderr.write(f"오류: Python 3.13 이상이 필요합니다 (현재 {sys.version.split()[0]}).\n")
+        _err(f"오류: Python 3.13 이상이 필요합니다 (현재 {sys.version.split()[0]}).\n")
         sys.exit(4)
     missing = [pkg for mod, pkg in _REQUIRED if importlib.util.find_spec(mod) is None]
     if missing:
@@ -32,7 +47,7 @@ def _preflight() -> None:
         lines.append("  오프라인: .venv\\Scripts\\pip install --no-index --find-links wheels -r requirements.txt")
         if sys.version_info >= (3, 15) and "pyyaml" in missing:
             lines.append("  Python 3.15에는 PyYAML wheel이 아직 없습니다. Python 3.14(또는 3.13)로 venv를 만드세요.")
-        sys.stderr.write("\n".join(lines) + "\n")
+        _err("\n".join(lines) + "\n")
         sys.exit(4)
 
 
