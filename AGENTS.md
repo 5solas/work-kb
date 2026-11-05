@@ -66,7 +66,7 @@ compile과 ingest는 daily, inbox, raw를 바이트 그대로 둔다. 그 밖의
 - 파일을 손으로 편집하지 않는다. 도구 명령만 쓴다.
 
 `KB_AGENT=1`이면 외부 쓰기와 설정 변경은 거부된다.
-- 거부: `act` 쓰기, `flush`, `push`, `init`, `proposals accept`, `doctor --redetect`
+- 거부: `act` 쓰기, `flush`, `push`, `demo`, `init`, `proposals accept`, `doctor --redetect`
 - 허용: `status`, `search`, `today`, `link`, `sync`, `compile`, `ingest`, `lint`, `act list`, `act transitions`(읽기)
 
 ## 태그

@@ -1,7 +1,8 @@
 """상태 요약 (`kb.py status`).
 
 한 줄에 한 항목, 한국어. 네트워크·비밀값 저장소는 쓰지 않고 파일만 읽는다. 아무것도 쓰지 않는다.
-항목: 환경, config.local.yaml, 오늘 daily, 마지막 동기화(.state/sync.json), outbox 대기·실패,
+항목: 환경, config.local.yaml, 오늘 daily, 마지막 동기화(.state/sync.json),
+마지막 Confluence 게시(.state/confluence.json의 가장 최근 pushed_at과 게시한 쪽 수), outbox 대기·실패,
 미처리 제안(wiki/_proposals.md), 미처리 이미지(사이드카 없는 inbox 이미지와 daily에 임베드된
 raw/assets 이미지)와 ingest가 포기한 이미지(.state/images.json의 skipped[sha].count >= 3),
 포기한 편찬 단위(.state/compile.json의 gave_up), LLM 프로필과 탐지 결과
@@ -14,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,6 +28,7 @@ PENDING_VALUE = "pending"  # init.DETECT_PENDING과 같은 값(init을 가져오
 DETECT_PENDING = "탐지 대기"  # detected: "pending"(init --dev가 키 없이 미뤄 둔 경우) → kb.py doctor --redetect
 COMPILE_LEDGER = "compile"  # .state/compile.json
 IMAGES_LEDGER = "images"  # .state/images.json (ingest가 쓴다)
+CONFLUENCE_LEDGER = "confluence"  # .state/confluence.json (kb.py push가 쓴다)
 IMAGE_GIVE_UP_AFTER = 3  # ingest의 포기 규칙: skipped[sha].count >= 3
 NONE_REASONING_FLOOR = 2048  # llm_client.NONE_REASONING_FLOOR와 같은 값(D41, 가져오지 않으려고 따로 둔다)
 _LIST_ITEM = re.compile(r"^(?:[-*+] |\d+[.)] )")
@@ -51,6 +54,39 @@ def last_sync(cfg: Config, problems: list[str]) -> str | None:
         return None
     value = state.get("last_sync") if isinstance(state, Mapping) else None
     return str(value) if value else None
+
+
+def _push_time(value: Any) -> float | None:
+    """`pushed_at`(ISO 8601, 시간대 포함)을 비교용 초로. 읽지 못하면 None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        moment = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return moment.timestamp() if moment.tzinfo is not None else None
+
+
+def confluence_pushes(cfg: Config, problems: list[str]) -> dict[str, Any]:
+    """`.state/confluence.json`({rel: {page_id, version, sha256, pushed_at}})의 게시 쪽 수와 가장 최근 pushed_at.
+
+    파일이 없거나 비면 {last_push: None, pages: 0}. 깨지면 주의에 올린다. 모양이 다른 항목은 세지 않는다.
+    """
+    info: dict[str, Any] = {"last_push": None, "pages": 0}
+    try:
+        state = core.load_state(cfg.root, CONFLUENCE_LEDGER)
+    except (core.KbError, OSError) as exc:
+        problems.append(f".state/confluence.json을 읽지 못했습니다 ({exc})")
+        return info
+    if not isinstance(state, Mapping):
+        return info
+    entries = [entry for entry in state.values() if isinstance(entry, Mapping)]
+    info["pages"] = len(entries)
+    stamps = [str(e["pushed_at"]) for e in entries if isinstance(e.get("pushed_at"), str) and e["pushed_at"].strip()]
+    if stamps:
+        timed = [(seconds, s) for seconds, s in ((_push_time(s), s) for s in stamps) if seconds is not None]
+        info["last_push"] = max(timed)[1] if timed else max(stamps)  # 시각을 못 읽으면 문자열 순서로
+    return info
 
 
 def outbox_counts(cfg: Config, problems: list[str]) -> dict[str, int]:
@@ -273,7 +309,7 @@ def lock_holder(root: Path) -> str | None:
 
 
 def collect(cfg: Config) -> dict[str, Any]:
-    """상태 사전. 키: environment, local_config, vault, agent, today, last_sync, outbox,
+    """상태 사전. 키: environment, local_config, vault, agent, today, last_sync, confluence, outbox,
     proposals, images, images_gave_up, compile_gave_up, llm, lock, problems."""
     problems: list[str] = []
     day = core.now(cfg.tz).date()
@@ -285,6 +321,7 @@ def collect(cfg: Config) -> dict[str, Any]:
         "agent": os.environ.get("KB_AGENT") == "1",
         "today": {"date": day.isoformat(), "path": f"daily/{daily.name}", "exists": daily.is_file()},
         "last_sync": last_sync(cfg, problems),
+        "confluence": confluence_pushes(cfg, problems),
         "outbox": outbox_counts(cfg, problems),
         "proposals": pending_proposals(cfg, problems),
         "images": unprocessed_images(cfg),
@@ -309,6 +346,12 @@ def render(info: Mapping[str, Any]) -> list[str]:
     today = info["today"]
     lines.append(f"오늘 daily: {today['path']} " + ("있음" if today["exists"] else "없음 → kb.py today"))
     lines.append(f"마지막 동기화: {info['last_sync'] or '없음'}")
+    pushed = info.get("confluence") or {}
+    pages = pushed.get("pages", 0)
+    if pages:
+        lines.append(f"마지막 Confluence 게시: {pushed.get('last_push') or '시각 기록 없음'} ({pages}쪽)")
+    else:
+        lines.append("마지막 Confluence 게시: 없음")
     outbox = info["outbox"]
     lines.append(f"outbox: 대기 {outbox['pending']}개, 전송 중 {outbox.get('sending', 0)}개, 실패 {outbox['failed']}개")
     lines.append(f"미처리 제안: {info['proposals']}개")

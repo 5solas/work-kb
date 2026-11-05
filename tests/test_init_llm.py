@@ -306,11 +306,12 @@ def jira():
 
 
 def test_full_wizard_llm_step(vault, jira, llm):
-    script = Script(["home", jira.base_url, "1", "", f"{llm.base_url}/v1", "1", "n"], [JIRA_TOKEN, ""])
+    script = Script(["home", jira.base_url, "1", "n", "", f"{llm.base_url}/v1", "1", "n"], [JIRA_TOKEN, ""])  # Confluence는 안 함
     code, said = _wizard(vault, script, section=None)
     assert code == 0, said
     prompts = [p for p, _ in script.asked]
-    assert prompts[3].startswith("LLM을 설정할까요?") and script.asked[3][1] == "y"  # 처음이면 기본값 y
+    assert prompts[3].startswith("Confluence를 설정할까요?")
+    assert prompts[4].startswith("LLM을 설정할까요?") and script.asked[4][1] == "y"  # 처음이면 기본값 y
     assert "[4] LLM" in said and "Phase 4" not in said
     data = _read(vault)
     assert data["confluence"] == {"enabled": False}
@@ -321,10 +322,11 @@ def test_full_wizard_llm_step(vault, jira, llm):
 def test_full_wizard_llm_step_declined_keeps_existing(vault, jira):
     existing_llm = {"enabled": False, "profiles": {"mock": {"base_url": "http://127.0.0.1:9/v1", "model": "mock"}}}
     config.save_local(vault, {**_base(llm_section=existing_llm), "jira": {"base_url": jira.base_url, "project_keys": ["KB"], "pat_ref": "keyring:work-kb/jira"}})
-    script = Script(["", "", "KB", ""], [JIRA_TOKEN])
+    script = Script(["", "", "KB", "n", ""], [JIRA_TOKEN])  # Confluence는 안 함, LLM은 Enter
     code, said = _wizard(vault, script, section=None)
     assert code == 0, said
-    assert script.asked[3][1] == "n"  # 기존 LLM 설정이 있으면 기본값 n
+    assert script.asked[3][0].startswith("Confluence를 설정할까요?")
+    assert script.asked[4][0].startswith("LLM을 설정할까요?") and script.asked[4][1] == "n"  # 기존 LLM 설정이 있으면 기본값 n
     assert "기존 LLM 설정을 그대로 둡니다" in said
     assert _read(vault)["llm"] == existing_llm
 

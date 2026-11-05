@@ -19,6 +19,7 @@ JSON_KEYS = {
     "agent",
     "today",
     "last_sync",
+    "confluence",
     "outbox",
     "proposals",
     "images",
@@ -40,6 +41,13 @@ COMPILE_LEDGER = {
     "decisions": {"daily/2026-11-03.md": {"status": "gave_up", "skips": 3}},
     "entity_summary": {"wiki/projects/KB.md": {"status": "ok"}},
     "_proposals": {"next_id": 2, "items": {"1": {"name": "캐시", "status": "gave_up"}}},
+}
+
+# Confluence 게시 원장(kb.py push가 쓴다): 볼트 상대 경로 → {page_id, version, sha256, pushed_at}.
+# 가장 최근은 시각으로 고른다(+00:00 항목이 문자열로는 앞서도 실제로는 더 늦다)
+CONFLUENCE_LEDGER = {
+    "wiki/projects/KB.md": {"page_id": "1001", "version": 3, "sha256": "a" * 64, "pushed_at": "2026-11-04T18:10:00+09:00"},
+    "wiki/decisions/2026-11.md": {"page_id": "1002", "version": 1, "sha256": "b" * 64, "pushed_at": "2026-11-04T09:30:00+00:00"},
 }
 
 
@@ -79,6 +87,7 @@ def sample(tmp_path):
     (root / ".state").mkdir()
     (root / ".state" / "sync.json").write_text(json.dumps({"last_sync": "2026-11-05T08:45:00+09:00"}), encoding="utf-8")
     (root / ".state" / "compile.json").write_text(json.dumps(COMPILE_LEDGER, ensure_ascii=False), encoding="utf-8")
+    (root / ".state" / "confluence.json").write_text(json.dumps(CONFLUENCE_LEDGER, ensure_ascii=False), encoding="utf-8")
     (root / "jira").mkdir()
     outbox = [
         {"id": "1", "action": "comment", "key": "KB-12", "status": "pending"},
@@ -115,6 +124,7 @@ def test_empty_vault(vault, fake_now, capsys):
         f"볼트: {vault.resolve()}",
         "오늘 daily: daily/2026-11-05.md 없음 → kb.py today",
         "마지막 동기화: 없음",
+        "마지막 Confluence 게시: 없음",
         "outbox: 대기 0개, 전송 중 0개, 실패 0개",
         "미처리 제안: 0개",
         "미처리 이미지: 0개",
@@ -135,6 +145,7 @@ def test_empty_vault_json(vault, fake_now, capsys):
     assert info["environment"] == "company" and info["local_config"] is False and info["agent"] is False
     assert info["today"] == {"date": "2026-11-05", "path": "daily/2026-11-05.md", "exists": False}
     assert info["last_sync"] is None and info["lock"] is None
+    assert info["confluence"] == {"last_push": None, "pages": 0}
     assert info["outbox"] == {"pending": 0, "sending": 0, "failed": 0}
     assert info["proposals"] == 0 and info["images"] == 0 and info["compile_gave_up"] == 0
     assert info["llm"] == {"enabled": False, "fallback_order": ["main", "fallback"], "profiles": {}}
@@ -147,12 +158,13 @@ def test_sample_vault_text(sample, fake_now, run_kb):
     result = run_kb("status", root=sample)
     assert result.returncode == 0, result.stderr
     out = result.stdout.splitlines()
-    assert out[:10] == [
+    assert out[:11] == [
         "환경: home",
         "config.local.yaml: 있음",
         f"볼트: {sample.resolve()}",
         "오늘 daily: daily/2026-11-05.md 있음",
         "마지막 동기화: 2026-11-05T08:45:00+09:00",
+        "마지막 Confluence 게시: 2026-11-04T09:30:00+00:00 (2쪽)",
         "outbox: 대기 2개, 전송 중 1개, 실패 1개",
         "미처리 제안: 2개",
         "미처리 이미지: 4개",  # 픽스처 2개 + 샘플 볼트의 inbox 드롭 1개·daily 임베드 raw/assets 1개
@@ -177,6 +189,7 @@ def test_sample_vault_json_keys(sample, fake_now, run_kb):
     assert info["outbox"] == {"pending": 2, "sending": 1, "failed": 1}
     assert info["images"] == 4 and info["proposals"] == 2
     assert info["compile_gave_up"] == 2
+    assert info["confluence"] == {"last_push": "2026-11-04T09:30:00+00:00", "pages": 2}
     main = info["llm"]["profiles"]["main"]
     assert set(main) == {"model", "host", "public_host", "detected", "detected_summary"}
     assert main["detected"]["context_tokens"] == 262144
@@ -333,6 +346,30 @@ def test_images_gave_up_from_images_ledger(vault, fake_now, capsys):
         assert len(problems) == (1 if broken == "{깨짐" else 0)
     assert status.main(["--root", str(vault)]) == 0
     assert "미처리 이미지: 0개" in capsys.readouterr().out.splitlines()
+
+
+def test_confluence_push_ledger_empty_broken_and_odd(vault, fake_now, capsys):
+    """`.state/confluence.json`: 비면 '없음', 깨지면 주의 한 줄(치명적이지 않음), 모양이 다른 항목은 세지 않는다."""
+    fake_now("2026-11-05T09:00:00+09:00")
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    state = vault / ".state" / "confluence.json"
+    assert status.confluence_pushes(cfg, []) == {"last_push": None, "pages": 0}  # 파일 없음
+    state.write_text("{}", encoding="utf-8")
+    assert status.main(["--root", str(vault)]) == 0
+    assert "마지막 Confluence 게시: 없음" in capsys.readouterr().out.splitlines()
+    odd = {**CONFLUENCE_LEDGER, "wiki/x.md": "이상한 값", "wiki/y.md": {"page_id": "9", "pushed_at": "언제"}}
+    state.write_text(json.dumps(odd, ensure_ascii=False), encoding="utf-8")
+    assert status.confluence_pushes(cfg, []) == {"last_push": "2026-11-04T09:30:00+00:00", "pages": 3}
+    state.write_text("{깨짐", encoding="utf-8")
+    problems: list[str] = []
+    assert status.confluence_pushes(cfg, problems) == {"last_push": None, "pages": 0}
+    assert len(problems) == 1 and problems[0].startswith(".state/confluence.json을 읽지 못했습니다")
+    assert status.main(["--root", str(vault)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "마지막 Confluence 게시: 없음" in out
+    assert any(line.startswith("주의: .state/confluence.json을 읽지 못했습니다") for line in out)
+    assert json.loads(_json_out(vault, capsys))["confluence"] == {"last_push": None, "pages": 0}
 
 
 def _json_out(vault: Path, capsys) -> str:
