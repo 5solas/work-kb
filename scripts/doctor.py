@@ -10,6 +10,8 @@ Python·의존성 점검은 외부 패키지를 가져오기 전에 한다. 외�
 LLM 연결 점검은 프로필마다 `GET {base_url}/models` 한 번이다(D28, 키를 보내 401/403이면 ✗). 보내기 전에
 `llm_client.assert_host_allowed`로 회사 차단을 한 번 더 확인한다.
 Jira가 ✓이면 이어서 서버 버전, sprint 필드(D51), jql_mine·뷰 JQL(maxResults=0, D49)을 lib/jira_client로 확인한다.
+Confluence가 ✓이면 이어서 스페이스(`/rest/api/space?spaceKey=`)와 부모 페이지(`/rest/api/content/{id}`, 같은
+스페이스인지)를 확인한다. push_globs에 맞는 파일 수는 늘 '-'로 알린다(Confluence가 활성일 때).
 
 탐지 재검증(D48): 기록된 `detected`가 있고 연결된 프로필마다 채팅 3회 이하로 확인하고 저장하지 않는다.
 모든 채팅은 `LlmClient`(회사 차단, D44)로, 실제 작업과 같은 방법(기록된 토글·JSON 모드)으로 보낸다.
@@ -110,6 +112,7 @@ class Context:
     # 회사 환경에서는 공개 호스트 검사가 끝까지 돈 뒤에만 LLM을 부른다(D44, 안전 쪽).
     public_check_done: bool = False
     jira_base: str | None = None  # Jira ✓일 때만 채운다. 세부 점검(JQL·sprint·버전)은 이것이 있을 때만 돈다
+    confluence_base: str | None = None  # Confluence ✓일 때만 채운다. 스페이스·부모 페이지 점검은 이것이 있을 때만
     llm_reachable: set[str] = field(default_factory=set)  # /models가 2xx·404로 답한 프로필. 탐지 점검은 이것만
     redetect: bool = False  # --redetect: 탐지 점검 자리에서 다시 탐지해 저장한다
 
@@ -495,10 +498,126 @@ def check_confluence(ctx: Context) -> None:
         if data.get("displayName"):
             shown = f"{shown} ({data['displayName']})"
         ctx.report.ok("Confluence", f"{shown} 으로 연결 ({base})")
+        ctx.confluence_base = base
     elif resp.status_code == 200:
         ctx.report.fail("Confluence", "응답이 JSON이 아닙니다 → base_url이 Confluence 서버 주소인지 확인하세요")
     else:
         ctx.report.fail("Confluence", f"{net.describe_status(resp)} → base_url을 확인하세요 ({base})")
+
+
+_FIX_CONFLUENCE = "kb.py init --section confluence"
+
+
+@check("Confluence 세부")
+def check_confluence_details(ctx: Context) -> None:
+    """Confluence가 활성일 때: (연결됐으면) 스페이스·부모 페이지, 그리고 push_globs에 맞는 파일 수('-')."""
+    cfg = ctx.cfg
+    if cfg is None or not cfg.local_exists or not _truthy(cfg.get("confluence.enabled"), True):
+        return
+    token = ctx.secrets.get("confluence.pat_ref")
+    if ctx.confluence_base and token:
+        conn = _conn(cfg, cfg.get("confluence"))
+        space_key = _confluence_space(ctx, ctx.confluence_base, token, conn)
+        _confluence_parent(ctx, ctx.confluence_base, token, conn, space_key)
+    _confluence_globs(ctx)
+
+
+def _confluence_space(ctx: Context, base: str, token: str, conn: Mapping[str, Any]) -> str | None:
+    """스페이스가 있는지. 있으면 서버가 돌려준 키, 아니면 None."""
+    from urllib.parse import urlencode
+
+    from lib import net
+
+    name = "Confluence 스페이스"
+    raw = ctx.cfg.get("confluence.space_key")
+    key = str(raw).strip() if isinstance(raw, (str, int)) and not isinstance(raw, bool) else ""
+    if not key:
+        ctx.report.fail(name, f"confluence.space_key가 없습니다 → {_FIX_CONFLUENCE}")
+        return None
+    resp, error = _get(f"{base}/rest/api/space?{urlencode({'spaceKey': key})}", token, conn, auth_raises=True)
+    if resp is None:
+        ctx.report.fail(name, error or "알 수 없는 오류")
+        return None
+    if resp.status_code != 200:
+        ctx.report.fail(name, f"{net.describe_status(resp)} → base_url을 확인하세요 ({base})")
+        return None
+    data = _json(resp)
+    results = data.get("results") if isinstance(data, Mapping) else None
+    if not isinstance(results, list):
+        ctx.report.fail(name, "응답이 스페이스 목록이 아닙니다 → base_url이 Confluence 서버 주소인지 확인하세요")
+        return None
+    for item in results:
+        if isinstance(item, Mapping) and str(item.get("key", "")).casefold() == key.casefold():
+            label = str(item.get("key"))
+            if item.get("name"):
+                label += f" ({item['name']})"
+            ctx.report.ok(name, label)
+            return str(item.get("key"))
+    ctx.report.fail(name, f"{key}: 없거나 볼 권한이 없습니다 → {_FIX_CONFLUENCE}로 개인 스페이스를 다시 고르세요")
+    return None
+
+
+def _confluence_parent(ctx: Context, base: str, token: str, conn: Mapping[str, Any], space_key: str | None) -> None:
+    from lib import net
+
+    name = "Confluence 부모 페이지"
+    raw = ctx.cfg.get("confluence.parent_page_id")
+    page_id = str(raw).strip() if raw is not None and not isinstance(raw, bool) else ""
+    if not page_id:
+        ctx.report.info(name, "없음 (스페이스 홈 아래에 만듭니다)")
+        return
+    if not (page_id.isdigit() and page_id.isascii()):
+        ctx.report.fail(name, f"'{page_id}'은(는) 숫자 페이지 ID가 아닙니다 → {_FIX_CONFLUENCE}")
+        return
+    resp, error = _get(f"{base}/rest/api/content/{page_id}?expand=space", token, conn, auth_raises=True)
+    if resp is None:
+        ctx.report.fail(name, error or "알 수 없는 오류")
+        return
+    if resp.status_code == 404:
+        ctx.report.fail(name, f"{page_id}: 없거나 볼 권한이 없습니다 → {_FIX_CONFLUENCE}로 다시 고르거나 비우세요")
+        return
+    data = _json(resp)
+    if resp.status_code != 200 or not isinstance(data, Mapping):
+        ctx.report.fail(name, f"{page_id}: {net.describe_status(resp)} → base_url을 확인하세요 ({base})")
+        return
+    space = data.get("space") if isinstance(data.get("space"), Mapping) else {}
+    where = space.get("key")
+    if where and space_key and str(where).casefold() != space_key.casefold():
+        ctx.report.fail(name, f"{page_id}는 스페이스 {where}의 페이지입니다 ({space_key}가 아님) → {_FIX_CONFLUENCE}")
+        return
+    ctx.report.ok(name, f"{data.get('title') or '?'} ({page_id})")
+
+
+def push_glob_files(cfg: Any) -> tuple[list[str], list[str]]:
+    """(push_globs 목록, 맞는 파일의 볼트 상대 경로 목록)."""
+    raw = cfg.get("confluence.push_globs")
+    if isinstance(raw, str):
+        raw = [raw]
+    globs = [str(g).strip() for g in raw if isinstance(g, str) and g.strip()] if isinstance(raw, (list, tuple)) else []
+    root = Path(cfg.root)
+    found: set[str] = set()
+    for pattern in globs:
+        try:
+            matches = list(root.glob(pattern.replace("\\", "/")))
+        except (ValueError, NotImplementedError, OSError):
+            continue
+        for path in matches:
+            if path.is_file():
+                found.add(path.relative_to(root).as_posix())
+    return globs, sorted(found)
+
+
+def _confluence_globs(ctx: Context) -> None:
+    name = "Confluence push_globs"
+    globs, files = push_glob_files(ctx.cfg)
+    if not globs:
+        ctx.report.info(name, "비어 있습니다. 푸시할 파일이 없습니다 (config.yaml의 confluence.push_globs)")
+        return
+    shown = ", ".join(globs)
+    if files:
+        ctx.report.info(name, f"{len(files)}개 파일 ({shown}). 푸시는 kb.py push로 직접 합니다")
+    else:
+        ctx.report.info(name, f"맞는 파일이 없습니다 ({shown}). 위키 페이지가 생기면 푸시할 수 있습니다")
 
 
 def _model_ids(data: Any) -> list[str] | None:
@@ -1022,6 +1141,7 @@ CHECKS: list[Checker] = [
     check_jira,
     check_jira_details,
     check_confluence,
+    check_confluence_details,
     check_llm,
     check_detected,
     check_write,

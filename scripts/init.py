@@ -5,7 +5,12 @@
 2. Jira: base_url → PAT(가려서 입력, 메모리에만) → `/myself` 확인 →
    `/project` 목록에서 번호·키로 고르기 → project_keys. sprint 필드를 찾아 jira.sprint_field에 적고(D51),
    jql_mine·뷰 JQL을 maxResults=0으로 확인한다(D49, 실패해도 저장은 한다).
-3. Confluence 단계는 Phase 5에서 더한다(지금은 안내만).
+3. Confluence(§6.11 3단계, 기본 사용, D59): 설정할지 묻고(처음이면 기본값 y) → base_url → PAT(가려서,
+   메모리에만) → `/rest/api/user/current`로 확인(익명이면 거부) → 개인 스페이스 자동 탐지(D55:
+   `/rest/api/space?spaceKey=~<username>`, 다음 `~<userKey>`, 없으면 `type=personal` 목록에서 번호로 고르기.
+   목록은 남의 개인 스페이스일 수 있어 기본값 없이 고르게 한다) → 부모 페이지(선택, 숫자 ID 또는 pageId=가 든
+   주소. `GET /rest/api/content/{id}`로 같은 스페이스의 페이지인지 확인. 비우면 스페이스 홈). `enabled: true`로
+   쓴다. 푸시는 자동으로 하지 않는다(`kb.py push`, D59). 리디렉션은 따라가지 않는다.
 4. LLM(§6.11 4단계): 설정할지 묻고 → main: 주소 → API 키(가려서, 없으면 Enter) → `GET /models` 목록에서
    번호로 고르거나 모델 이름 입력 → `llm_detect.detect`(POST 10회 이하) → 탐지 결과(`detected`)를 보여 주고
    프로필에 기록. 보조(fallback) 프로필도 같은 절차(선택). 회사 환경에서 공개 호스트면 아무것도 보내기 전에
@@ -18,12 +23,15 @@
 자격 증명 저장소는 그대로다. 인증·네트워크 실패도 저장된 PAT·키를 바꾸지 않는다.
 
 옵션
-- `--section jira|llm`: 기존 설정 위에서 그 단계만. confluence는 Phase 5 안내(종료 4).
+- `--section jira|confluence|llm`: 기존 설정 위에서 그 단계만.
 - `--redetect`: LLM 탐지만 다시 해서 저장한다(`doctor --redetect`와 같다, D48).
 - `--non-interactive --from-env`: 묻지 않고 KB_INIT_ENVIRONMENT, KB_INIT_JIRA_URL, KB_INIT_JIRA_PAT,
-  KB_INIT_JIRA_PROJECTS(쉼표 목록, 키 또는 번호), KB_INIT_LLM_URL, KB_INIT_LLM_MODEL, KB_INIT_LLM_KEY를
-  읽는다. 비어 있으면 기존 값, 그것도 없으면 종료 4. 전체 마법사에서 KB_INIT_LLM_URL이 비면 LLM 단계는
-  건너뛴다(기존 설정 유지). 비대화형은 main 프로필만 설정한다.
+  KB_INIT_JIRA_PROJECTS(쉼표 목록, 키 또는 번호), KB_INIT_CONFLUENCE_URL, KB_INIT_CONFLUENCE_PAT,
+  KB_INIT_CONFLUENCE_SPACE(스페이스 키 또는 type=personal 목록 번호), KB_INIT_CONFLUENCE_PARENT(페이지 ID,
+  '-'면 없음), KB_INIT_LLM_URL, KB_INIT_LLM_MODEL, KB_INIT_LLM_KEY를 읽는다. 비어 있으면 기존 값, 그것도
+  없으면 종료 4(스페이스는 자동 탐지가 기존 값보다 앞서고, 부모 페이지는 없어도 된다). 전체 마법사에서
+  KB_INIT_CONFLUENCE_URL이 비면 Confluence 단계를, KB_INIT_LLM_URL이 비면 LLM 단계를 건너뛴다(기존 설정 유지,
+  Confluence 구역이 없으면 `enabled: false`). 비대화형은 main 프로필만 설정한다.
 
 `--dev` (D45)
 - `config.local.example.yaml`의 `home` 블록을 그대로 읽는다. 코드에는 LLM 주소를 두지 않는다.
@@ -51,10 +59,10 @@ CODE_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_NAME = "config.local.example.yaml"
 SERVICE = "work-kb"
 DEV_TOKEN = "mock-token"  # 모의 서버용 가짜 PAT. 비밀값이 아니다
-SECTION_PHASE_MESSAGES = {
-    "confluence": "Confluence 설정(--section confluence)은 Phase 5에서 추가됩니다.",
-}
 MAX_TRIES = 3
+HTTP_TIMEOUT = 30  # Confluence 확인 호출(GET) 시간 제한(초)
+SPACE_PAGE = 25  # /rest/api/space 한 번에 받는 수(서버 기본값과 같다)
+SPACE_LIST_MAX = 100  # type=personal 목록은 이만큼만 보여 준다(그 밖은 키로 입력)
 LLM_KEY_NAME = "llm"  # 자격 증명 저장소 work-kb/llm (main 키)
 DETECT_PENDING = "pending"  # --dev에서 키가 없거나 탐지가 실패했을 때 detected에 쓰는 값
 
@@ -64,6 +72,10 @@ ENV_FIELDS = {
     "jira.base_url": "KB_INIT_JIRA_URL",
     "jira.pat": "KB_INIT_JIRA_PAT",
     "jira.projects": "KB_INIT_JIRA_PROJECTS",
+    "confluence.url": "KB_INIT_CONFLUENCE_URL",
+    "confluence.pat": "KB_INIT_CONFLUENCE_PAT",
+    "confluence.space": "KB_INIT_CONFLUENCE_SPACE",
+    "confluence.parent": "KB_INIT_CONFLUENCE_PARENT",
     "llm.url": "KB_INIT_LLM_URL",
     "llm.model": "KB_INIT_LLM_MODEL",
     "llm.key": "KB_INIT_LLM_KEY",
@@ -283,11 +295,11 @@ def _existing_keys(jira: Mapping[str, Any]) -> list[str]:
     return [str(x).strip().upper() for x in raw if isinstance(x, (str, int)) and not isinstance(x, bool) and str(x).strip()]
 
 
-def _conn(wizard: Wizard, jira: Mapping[str, Any]) -> dict[str, Any]:
-    """연결 설정(ca_bundle·verify·trust_env·proxies). 상대 ca_bundle은 설정 폴더 기준."""
+def _conn(wizard: Wizard, jira: Mapping[str, Any], name: str = "jira") -> dict[str, Any]:
+    """연결 설정(ca_bundle·verify·trust_env·proxies). 상대 ca_bundle은 설정 폴더 기준. name은 설정 구역."""
     merged: dict[str, Any] = {}
-    if wizard.cfg is not None and isinstance(wizard.cfg.get("jira"), Mapping):
-        merged.update(wizard.cfg.get("jira"))
+    if wizard.cfg is not None and isinstance(wizard.cfg.get(name), Mapping):
+        merged.update(wizard.cfg.get(name))
     merged.update(jira)
     conn = {k: merged[k] for k in ("ca_bundle", "verify", "trust_env", "proxies") if merged.get(k) is not None}
     ca = conn.get("ca_bundle")
@@ -480,18 +492,326 @@ def step_jira(wizard: Wizard, data: dict) -> None:
         _validate_jql(wizard, client)
 
 
-# ---------------------------------------------------------------- 단계: 이후 Phase
+# ---------------------------------------------------------------- 단계: Confluence
+
+_PAGE_ID_IN_URL = re.compile(r"[?&]pageId=(\d+)")
+_NO_PARENT = frozenset({"-", "없음", "none"})
 
 
-def step_confluence_later(wizard: Wizard, data: dict) -> None:
-    """Confluence 단계 자리. Phase 5 전에는 안내만 한다."""
-    wizard.out("\n[3] Confluence")
-    wizard.out("  " + SECTION_PHASE_MESSAGES["confluence"])
-    if "confluence" not in data:
-        data["confluence"] = {"enabled": False}
-        wizard.out("  지금은 비활성(enabled: false)으로 둡니다")
+class ConfluenceProbe:
+    """마법사용 Confluence 확인 호출(GET만). 리디렉션은 따라가지 않는다.
+
+    401/403은 net이 AuthError로 바꾼다. 3xx는 ConfigError, 5xx는 NetworkError, 그 밖의 실패는 KbError.
+    """
+
+    def __init__(self, base_url: str, pat: str, *, conn: Mapping[str, Any] | None = None) -> None:
+        from lib import net
+
+        self.base_url = base_url.rstrip("/")
+        self.session = net.session_for(conn or {}, pat)
+
+    def close(self) -> None:
+        self.session.close()
+
+    def __enter__(self) -> "ConfluenceProbe":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.close()
+
+    def get(self, path: str, params: Mapping[str, Any] | None = None, *, missing_ok: bool = False) -> Any:
+        from lib import net
+
+        url = self.base_url + path
+        resp = net.request(self.session, "GET", url, params=params, timeout=HTTP_TIMEOUT, auth_raises=True, allow_redirects=False)
+        with resp:
+            status = resp.status_code
+            if 300 <= status < 400:
+                raise core.ConfigError(
+                    f"Confluence가 다른 주소로 보냅니다 ({net.describe_status(resp)}). base_url을 최종 주소로 쓰세요"
+                )
+            if status == 404 and missing_ok:
+                return None
+            if status >= 500:
+                raise core.NetworkError(f"Confluence 서버 오류입니다 ({status}, {path}). 잠시 뒤 다시 시도하세요")
+            if not 200 <= status < 300:
+                text = " ".join((resp.text or "").split())[:120]
+                raise core.KbError(core.redact(f"Confluence 요청이 실패했습니다 ({status}, {path}): {text}"))
+            try:
+                return resp.json()
+            except ValueError:
+                raise core.KbError(
+                    f"Confluence 응답이 JSON이 아닙니다 ({path}). base_url이 웹 화면이 아니라 Confluence 서버 주소인지 확인하세요"
+                ) from None
+
+    def current_user(self) -> dict:
+        data = self.get("/rest/api/user/current")
+        if not isinstance(data, Mapping) or data.get("type") == "anonymous" or not data.get("username"):
+            raise core.AuthError("Confluence가 익명 사용자로 응답했습니다. PAT를 확인하세요")
+        return dict(data)
+
+    def space(self, key: str) -> dict | None:
+        """키가 정확히 같은 스페이스(대소문자 무시). 없거나 볼 수 없으면 None."""
+        data = self.get("/rest/api/space", {"spaceKey": key})
+        results = data.get("results") if isinstance(data, Mapping) else None
+        for item in results or []:
+            if isinstance(item, Mapping) and str(item.get("key", "")).casefold() == key.casefold():
+                return dict(item)
+        return None
+
+    def personal_spaces(self, limit: int = SPACE_LIST_MAX) -> tuple[list[dict], bool]:
+        """type=personal 목록(쪽 넘김). (목록, 더 있는가)."""
+        found: list[dict] = []
+        start = 0
+        while len(found) < limit:
+            data = self.get("/rest/api/space", {"type": "personal", "start": start, "limit": SPACE_PAGE})
+            results = [r for r in (data.get("results") if isinstance(data, Mapping) else None) or [] if isinstance(r, Mapping) and r.get("key")]
+            found.extend(dict(r) for r in results)
+            if len(results) < SPACE_PAGE:
+                return found[:limit], len(found) > limit
+            start += len(results)
+        return found[:limit], True
+
+    def page(self, page_id: str) -> dict | None:
+        data = self.get(f"/rest/api/content/{page_id}", {"expand": "space,version"}, missing_ok=True)
+        return dict(data) if isinstance(data, Mapping) else None
+
+
+def parse_confluence_url(raw: str) -> str:
+    text = raw.strip().rstrip("/")
+    if not _URL.match(text) or any(ch.isspace() for ch in text):
+        raise core.ConfigError(f"'{raw}'은(는) 주소가 아닙니다. http:// 또는 https://로 시작하는 Confluence 주소를 쓰세요")
+    return text
+
+
+def parse_parent(raw: str) -> str:
+    """부모 페이지 답 → 페이지 ID 문자열. 비우거나 '-'면 ''(스페이스 홈). pageId=가 든 주소도 받는다."""
+    text = raw.strip()
+    if not text or text.lower() in _NO_PARENT:
+        return ""
+    if text.isdigit() and text.isascii():
+        return str(int(text))
+    match = _PAGE_ID_IN_URL.search(text)
+    if match:
+        return str(int(match.group(1)))
+    raise core.ConfigError(f"'{raw}'은(는) 페이지 ID가 아닙니다. 숫자 ID나 pageId=가 든 페이지 주소를 쓰거나, 없으면 '-'")
+
+
+def _space_label(space: Mapping[str, Any]) -> str:
+    name = space.get("name")
+    return f"{space.get('key')}" + (f" ({name})" if name else "")
+
+
+def _connect_confluence(wizard: Wizard, conf: dict) -> tuple[ConfluenceProbe, dict]:
+    """base_url → PAT → /rest/api/user/current. Jira 단계와 같은 방식(_connect).
+
+    입력한 PAT는 확인이 끝난 뒤 `wizard.pending_secrets["confluence"]`에만 올린다.
+    """
+    url_default = conf.get("base_url") if isinstance(conf.get("base_url"), str) and conf.get("base_url") else None
+    stored_pat = _stored_pat(conf.get("pat_ref"), wizard.cfg)
+    fallback = stored_pat
+    for attempt in range(1, MAX_TRIES + 1):
+        base_url = wizard.choose(
+            "confluence.url", "Confluence 주소 (예: https://confluence.example.invalid)", url_default, parse_confluence_url
+        )
+        url_default = base_url
+        if fallback and fallback == stored_pat:
+            hint = " (비우면 저장된 값 유지)"
+        elif fallback:
+            hint = " (비우면 방금 입력한 값 사용)"
+        else:
+            hint = ""
+        pat = wizard.secret("confluence.pat", f"Confluence 개인 액세스 토큰(PAT){hint}")
+        if not pat:
+            if not fallback:
+                if not wizard.interactive:
+                    raise core.ConfigError(
+                        f"{ENV_FIELDS['confluence.pat']}이(가) 필요합니다 (자격 증명 저장소에 저장된 PAT도 없습니다)"
+                    )
+                if attempt == MAX_TRIES:
+                    raise core.ConfigError("PAT를 입력하지 않았습니다")
+                wizard.out("  PAT가 비었습니다. 다시 입력하세요")
+                continue
+            pat = fallback
+            if pat == stored_pat:
+                wizard.out(f"  저장된 PAT를 씁니다 ({SERVICE}/confluence)")
+        client = ConfluenceProbe(base_url, pat, conn=_conn(wizard, conf, "confluence"))
+        try:
+            user = client.current_user()
+        except core.KbError as exc:
+            client.close()
+            if not wizard.interactive or attempt == MAX_TRIES:
+                raise
+            wizard.out(f"  연결하지 못했습니다: {_error_text(exc)}")
+            wizard.out("  주소와 PAT를 다시 입력하세요")
+            if isinstance(exc, core.AuthError):
+                fallback = None if pat == fallback else fallback
+            else:
+                fallback = pat
+            continue
+        if pat != stored_pat:
+            wizard.out(f"  PAT를 확인했습니다. 설정과 함께 자격 증명 저장소에 저장합니다 ({SERVICE}/confluence)")
+        wizard.pending_secrets["confluence"] = pat
+        conf["base_url"] = base_url
+        conf["pat_ref"] = _keyring_ref("confluence")
+        return client, user
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _parse_space(raw: str, client: ConfluenceProbe, listed: list[dict]) -> dict:
+    """번호(목록이 있을 때) 또는 스페이스 키 → 서버에서 확인한 스페이스."""
+    text = raw.strip()
+    if not text:
+        raise core.ConfigError("스페이스를 고르세요")
+    if text.isdigit():
+        if not listed:
+            raise core.ConfigError("목록이 없어 번호를 쓸 수 없습니다. 스페이스 키를 쓰세요")
+        index = int(text)
+        if not 1 <= index <= len(listed):
+            raise core.ConfigError(f"번호 {text}은(는) 목록에 없습니다 (1~{len(listed)})")
+        return listed[index - 1]
+    if any(ch.isspace() for ch in text):
+        raise core.ConfigError(f"'{text}'은(는) 스페이스 키 형식이 아닙니다 (공백 없이)")
+    found = client.space(text)
+    if found is None:
+        raise core.ConfigError(f"스페이스 '{text}'를 찾지 못했습니다 (없거나 볼 권한이 없습니다)")
+    return found
+
+
+def _choose_space(wizard: Wizard, client: ConfluenceProbe, conf: Mapping[str, Any], user: Mapping[str, Any]) -> str:
+    """개인 스페이스(D55). --from-env의 KB_INIT_CONFLUENCE_SPACE가 있으면 그것이 먼저다."""
+    explicit = "" if wizard.interactive else wizard._from_env("confluence.space")
+    if explicit and not explicit.isdigit():
+        space = wizard.choose("confluence.space", "스페이스", None, lambda raw: _parse_space(raw, client, []))
+        wizard.out(f"  스페이스: {_space_label(space)}")
+        return str(space["key"])
+    if not explicit:
+        username = str(user.get("username") or "")
+        candidates = [f"~{username}"]
+        if user.get("userKey"):
+            candidates.append(f"~{user['userKey']}")
+        for key in dict.fromkeys(candidates):
+            found = client.space(key)
+            if found is not None:
+                wizard.out(f"  개인 스페이스: {_space_label(found)}")
+                existing = conf.get("space_key")
+                if isinstance(existing, str) and existing and existing != found.get("key"):
+                    wizard.out(f"  (기존 space_key {existing} 대신 찾은 개인 스페이스를 씁니다)")
+                return str(found["key"])
+    listed, more = client.personal_spaces()
+    username = user.get("username")
+    if listed:
+        wizard.out(f"  자기 개인 스페이스(~{username})를 바로 찾지 못했습니다. 아래는 다른 사람의 개인 스페이스일 수 있으니 확인하고 고르세요:")
+        width = len(str(len(listed)))
+        for i, space in enumerate(listed, 1):
+            wizard.out(f"    {i:>{width}}. {_space_label(space)}")
+        if more:
+            wizard.out(f"    … (처음 {len(listed)}개만 보입니다. 목록에 없으면 스페이스 키를 직접 입력하세요)")
     else:
-        wizard.out("  기존 Confluence 설정을 그대로 둡니다")
+        wizard.out("  개인 스페이스를 찾지 못했습니다. Confluence 화면에서 개인 스페이스를 만든 뒤 다시 실행하거나, 쓸 스페이스 키를 입력하세요")
+    existing = conf.get("space_key")
+    default = existing.strip() if isinstance(existing, str) and existing.strip() else None  # D55: 목록의 1번을 기본값으로 두지 않는다
+    space = wizard.choose("confluence.space", "쓸 스페이스 (번호 또는 키)", default, lambda raw: _parse_space(raw, client, listed))
+    wizard.out(f"  스페이스: {_space_label(space)}")
+    return str(space["key"])
+
+
+def _check_parent(client: ConfluenceProbe, page_id: str, space_key: str) -> dict:
+    page = client.page(page_id)
+    if page is None:
+        raise core.ConfigError(f"부모 페이지 {page_id}를 찾지 못했습니다 (없거나 볼 권한이 없습니다)")
+    space = page.get("space") if isinstance(page.get("space"), Mapping) else {}
+    where = space.get("key")
+    if where and str(where).casefold() != space_key.casefold():
+        raise core.ConfigError(f"부모 페이지 {page_id}는 스페이스 {where}에 있습니다. {space_key}의 페이지를 고르세요")
+    return page
+
+
+def _choose_parent(wizard: Wizard, client: ConfluenceProbe, conf: Mapping[str, Any], space_key: str) -> str:
+    """부모 페이지(선택). 비우면 스페이스 홈(D55). 답한 ID는 GET /rest/api/content/{id}로 확인한다."""
+    current = str(conf.get("parent_page_id") or "").strip()
+    old_space = conf.get("space_key")
+    if current and isinstance(old_space, str) and old_space and old_space.casefold() != space_key.casefold():
+        current = ""  # 스페이스가 바뀌면 옛 부모 페이지는 기본값으로 쓰지 않는다
+    if current:
+        prompt = "부모 페이지 ID 또는 주소 (선택. 비우면 기존 값, '-'면 스페이스 홈)"
+    else:
+        prompt = "부모 페이지 ID 또는 주소 (선택. 비우면 스페이스 홈 아래)"
+    for attempt in range(1, MAX_TRIES + 1):
+        if wizard.interactive:
+            raw = (wizard.ask(prompt, current or None) or "").strip()
+        else:
+            raw = wizard._from_env("confluence.parent") or current
+        try:
+            page_id = parse_parent(raw)
+            if not page_id:
+                wizard.out("  부모 페이지: 없음 (스페이스 홈 아래에 만듭니다)")
+                return ""
+            page = _check_parent(client, page_id, space_key)
+        except core.ConfigError as exc:
+            if not wizard.interactive:
+                raise core.ConfigError(f"{ENV_FIELDS['confluence.parent']}: {exc}") from None
+            if attempt == MAX_TRIES:
+                raise
+            wizard.out(f"  {exc}. 다시 입력하세요")
+            continue
+        wizard.out(f"  부모 페이지: {page.get('title') or '?'} ({page_id})")
+        return page_id
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def _confluence_step(wizard: Wizard, data: dict, *, optional: bool) -> None:
+    wizard.out("\n[3] Confluence" if optional else "\n[Confluence]")
+    has = "confluence" in data
+    existing = data.get("confluence") if isinstance(data.get("confluence"), Mapping) else {}
+    configured = bool(existing.get("base_url"))
+    if optional:
+        if not wizard.interactive:
+            if not wizard._from_env("confluence.url"):
+                wizard.out(
+                    "  KB_INIT_CONFLUENCE_URL이 없어 Confluence 단계를 건너뜁니다"
+                    + (" (기존 설정 유지)" if has else " (Confluence 비활성)")
+                )
+                if not has:
+                    data["confluence"] = {"enabled": False}
+                return
+        elif not _confirm(wizard, "Confluence를 설정할까요? (y/n, 개인 스페이스. 푸시는 직접 실행할 때만)", "n" if configured else "y"):
+            if has:
+                wizard.out("  기존 Confluence 설정을 그대로 둡니다")
+            else:
+                data["confluence"] = {"enabled": False}
+                wizard.out("  지금은 설정하지 않습니다 (enabled: false). 나중에 kb.py init --section confluence")
+            return
+    conf = _section(data, "confluence", "config.local.yaml")
+    old = copy.deepcopy(conf)
+    client, user = _connect_confluence(wizard, conf)
+    with client:
+        who = user.get("displayName") or user.get("username")
+        name = user.get("username")
+        wizard.out(f"  연결했습니다: {who}" + (f" ({name})" if name and name != who else ""))
+        space_key = _choose_space(wizard, client, old, user)
+        parent = _choose_parent(wizard, client, old, space_key)
+    ordered: dict[str, Any] = {
+        "enabled": True,
+        "base_url": conf["base_url"],
+        "space_key": space_key,
+        "parent_page_id": parent,
+        "pat_ref": conf["pat_ref"],
+    }
+    for key, value in conf.items():  # title_prefix·push_globs·연결 설정 등은 그대로
+        ordered.setdefault(key, value)
+    data["confluence"] = ordered
+    wizard.out("  enabled: true. 푸시는 자동으로 하지 않습니다: kb.py push --dry-run으로 확인한 뒤 kb.py push (D59)")
+
+
+def step_confluence(wizard: Wizard, data: dict) -> None:
+    """전체 마법사의 Confluence 단계(설정할지 먼저 묻는다)."""
+    _confluence_step(wizard, data, optional=True)
+
+
+def step_confluence_section(wizard: Wizard, data: dict) -> None:
+    """`--section confluence`: 묻지 않고 바로 설정한다."""
+    _confluence_step(wizard, data, optional=False)
 
 
 # ---------------------------------------------------------------- 단계: LLM
@@ -848,8 +1168,8 @@ def save_detected(config_dir: Path | str, name: str, detected: Any) -> None:
     config.save_local(config_dir, data)
 
 
-FULL_STEPS = [step_environment, step_jira, step_confluence_later, step_llm]
-SECTION_STEPS = {"jira": [step_jira], "llm": [step_llm_section]}
+FULL_STEPS = [step_environment, step_jira, step_confluence, step_llm]
+SECTION_STEPS = {"jira": [step_jira], "confluence": [step_confluence_section], "llm": [step_llm_section]}
 
 
 def read_local(config_dir: Path) -> dict:
@@ -1078,9 +1398,6 @@ def main(argv: list[str]) -> int:
         if args.section or args.from_env or args.non_interactive:
             raise core.ConfigError("--dev는 --section·--from-env·--non-interactive와 함께 쓸 수 없습니다")
         return run_dev(args.root)
-    if args.section in SECTION_PHASE_MESSAGES:
-        print(SECTION_PHASE_MESSAGES[args.section])
-        return 4
     if args.non_interactive != args.from_env:
         raise core.ConfigError("--non-interactive와 --from-env는 함께 씁니다 (KB_INIT_* 환경변수에서 값을 읽음)")
     values = {name: os.environ.get(name, "") for name in ENV_FIELDS.values()} if args.from_env else None
