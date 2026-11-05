@@ -50,7 +50,7 @@ $env:KB_REQUIRE_LIVE='1'   # 키가 없으면 skip 대신 fail
 아래 구역은 테스트가 끝날 때 다시 쓴다. 비밀값은 들어가지 않는다(키가 보이면 테스트가 실패한다).
 
 <!-- live:observed:start -->
-마지막 실행: 2026-11-05 07:45 (자동 기록, tests/test_live.py)
+마지막 실행: 2026-11-05 09:03 (자동 기록, tests/test_live.py)
 
 ```yaml
 detect:
@@ -60,7 +60,7 @@ detect:
   on_value: medium
   off_value: none
   evidence: 'trace: 기준선 생각 있음(reasoning_content) 90토큰 → reasoning_effort="none" 생각 없음 3토큰 → reasoning_effort="medium" 생각 있음(reasoning_content)
-    90토큰'
+    89토큰'
   baseline_reasoning: true
   json_mode: true
   vision: true
@@ -94,7 +94,7 @@ detect:
     status: ok
     trace: true
     trace_field: reasoning_content
-    completion_tokens: 90
+    completion_tokens: 89
     finish_reason: stop
     answer: '20'
     verdict: 확인(trace)
@@ -117,12 +117,16 @@ detect:
   trace_fields:
   - reasoning_content
   posts: 5
-  elapsed_s: 6.5
+  elapsed_s: 4.9
 t1_tag:
   status: ok
   summary:
   - 'compile: 태그 3줄 · 결정 0건 · 할 일 0건 · 요약 0쪽 · 새 제안 0건 · LLM 호출 1회'
   ledger:
+    daily/2026-11-03.md#2620d924:
+      status: ok
+      tag: 결정
+      profile: main
     daily/2026-11-03.md#4f300e1e:
       status: ok
       tag: 요청
@@ -130,10 +134,6 @@ t1_tag:
     daily/2026-11-03.md#9e905408:
       status: ok
       tag: 학습
-      profile: main
-    daily/2026-11-03.md#c0ad3fa1:
-      status: ok
-      tag: 결정
       profile: main
   runs:
   - task: tag
@@ -168,7 +168,7 @@ t2_decisions:
       status: ok
       tokens:
         prompt_tokens: 1555
-        completion_tokens: 972
+        completion_tokens: 1294
       max_tokens: 8192
       finish_reason: stop
     forced_json_profiles: []
@@ -178,8 +178,8 @@ t6_image:
   vision_detected: true
   processed:
   - image: inbox/whiteboard.png
-    source_image: raw/assets/2026-11-05-0745-whiteboard.png
-    sidecar: inbox/2026-11-05-0745-whiteboard.md
+    source_image: raw/assets/2026-11-05-0903-whiteboard.png
+    sidecar: inbox/2026-11-05-0903-whiteboard.md
     profile: main
     kind: photo
   skipped: []
@@ -204,7 +204,7 @@ t6_image:
       status: ok
       tokens:
         prompt_tokens: 1973
-        completion_tokens: 175
+        completion_tokens: 192
       max_tokens: 2048
       finish_reason: stop
     forced_json_profiles: []
@@ -258,7 +258,7 @@ wire:
   params:
     reasoning_effort: none
   images: 0
-  elapsed_s: 0.6
+  elapsed_s: 0.7
   http: 200
   finish_reason: stop
   message_fields:
@@ -276,7 +276,7 @@ wire:
   params:
     reasoning_effort: medium
   images: 0
-  elapsed_s: 2.0
+  elapsed_s: 1.0
   http: 200
   finish_reason: stop
   message_fields:
@@ -287,8 +287,8 @@ wire:
   think_tag_in_content: false
   usage:
     prompt_tokens: 58
-    completion_tokens: 90
-    reasoning_tokens: 86
+    completion_tokens: 89
+    reasoning_tokens: 85
 - stage: detect
   model: nvidia/NVIDIA-Nemotron-3.5-Super-VL
   max_tokens: 1024
@@ -297,7 +297,7 @@ wire:
     response_format:
       type: json_object
   images: 0
-  elapsed_s: 0.9
+  elapsed_s: 0.7
   http: 200
   finish_reason: stop
   message_fields:
@@ -315,7 +315,7 @@ wire:
   params:
     reasoning_effort: none
   images: 1
-  elapsed_s: 1.2
+  elapsed_s: 0.8
   http: 200
   finish_reason: stop
   message_fields:
@@ -335,7 +335,7 @@ wire:
     response_format:
       type: json_object
   images: 0
-  elapsed_s: 1.6
+  elapsed_s: 0.8
   http: 200
   finish_reason: stop
   message_fields:
@@ -355,19 +355,19 @@ wire:
     response_format:
       type: json_object
   images: 0
-  elapsed_s: 5.8
+  elapsed_s: 3.7
   http: 200
   finish_reason: stop
   message_fields:
   - content
   - reasoning_content
   - role
-  content_chars: 241
+  content_chars: 243
   think_tag_in_content: false
   usage:
     prompt_tokens: 1555
-    completion_tokens: 972
-    reasoning_tokens: 863
+    completion_tokens: 1294
+    reasoning_tokens: 1184
 - stage: t6_image
   model: nvidia/NVIDIA-Nemotron-3.5-Super-VL
   max_tokens: 2048
@@ -376,17 +376,17 @@ wire:
     response_format:
       type: json_object
   images: 1
-  elapsed_s: 2.5
+  elapsed_s: 2.6
   http: 200
   finish_reason: stop
   message_fields:
   - content
   - role
-  content_chars: 346
+  content_chars: 375
   think_tag_in_content: false
   usage:
     prompt_tokens: 1973
-    completion_tokens: 175
+    completion_tokens: 192
     reasoning_tokens: 0
 - stage: fallback
   model: kb-live-test/no-such-model
@@ -404,7 +404,7 @@ wire:
   max_tokens: 64
   forced_json_prompt: true
   images: 0
-  elapsed_s: 1.1
+  elapsed_s: 1.7
   http: 200
   finish_reason: stop
   message_fields:

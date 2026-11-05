@@ -64,6 +64,10 @@ COMMANDS: dict[str, Command] = {
     "compile": Command("compile", help="B단계: 태그·결정·할 일·엔티티 요약·주제 제안 (LLM, 없으면 조용히 건너뜀)"),
     "ingest": Command("ingest_images", help="B단계: 이미지에서 글 추출 → 사이드카 (비전 LLM)"),
     "proposals": Command("compile", "proposals_main", agent_ok=False, agent_ok_sub=("list",), help="주제 제안: list | accept <n|all>"),
+    # Phase 5
+    "lint": Command("lint", help="C단계: 점검 보고 wiki/_lint.md (--llm: 모순 후보 T5)"),
+    "push": Command("confluence_push", agent_ok=False, help="Confluence 개인 스페이스로 wiki 페이지 게시 (--dry-run, --only)"),
+    "demo": Command("demo", agent_ok=False, help="모의 서버 3개로 전체 흐름 시연 (임시 볼트)"),
 }
 
 ALIASES: dict[str, str] = {"jira_sync": "sync"}
