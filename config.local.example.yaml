@@ -1,10 +1,10 @@
 # config.local.yaml 예시 두 가지. 이 파일을 그대로 쓰지 말고 `python scripts/kb.py init`을 실행하세요.
 # - home: 집 개발용. 모의 Jira·Confluence와 DeepInfra. `kb.py init --dev`가 이 블록을 읽습니다.
 # - company: 회사용 꼴. 주소는 자리표시(*.invalid)이고 init이 실제 값으로 채웁니다.
-# environment를 비우거나 잘못 적으면 안전을 위해 company로 처리됩니다.
+# environment가 없거나 틀리면 company로 봅니다.
 # 각 블록 아래 내용이 config.local.yaml 한 파일의 전체 내용입니다(맨 위 키 home:/company: 없이).
 # 비밀값은 쓰지 않습니다. keyring:<서비스>/<이름> 또는 env:<이름> 참조만 씁니다.
-# ca_bundle 등 연결 옵션의 상대 경로는 config.yaml·config.local.yaml이 있는 폴더 기준으로 해석됩니다.
+# ca_bundle의 상대 경로는 config.yaml이 있는 폴더 기준입니다.
 # 프로필의 detected(비전·JSON·추론 토글 탐지 결과)는 init이 실제 호출로 채웁니다. 손으로 쓰지 마세요.
 # 꼴만 참고하세요(예시):
 #   detected:
@@ -42,10 +42,10 @@ home:
     fallback_order: [main, fallback]
 
 company:
-  environment: company                         # 공개 클라우드 LLM 주소와 공인 IP(is_global)는 코드가 막음(사설·루프백 IP는 목록에 있을 때만 차단)
+  environment: company                         # 공개 클라우드 LLM 주소·공인 IP는 코드가 막음
   jira:
     base_url: "https://jira.example.invalid"
-    project_keys: []                           # 코드 기본값 []. link·today 이월 계산에 필수(init이 고름, ON/NO 등은 따옴표 필수)
+    project_keys: []                           # init이 고름. link·today 이월에 필요. ON·NO 같은 키는 따옴표로
     pat_ref: "keyring:work-kb/jira"
   confluence:
     enabled: true
