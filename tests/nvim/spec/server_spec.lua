@@ -397,6 +397,49 @@ describe("server", function()
     end, 20000))
   end)
 
+  it("exit 0 with queued request falls back and allows restart", function()
+    -- A-03: 유휴 종료(종료 0) 찰나에 요청이 서버로 갔다. 그 요청은 한 번 실행으로 돌리고, 서버는
+    -- 정상 종료(stopped)로 보아 1분 제한 없이 다시 띄운다.
+    H.with_vault({ python = H.python(), server = { enable = true, idle_sec = 60 } })
+    local p = proc()
+    local fake = H.fake_spawn({ code = 0, output = "대체 실행\n" })
+    local oneshot_spawn = p._spawn
+    local servers = {}
+    H.patch(p, "_spawn", function(spec)
+      if not spec.server then
+        return oneshot_spawn(spec)
+      end
+      table.insert(servers, spec)
+      local function noop() end
+      return {
+        pid = 1,
+        write = noop,
+        close_stdin = noop,
+        kill = noop,
+        alive = function()
+          return true
+        end,
+      }
+    end)
+    H.ok(server().start())
+    servers[1].on_stdout('{"ready":true,"pid":99999,"version":1}\n')
+    H.eq(server().status().state, "ready")
+    local handle = p.run(p.kb_args("status"), { on_exit = function() end })
+    H.eq(handle.via, "server")
+    H.eq(server().status().queued, 1)
+    servers[1].on_exit(0)
+    H.eq(p.wait(handle, 5000), 0)
+    H.eq(#fake.calls, 1, "한 번 실행으로 돌림")
+    H.eq(H.buffer_text(), "대체 실행\n")
+    local st = server().status()
+    H.eq(st.state, "stopped", vim.inspect(st))
+    H.eq(st.last_error, nil)
+    H.eq(st.last_exit, 0)
+    H.eq(st.queued, 0)
+    H.eq(server().start(), true, "1분 제한 없이 다시 띄움")
+    H.eq(server().status().starts, 2)
+  end)
+
   it("죽인 서버의 실제 Python(준비 줄의 pid)이 남지 않는다: 시간 초과·stop(true) (agy 2)", function()
     -- WORK_KB_TEST_PYTHON은 pytest의 sys.executable (.venv/Scripts/python.exe: 실제 인터프리터를
     -- 자식으로 띄우는 venv 런처)이다. 런처의 pid와 준비 줄의 pid가 달라야 이 시험이 뜻이 있다.

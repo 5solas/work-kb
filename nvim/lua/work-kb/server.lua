@@ -328,11 +328,13 @@ function M.start(opts)
         if S.handle == handle then
           S.handle = nil
           S.last_exit = code
-          if code == 0 and S.state == "ready" and not S.inflight and #S.queue == 0 then
-            -- 정상 종료 (--idle-sec 동안 요청 없음, 또는 잠금을 남긴 요청 뒤 스스로 끝남):
-            -- 오류가 아니다. 다음 요청이 1분 제한 없이 다시 띄운다.
+          if code == 0 and S.state == "ready" then
+            -- 정상 종료 (--idle-sec 동안 요청 없음, 잠금을 남긴 요청 뒤, 코드가 바뀐 뒤 스스로 끝남):
+            -- 오류가 아니다. 끝나는 찰나에 보낸·기다리던 요청은 한 번 실행으로 돌리고,
+            -- 다음 요청이 1분 제한 없이 다시 띄운다.
             S.state = "stopped"
             S.last_start = nil
+            fail_pending()
           elseif S.state ~= "stopped" then
             kill_server(S.last_error or string.format("서버가 끝났습니다 (종료 %s)", tostring(code)))
           end
