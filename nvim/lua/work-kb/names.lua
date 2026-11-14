@@ -147,6 +147,15 @@ for _, base in ipairs({ "COM", "LPT" }) do
 end
 M.RESERVED = RESERVED
 
+-- 유니코드 공백의 UTF-8 바이트 (모두 첫 바이트가 이끄는 바이트라 다른 글자 가운데와 겹치지 않는다).
+local UNICODE_SPACES = {
+  "\194[\133\160]", -- U+0085, U+00A0
+  "\225\154\128", -- U+1680
+  "\226\128[\128-\138\168\169\175]", -- U+2000–200A, U+2028, U+2029, U+202F
+  "\226\129\159", -- U+205F
+  "\227\128\128", -- U+3000
+}
+
 ---NAME을 Windows 파일명 조각으로 다듬는다. 비면 "_", 예약 이름이면 앞에 "_".
 ---@param name string|nil
 ---@param max_len? integer 글자 수 (기본 80)
@@ -154,6 +163,10 @@ function M.safe_name(name, max_len)
   max_len = max_len or 80
   local text = M.nfc(name or "")
   text = text:gsub('[<>:"/\\|?*%z\1-\31]', "")
+  -- Python `\s`의 유니코드 공백도 공백으로 (U+0085 U+00A0 U+1680 U+2000–200A U+2028/9 U+202F U+205F U+3000).
+  for _, pattern in ipairs(UNICODE_SPACES) do
+    text = text:gsub(pattern, " ")
+  end
   text = text:gsub("[ \t\n\r\f\v]+", " ")
   text = text:gsub("^[ %.]+", ""):gsub("[ %.]+$", "")
   if M.length(text) > max_len then
