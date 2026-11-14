@@ -577,7 +577,30 @@ function M.served(args)
     return true
   end
   local subs = SERVED_SUB[cmd]
-  return subs ~= nil and subs[args[2]] == true
+  local sub = M.subcommand(args, 2)
+  return subs ~= nil and sub ~= nil and subs[sub] == true
+end
+
+---ARGS[FIRST]부터 하위 명령(첫 위치 인수)을 찾는다. kb.py `subcommand`와 같은 규칙:
+---`--root X`·`--root=X`는 건너뛰고, `--`나 다른 옵션이 먼저 오면 nil.
+---@param args string[]
+---@param first integer
+---@return string|nil
+function M.subcommand(args, first)
+  local i = first
+  while i <= #args do
+    local arg = args[i]
+    if arg == "--root" then
+      i = i + 2
+    elseif arg:sub(1, 7) == "--root=" then
+      i = i + 1
+    elseif arg:sub(1, 1) == "-" then
+      return nil
+    else
+      return arg
+    end
+  end
+  return nil
 end
 
 local function server_enabled()

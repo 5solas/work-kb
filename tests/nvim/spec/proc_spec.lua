@@ -409,6 +409,28 @@ describe("proc", function()
     H.ok(vault)
   end)
 
+  it("served() skips --root", function()
+    -- kb.subcommand(scripts/kb.py)와 같은 규칙: --root X·--root=X는 건너뛰고 --에서 멈춘다.
+    local p = proc()
+    for _, args in ipairs({
+      { "act", "--root", "V", "list" },
+      { "act", "--root=V", "list", "--json" },
+      { "proposals", "--root", "V", "list" },
+      { "act", "list", "--root", "V" },
+    }) do
+      H.eq(p.served(args), true, table.concat(args, " "))
+    end
+    for _, args in ipairs({
+      { "act", "--root", "list", "comment" },
+      { "act", "--root", "V", "--", "list" },
+      { "act", "--json", "list" },
+      { "act", "--root" },
+      { "proposals", "--root", "V", "accept", "1" },
+    }) do
+      H.eq(p.served(args), false, table.concat(args, " "))
+    end
+  end)
+
   it("ARGS가 문자열 목록이 아니면 오류", function()
     H.with_vault({ python = H.python() })
     H.fake_spawn({ code = 0 })

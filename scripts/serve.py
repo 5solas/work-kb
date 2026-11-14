@@ -72,9 +72,9 @@ def refusal_reason(argv: list[str]) -> str | None:
     if name not in SERVED:
         return f"서버에서 실행하지 않는 명령입니다: {argv[0]}"
     subs = SERVED[name]
-    if subs is not None and (len(argv) < 2 or argv[1] not in subs):
-        sub = argv[1] if len(argv) > 1 else ""
-        return f"서버에서 실행하지 않는 하위 명령입니다: {argv[0]} {sub}".rstrip()
+    sub = kb.subcommand(argv[1:])  # `act --root V list`도 list (kb.main의 KB_AGENT 판정과 같은 규칙)
+    if subs is not None and sub not in subs:
+        return f"서버에서 실행하지 않는 하위 명령입니다: {argv[0]} {sub or ''}".rstrip()
     return None
 
 

@@ -388,6 +388,24 @@ def test_refused_commands_do_not_run(vault, tmp_path, fake_now, start_server, mo
     assert server.ping()
 
 
+def test_root_before_subcommand_is_served(vault, tmp_path, fake_now, start_server):
+    """하위 명령 앞의 --root(`act --root V list`)도 kb.subcommand 규칙으로 가른다(C-33·A-01)."""
+    v = str(vault)
+    assert serve.refusal_reason(["act", "--root", v, "list"]) is None
+    assert serve.refusal_reason(["proposals", f"--root={v}", "list"]) is None
+    assert serve.refusal_reason(["act", "--root", v, "comment", "list"]) is not None
+    assert serve.refusal_reason(["act", "--root", v, "--", "list"]) is not None
+    assert serve.refusal_reason(["act", "--root", "list"]) is not None
+    fake_now(NOW)
+    prepare(vault)
+    env = child_env(tmp_path, vault, {"KB_AGENT": "1"})
+    server = start_server(env)
+    for argv in (["proposals", "--root", v, "list"], ["act", "--root", v, "list"], ["act", f"--root={v}", "list", "--json"]):
+        code, out = server.run(argv)
+        assert (code, out) == oneshot(env, argv)
+        assert code == 0, out
+
+
 def test_served_set_is_agent_allowed():
     """서버가 실행하는 명령은 모두 KB_AGENT=1에서도 허용된다(거부 7이 나올 하위 명령이 서버 목록에 없다)."""
     assert kb.COMMANDS["serve"].agent_ok and kb.COMMANDS["serve"].module == "serve"

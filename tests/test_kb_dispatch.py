@@ -129,6 +129,40 @@ def test_agent_ok_sub_allows_only_listed_subcommand(monkeypatch):
     assert len(calls) == 1
 
 
+def test_subcommand_skips_root_and_stops_at_double_dash():
+    assert kb.subcommand(["list", "--root", "V"]) == "list"
+    assert kb.subcommand(["--root", "V", "list"]) == "list"
+    assert kb.subcommand(["--root=V", "list", "--json"]) == "list"
+    assert kb.subcommand(["--root", "list", "comment"]) == "comment"  # --root의 값은 하위 명령이 아니다
+    assert kb.subcommand(["--", "list"]) is None
+    assert kb.subcommand(["--root", "V", "--", "list"]) is None
+    assert kb.subcommand(["--json", "list"]) is None  # --root 말고 다른 옵션이 앞에 오면 정하지 않는다
+    assert kb.subcommand(["--root"]) is None
+    assert kb.subcommand([]) is None
+
+
+def test_agent_allows_root_before_subcommand(monkeypatch, run_kb, vault):
+    calls: list = []
+    _fake_module(monkeypatch, "kb_fake_cmd", calls)
+    monkeypatch.setattr(kb, "COMMANDS", {"act": kb.Command("kb_fake_cmd", agent_ok=False, agent_ok_sub=("list",))})
+    monkeypatch.setenv("KB_AGENT", "1")
+    allowed = (["act", "--root", "V", "list"], ["act", "--root=V", "list", "--json"], ["act", "list", "--root", "V"])
+    for argv in allowed:
+        assert kb.main(argv) == 0, argv
+    assert [argv for _, argv in calls] == [a[1:] for a in allowed]
+    for argv in (["act", "--root", "list", "comment"], ["act", "--root", "V", "--", "list"], ["act", "--json", "list"], ["act", "--root"]):
+        with pytest.raises(core.PolicyRefused):
+            kb.main(argv)
+    assert len(calls) == len(allowed)
+    # 실제 kb.py (C-33·A-01 재현): 하위 명령 앞의 --root도 읽기 전용 act list는 허용
+    monkeypatch.delenv("KB_AGENT")
+    for argv in (["act", "--root", str(vault), "list"], ["act", f"--root={vault}", "list"], ["proposals", "--root", str(vault), "list"]):
+        result = run_kb(*argv, env={"KB_AGENT": "1"})
+        assert result.returncode == 0, (argv, result.stderr)
+    result = run_kb("act", "--root", str(vault), "flush", env={"KB_AGENT": "1"})
+    assert result.returncode == 7 and "KB_AGENT" in result.stderr
+
+
 def test_real_act_agent_ok_sub():
     assert kb.COMMANDS["act"].agent_ok_sub == ("list", "transitions")
 
