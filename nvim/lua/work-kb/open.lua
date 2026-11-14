@@ -170,6 +170,26 @@ local function key_at(line, col)
   end
 end
 
+---`@` 뒤에서 훑는 글자: 이름 글자와 한글 조합형 자모(U+1100..U+11FF, NFD로 쓴 이름).
+local function scan_char(cp)
+  return name_char(cp) or (cp ~= nil and cp >= 0x1100 and cp <= 0x11FF)
+end
+
+---훑은 글을 Python notes.find_people처럼 NFC로 바꾼 뒤 앞쪽의 이름 글자만 남긴다
+---(줄 전체를 NFC로 바꾸고 찾는 것과 같다. 홀로 남는 자모는 이름 글자가 아니다).
+local function person_name(raw)
+  local s = require("work-kb.names").nfc(raw)
+  local j = 1
+  while true do
+    local cp, len = char_at(s, j)
+    if len == 0 or not name_char(cp) then
+      break
+    end
+    j = j + len
+  end
+  return s:sub(1, j - 1)
+end
+
 local function person_at(line, col)
   local init = 1
   while true do
@@ -180,14 +200,17 @@ local function person_at(line, col)
     local j = i + 1
     while true do
       local cp, len = char_at(line, j)
-      if len == 0 or not name_char(cp) then
+      if len == 0 or not scan_char(cp) then
         break
       end
       j = j + len
     end
     if j > i + 1 then
       if i - 1 <= col and col <= j - 1 and not mail_char(i > 1 and line:byte(i - 1) or nil) then
-        return line:sub(i + 1, j - 1)
+        local name = person_name(line:sub(i + 1, j - 1))
+        if name ~= "" then
+          return name
+        end
       end
       init = j
     else
