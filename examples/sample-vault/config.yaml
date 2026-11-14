@@ -1,6 +1,7 @@
 # work-kb 구조 설정 (커밋함). 연결 값(주소·토큰·참조)은 두지 않는다.
 # 환경별 값은 config.local.yaml(kb.py init이 만듦), 비밀값은 자격 증명 저장소에 둔다.
 # 환경변수 KB_<SECTION>_<KEY>로 한 값씩 덮을 수 있다. 예: KB_JIRA_MAX_RESULTS=50
+# 단, kb_root는 KB_ROOT(Neovim은 setup의 vault), 중첩 맵(views·tasks·profiles)은 환경변수 덮어쓰기 대상에서 제외된다.
 kb_root: .
 timezone: Asia/Seoul
 people_prefix: "@"
@@ -18,8 +19,11 @@ jira:
   poll_minutes: 15
   max_results: 500
   # 전체 동기화 주기(시간). 범위에서 빠진 일감(담당 변경·삭제·이동)을 정리한다.
+  # 토큰이 유효할 때 범위 밖 일감이 403이면 접근 불가 상태로만 기록하고 동기화를 이어간다.
   full_every_hours: 24
   # `today --check-done`이 제안하는 완료 전환 이름(앞에서부터 시도). 자동 전환은 없다.
+  # 참고: 오프라인 outbox 쓰기 시간 기준 write_timeout_sec(기본 60초)의 2배(120초)를 넘거나
+  # 전송 중 프로세스가 죽으면 uncertain 상태가 되며 최대 재시도(5회) 후에도 failed로 덮지 않는다.
   done_transition_names: [Done, 완료]
 
 confluence:
@@ -27,8 +31,8 @@ confluence:
   push_globs: ["wiki/projects/*.md", "wiki/topics/*.md", "wiki/decisions.md"]
 
 llm:
-  # reasoning은 따옴표 필수. 따옴표가 없으면 YAML이 on/off를 참·거짓으로 읽는다(D27).
-  # max_output_tokens: 작업별 출력 상한(D41). 탐지 결과가 method: none이고 기준 상태가 추론 켜짐이면 하한 2048.
+  # reasoning은 혼동을 피하려고 따옴표로 감싼다(코드가 YAML 불리언도 on/off로 변환하지만 따옴표 권장, D27).
+  # max_output_tokens: 작업별 출력 상한(D41, 전체 상한 16384). 탐지 결과가 method: none이고 기준 상태가 추론 켜짐이면 하한 2048.
   # tag의 max_output_tokens는 **줄 하나당** 값이다. T1은 여러 줄(최대 40줄)을 한 요청에 묶으므로
   # compile은 요청 상한으로 줄당 값 × 묶음 크기(최대 16384)를 준다.
   tasks:
@@ -40,6 +44,7 @@ llm:
     contradictions: {profile: main, reasoning: "on",  max_input_tokens: 60000, max_output_tokens: 8192}
   temperature: 0
   timeout_sec: 180
-  # 회사 환경에서 LLM 주소가 이 목록에 걸리면 실행을 거부한다.
+  # 회사 환경(environment 누락·오류 시 기본값 company)에서 LLM 주소가 이 목록에 걸리면 실행을 거부한다.
+  # 공인 IP(is_global, IPv4 매핑 IPv6 포함)도 목록과 무관하게 차단하며 사설·루프백 IP는 목록에 있을 때만 거부한다.
   # 코드에도 같은 목록이 있다. 여기에는 더할 수만 있고 뺄 수는 없다.
   public_hosts_blocklist: [deepinfra.com, openai.com, together.xyz, openrouter.ai, anthropic.com, googleapis.com, groq.com, fireworks.ai, mistral.ai, baseten.co, nebius.com]

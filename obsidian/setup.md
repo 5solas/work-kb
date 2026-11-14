@@ -8,7 +8,7 @@ Obsidian은 **열람 창**이다. 쓰기는 Neovim과 `kb.py`가 한다(Neovim/N
 
 - **볼트 루트 = 저장소 루트**(`work-kb/`, `AGENTS.md`가 있는 폴더). "폴더를 볼트로 열기"로 연다.
 - 기존 개인 볼트(OneDrive 등)와 섞지 말고 새 볼트로 연다.
-- `KB_ROOT`(Neovim 쪽은 `work-kb` 설정의 `vault`)로 볼트를 저장소와 다른 곳에 두었다면 그 폴더를 연다. 이때 저장소의 두 `.base` 파일 `jira/_views/일감.base`와 `wiki/엔티티.base`를 볼트의 같은 경로로 손으로 복사한다. `sync`·`link`는 `.base` 파일을 만들지 않는다(표 내용만 채운다).
+- `KB_ROOT`(Neovim은 `KB_ROOT`를 보지 않으므로 setup의 `vault`, nvim-config에서는 `opts.vault`)로 볼트를 저장소와 다른 곳에 두었다면 그 폴더를 연다. 이때 저장소의 두 `.base` 파일 `jira/_views/일감.base`와 `wiki/엔티티.base`를 볼트의 같은 경로로 손으로 복사한다. `sync`·`link`는 `.base` 파일을 만들지 않는다(표 내용만 채운다).
 
 ## 2. 폴더
 
@@ -46,7 +46,11 @@ Daily notes 파일 이름은 `daily/2026-11-05.md` 꼴이어야 한다. 뼈대�
 | 새 첨부 파일 기본 위치(Default location for new attachments) | 아래 지정 폴더(In the folder specified below) → `raw/assets` |
 | 제외 파일(Excluded files) | 아래 폴더 |
 
-링크 형식: 도구는 `[[KB-12]]`, `[[김철수]]`, `![[raw/assets/2026-11-05-1420-메일캡처.png]]`처럼 쓴다. Obsidian이 만드는 `[[jira/KB-12]]`, `[[jira/KB-12|별칭]]`, `[[jira/KB-12#설명]]` 꼴도 `link`가 같은 일감으로 알아본다. 사람 이름은 노트에 `@김철수`로 쓰면 `link`가 `wiki/people/김철수.md`에 엮는다.
+링크 형식:
+- 도구는 `[[KB-12]]`, `[[김철수]]`, `![[raw/assets/2026-11-05-1420-메일캡처.png]]`처럼 쓴다.
+- Obsidian이 만드는 `[[jira/KB-12]]`, `[[jira/KB-12.md]]`, `[[KB-12.md]]`, `[[jira/KB-12|별칭]]`, `[[jira/KB-12#설명]]` 꼴도 `link`가 같은 일감으로 알아보고 Neovim `o`도 동기화해 연다. `![[...]]` 임베드 파일명이나 `[[KB-12-설계]]` 같은 다른 위키링크 안의 키는 일감 언급으로 치지 않는다.
+- 사람 이름은 노트에 `@김철수`로 쓰면 `link`가 `wiki/people/김철수.md`에 엮는다(조합형 한글 NFD도 같은 이름으로 맞춘다).
+- 주제는 이미 있는 `wiki/topics/<주제>.md`(`kb.py proposals accept`로 생성)에 한해 파일 이름, front matter `name`, 2자 이상 `aliases`, `[[topics/…]]` 링크를 `link`가 `mentions`에 엮는다(`link`는 새 주제 페이지를 만들지 않는다).
 
 제외할 폴더:
 
@@ -61,7 +65,6 @@ obsidian/
 _trash/
 wheels/
 .venv/
-.venv313/
 ```
 
 `.venv*`처럼 점으로 시작하는 폴더는 Obsidian이 원래 숨기지만, 보이면 위처럼 이름마다 추가한다. `examples/`와 `tests/`에는 허구 일감(`KB-12` 등)이 들어 있어 제외하지 않으면 검색과 그래프에 섞인다.
@@ -70,7 +73,9 @@ wheels/
 
 - 노트에 붙여 넣은 이미지는 `raw/assets/`에 저장된다(위 첨부 폴더 설정).
 - 탐색기나 Obsidian에서 **`inbox/`에 끌어다 놓은 이미지**(`png`, `jpg`, `jpeg`, `webp`)는 `kb.py ingest`가 처리한다. `raw/assets/YYYY-MM-DD-HHMM-<원래이름>.<ext>`로 옮기고 `inbox/`에 사이드카 `.md`를 남긴다. 사이드카의 읽은 글도 `link`가 엮는다.
-- 비전 LLM이 없으면 이미지는 그대로 남고 `kb.py status`에 "미처리 이미지"로 보인다.
+- 단 `daily/`, `inbox/*.md`, `wiki/**/*.md`가 이미 가리키는 `inbox/` 이미지(또는 `raw/assets/`에 같은 이름 파일이 있는 경우)는 링크가 깨지지 않게 옮기지 않고 `inbox/`에 둔 채 사이드카만 쓴다.
+- 사이드카 파일은 보통 `inbox/<원래이름>.md`이지만, 같은 이름의 사용자 노트나 확장자만 다른 이미지가 이미 있으면(front matter `source_image`가 다르면) `inbox/<원래이름.확장자>.md`로 만든다. `kb.py status`의 "미처리 이미지"도 같은 규칙으로 센다.
+- 비전 LLM이 없으면 이미지는 그대로 남고 `kb.py status`에 "미처리 이미지"로 보인다. 같은 프로필·모델에서 3회 실패하면 `gave_up`으로 건너뛰며 `kb.py ingest --force`로 다시 시도한다.
 
 ## 6. Bases
 

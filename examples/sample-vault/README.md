@@ -15,7 +15,7 @@
 - `raw/assets/2026-11-05-1420-메일캡처.png`: `daily/2026-11-05.md`의 `- 14:20 ![[raw/assets/…]]` 줄이 임베드한 이미지.
   두 이미지는 `tests/fixtures/make_images.py`가 그린 허구 그림의 복사본이다. `kb.py ingest`가 inbox 이미지를
   `raw/assets/`로 옮기고 두 장의 사이드카를 `inbox/`에 쓴다(비전 LLM 필요).
-- `wiki/`, `jira/`: 비어 있다. `kb.py link`·`kb.py sync`가 만든다.
+- `wiki/`, `jira/`: 처음에는 없다. `kb.py link`·`kb.py sync`가 만든다.
 
 ## LLM·Jira 없이 시험하기 (A단계)
 
@@ -36,7 +36,7 @@ Copy-Item "$tmp\config.local.example.yaml" "$tmp\config.local.yaml"
 ## 전체 흐름 시연 (`kb.py demo`)
 
 `kb.py demo`는 이 볼트를 임시 폴더로 복사하고 모의 Jira·Confluence·LLM(`tests/mock_*.py`)을 띄워
-임시 설정(`init --dev` 대신) → sync → link → ingest → compile → lint → push를 차례로 돌린 뒤 결과 트리를 보여 준다.
+임시 설정(`init --dev` 대신) → sync → link → ingest → compile → lint → push → 검증을 차례로 돌린 뒤 결과 트리를 보여 준다.
 저장소의 `config.local.yaml`·자격 증명 저장소·`DEEPINFRA_API_KEY`는 쓰지 않는다(LLM 답은 "모의"로 표시된다).
 
 ```powershell
