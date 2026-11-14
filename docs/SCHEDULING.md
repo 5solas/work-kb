@@ -15,11 +15,13 @@ work-kb는 작업을 **직접 등록하지 않는다.** `kb.py schedule`(또는 
 | `work-kb-lint` | `kb.py lint` | 금요일 17:00 | 켜짐 |
 
 - 이름은 폴더 없는 평면 이름이다(`work-kb\sync` 같은 폴더는 일반 권한으로 만들 수 있는지 확인하지 못했다).
-- link → ingest → compile을 1분씩 띄워 실패가 따로 보이게 했다. `link`, `ingest`, `compile`, `lint` 쓰기 작업은 볼트 잠금(`kb_lock`)을 사용한다. 앞 작업이 아직 돌면 최대 60초 기다리고, 그래도 잠겨 있으면 종료 6으로 끝난다(다음 회차에 다시 한다).
+- link → ingest → compile을 1분씩 띄워 실패가 따로 보이게 했다.
+- 모든 작업은 볼트 잠금 안에서 쓴다. 다른 작업이 잠금을 쥐고 있으면 최대 60초 기다린다.
+  그래도 잠겨 있으면 종료 6으로 끝나고 다음 회차에 다시 한다.
 - `kb.py compile`은 LLM이 꺼져 있으면 조용히 건너뛴다. 주제 제안(T4)은 마지막 실행 뒤 7일이 지났을 때만 돈다.
-- `kb.py ingest`도 `llm.enabled: false`이거나 연결할 수 있는 비전 프로필이 없으면 오류 없이 건너뛴다(종료 0).
+- `kb.py ingest`는 `llm.enabled: false`이거나 비전 프로필이 없거나 연결되지 않으면 건너뛴다(종료 0).
 - `kb.py lint`는 LLM을 부르지 않는다. 모순 후보 검사(T5)까지 하려면 그 작업의 인수에 `--llm`을 직접 더한다.
-- `kb.py sync`는 범위 밖 일감에서 HTTP 403이 나도 토큰 확인(`/myself`)이 유효하면 해당 일감만 건너뛰고 계속 진행한다(토큰 자체가 만료·무효일 때만 종료 2).
+- `kb.py sync`는 범위 밖 일감에서 403이 나면 그 일감만 건너뛴다. 토큰 확인(`/myself`)도 실패하면 종료 2다.
 - 회사에서 ingest·compile을 꺼 두는 이유(D59): 사내 LLM 연결과 탐지를 doctor로 확인하고, 첫 2주는 캡처·link·sync만
   쓰기로 했기 때문이다(DEPLOY 10단계). 켜는 방법은 아래 [끄기·켜기](#끄기켜기).
 
@@ -33,7 +35,7 @@ work-kb는 작업을 **직접 등록하지 않는다.** `kb.py schedule`(또는 
 시작 위치:  <저장소>
 ```
 
-- `pythonw.exe`라 콘솔 창이 뜨지 않는다. 콘솔이 없을 때 발생한 사전 점검(Python 버전·필수 패키지) 오류나 처리되지 않은 예외도 `--root`로 찾은 볼트의 `.state/logs/kb.log`에 기록한다.
+- `pythonw.exe`라 콘솔 창이 뜨지 않는다. 오류는 볼트의 `.state/logs/kb.log`에 남는다([로그](#로그)).
 - **PYTHONUTF8:** `-X utf8`을 인수로 넘기므로 예약 작업에는 `PYTHONUTF8` 환경변수가 필요 없다.
 - 볼트 루트가 저장소 폴더가 아니면(`kb.py schedule --root <볼트>` 또는 `KB_ROOT`로 만든 경우) 인수 끝에
   `--root "<볼트>"`가 붙는다. 예약 작업은 `KB_ROOT`를 보지 못하기 때문이다.
@@ -70,12 +72,12 @@ PAT와 LLM 키는 Windows 자격 증명 관리자(keyring, 서비스 `work-kb`)�
 
    - XML은 `.state\schedule\<작업 이름>.xml`에 UTF-16(BOM)으로 쓴다. `schtasks /XML`이 기대하는 인코딩이다.
    - `--xml-dir <폴더>`: 다른 폴더에 쓴다.
-   - `--print`: 파일을 쓰지 않고 XML 내용과 명령만 보여 준다(`--xml-dir`과 함께 쓸 수 없다, 종료 4).
+   - `--print`: 파일을 쓰지 않고 XML 내용과 명령만 보여 준다. `--xml-dir`과 함께 쓰면 종료 4.
    - `--company`: 설정과 상관없이 회사용(ingest·compile 꺼짐)으로 만든다. 없으면 `config.local.yaml`의
      `environment`를 따른다(없거나 잘못되면 company).
    - `kb.py init`을 처음부터 돌리면 마지막 [5] 스케줄 단계에서 같은 것을 묻는다(기본값 y). 여기서도 명령을
-     출력만 하고 실행하지 않는다. `--yes`는 자동으로 생성을 진행해 명령을 출력하고, `--non-interactive`는 이 단계를 건너뛰고 `kb.py schedule` 안내만 남긴다.
-   - `KB_AGENT=1` 세션에서는 거부된다(종료 7, `python scripts/schedule.py` 직접 실행 포함).
+     출력만 하고 실행하지 않는다. `--yes`면 묻지 않고 만들고, `--non-interactive`면 건너뛰고 안내만 남긴다.
+   - `KB_AGENT=1` 세션에서는 거부된다(종료 7). `python scripts/schedule.py` 직접 실행도 같다.
 
 2. 출력된 `schtasks /Create` 줄을 PowerShell(또는 cmd)에 그대로 붙여 넣어 실행한다. 관리자 권한은 필요 없다.
 
@@ -88,12 +90,10 @@ PAT와 LLM 키는 Windows 자격 증명 관리자(keyring, 서비스 `work-kb`)�
    schtasks /Create /TN work-kb-lint /XML "D:\work\work-kb\.state\schedule\work-kb-lint.xml" /F
    ```
 
-   경로는 예시다. 실제 경로는 `kb.py schedule` 출력을 쓴다. `/F`는 같은 이름의 작업이 있으면 덮어쓴다
-   (다시 만들 때 쓰면 된다).
-
-   `/XML` 경로는 위처럼 큰따옴표로 감싼 채 붙여 넣는다(한글·공백 경로). PowerShell의 큰따옴표 안에서는 `$`와
-   백틱(`` ` ``)이 변수·이스케이프로 해석되므로, 경로에 이 문자가 있으면 그 줄은 cmd에서 실행하거나 작은따옴표(`'…'`)로
-   바꿔 감싼다.
+   - 경로는 예시다. 실제 경로는 `kb.py schedule` 출력을 쓴다.
+   - `/F`는 같은 이름의 작업을 덮어쓴다(다시 만들 때).
+   - `/XML` 경로는 큰따옴표째 붙여 넣는다. 경로에 `$`나 백틱(`` ` ``)이 있으면 PowerShell이 해석하므로,
+     그 줄은 cmd에서 실행하거나 작은따옴표(`'…'`)로 바꿔 감싼다.
 
 3. 저장소를 다른 폴더로 옮겼거나 `.venv`를 다시 만들었으면 1~2를 다시 한다(XML에 절대 경로가 들어 있다).
 
@@ -126,7 +126,7 @@ schtasks /Run /TN work-kb-sync
 | 1 | 일반 실패 (볼트의 `.state/logs/kb.log` 확인, 필요하면 콘솔에서 같은 명령을 직접 실행) |
 | 2 | 인증 실패 (PAT·키) → `kb.py doctor` |
 | 3 | 네트워크 실패 (다음 회차에 다시 시도) |
-| 4 | 설정 오류(Python 3.14 미만·필수 패키지 누락 사전 점검 포함) → `kb.py doctor` |
+| 4 | 설정 오류(Python 3.14 미만·필수 패키지 누락 포함) → `kb.py doctor` |
 | 5 | 회사 환경에서 공개 호스트·공개 IP 리터럴 거부 |
 | 6 | 잠금(다른 작업이 실행 중) 또는 파일 사용 중 → 다음 회차에 다시 |
 | 7 | 정책 거부 (`KB_AGENT=1` 등) |
@@ -137,9 +137,11 @@ schtasks /Run /TN work-kb-sync
 
 ## 로그
 
-- 각 스크립트가 볼트의 `.state/logs/kb.log`(`<볼트>\.state\logs\kb.log`)에 남긴다. 오류도 여기에 기록된다
-  (1MB씩 3개까지 돌려 씀, 비밀값은 가림). `Last Result`가 0이 아니면 먼저 이 로그의 마지막 줄들을 본다.
-- `pythonw.exe`에는 콘솔이 없어 화면 출력은 창에 뜨지 않는다(`kb.py`는 `stderr`가 없을 때 오류를 `kb.log`에 쓴다). 로그로 부족하면 같은 명령을 콘솔에서 직접 실행해 본다(저장소 밖 볼트면 `--root "<볼트>"` 추가):
+- 각 스크립트가 볼트의 `.state\logs\kb.log`에 남긴다(1MB씩 3개까지 돌려 씀, 비밀값은 가림).
+  `Last Result`가 0이 아니면 먼저 이 로그의 마지막 줄들을 본다.
+- `pythonw.exe`에는 콘솔이 없어 오류를 모두 이 로그에 쓴다. 사전 점검(Python 버전·패키지) 오류와
+  예상하지 못한 예외(traceback, 종료 1)도 들어간다.
+- 로그로 부족하면 같은 명령을 콘솔에서 직접 실행해 본다(저장소 밖 볼트면 `--root "<볼트>"` 추가):
 
   ```powershell
   cd <저장소>
