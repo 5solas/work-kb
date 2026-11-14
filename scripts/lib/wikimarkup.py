@@ -143,7 +143,6 @@ def _convert(text: str) -> str:
 
     out: list[str] = []
     table: list[tuple[bool, str]] = []
-    list_widths: list[int] = []  # unused state kept simple
 
     def flush_table() -> None:
         if table:

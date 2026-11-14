@@ -407,7 +407,7 @@ def _stale_stubs(vault: _Vault) -> _Section:
 def _similar_titles(vault: _Vault) -> _Section:
     section = _Section("similar_titles", "유사 제목 쌍")
     for sub, kind in (("topics", "topic"), ("people", "person")):
-        names: list[tuple[str, str, str]] = []  # (정규화, 이름, rel)
+        names: list[tuple[str, str]] = []  # (정규화, rel)
         prefix = f"wiki/{sub}/"
         for rel, data in sorted(vault.md.items()):
             if not rel.startswith(prefix) or "/" in rel[len(prefix):]:
@@ -415,9 +415,9 @@ def _similar_titles(vault: _Vault) -> _Section:
             name = str(_fm(data).get("name") or rel[len(prefix):-3]).strip()
             key = _SEPARATORS.sub("", _fold(name))
             if key:
-                names.append((key, name, rel))
-        for i, (key_a, name_a, rel_a) in enumerate(names):
-            for key_b, name_b, rel_b in names[i + 1:]:
+                names.append((key, rel))
+        for i, (key_a, rel_a) in enumerate(names):
+            for key_b, rel_b in names[i + 1:]:
                 matcher = difflib.SequenceMatcher(None, key_a, key_b)
                 if matcher.real_quick_ratio() < SIMILARITY or matcher.quick_ratio() < SIMILARITY:
                     continue
@@ -1054,12 +1054,6 @@ def _t5_section(vault: _Vault, outcome: dict | None, previous: list[str] | None)
 
 
 # ---------------------------------------------------------------- 실행
-
-
-SECTION_ORDER = (
-    "orphans", "stale_stubs", "similar_titles", "broken_links", "stale_cache", "outbox",
-    "old_proposed", "pending_proposals", "images", "gave_up", "broken_markers", "contradictions",
-)
 
 
 def _render(vault: _Vault, sections: Sequence[_Section]) -> str:
