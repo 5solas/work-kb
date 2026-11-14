@@ -805,3 +805,60 @@ def test_keys_need_ascii_digits():
     out, _ = link.normalize_text("KB-１２ 배포 확인", ("KB",))
     assert out == "KB-１２ 배포 확인"
     assert notes.find_keys(out, ("KB",)) == []
+
+
+def test_topic_mentions_by_name_alias_and_link(vault, fake_now):
+    fake_now(NOW)
+    cfg = _setup(vault)
+    topic = _write(
+        vault,
+        "wiki/topics/캐시.md",
+        "---\ntype: topic\nname: 캐시\naliases: [TTL, X]\nupdated: 2026-11-01\n---\n# 캐시\n\n"
+        "## 언급\n<!-- kb:mentions:start -->\n<!-- kb:mentions:end -->\n",
+    )
+    _write(
+        vault,
+        "daily/2026-11-15.md",
+        "## 기록\n"
+        "- 09:00 [[topics/캐시]] 구조 논의\n"
+        "- 10:00 TTL 정책 조정\n"
+        "- 11:00 캐시 무효화 조건 정리\n"
+        "- 12:00 X 1글자 별칭은 무시 · HTTPTTL 도 무시 · `TTL` 인라인 코드 무시\n",
+    )
+    link.run(cfg)
+    mentions = _region(topic)
+    assert any("09:00" in line for line in mentions)
+    assert any("10:00" in line for line in mentions)
+    assert any("11:00" in line for line in mentions)
+    assert not any("12:00" in line for line in mentions)
+
+
+def test_new_topic_invalidates_link_cache(vault, fake_now):
+    fake_now(NOW)
+    cfg = _setup(vault)
+    _write(vault, "daily/2026-11-15.md", "## 기록\n- 09:00 새주제 정책 검토\n- 10:00 AliasNew 검토\n")
+    link.run(cfg)
+    topic = _write(
+        vault,
+        "wiki/topics/새주제.md",
+        "---\ntype: topic\nname: 새주제\naliases: []\nupdated: 2026-11-01\n---\n# 새주제\n\n"
+        "## 언급\n<!-- kb:mentions:start -->\n<!-- kb:mentions:end -->\n",
+    )
+    link.run(cfg)
+    assert any("09:00" in line for line in _region(topic))
+    topic.write_text(
+        "---\ntype: topic\nname: 새주제\naliases: [AliasNew]\nupdated: 2026-11-01\n---\n# 새주제\n\n"
+        "## 언급\n<!-- kb:mentions:start -->\n<!-- kb:mentions:end -->\n",
+        encoding="utf-8",
+    )
+    link.run(cfg)
+    mentions = _region(topic)
+    assert any("10:00" in line for line in mentions)
+
+
+def test_link_does_not_create_topic_pages(vault, fake_now):
+    fake_now(NOW)
+    cfg = _setup(vault)
+    _write(vault, "daily/2026-11-15.md", "## 기록\n- 09:00 [[topics/존재하지않음]] 메모\n")
+    link.run(cfg)
+    assert not (vault / "wiki" / "topics" / "존재하지않음.md").exists()
