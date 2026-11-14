@@ -387,13 +387,13 @@ def page_template(kind: str, name: str, *, title: str | None, today: str) -> tup
             f"---\ntype: person\n{_fm_line('name', name)}updated: {today}\n---\n"
             f"# {name}\n\n## 개요\n\n## 최근 요약\n{_region('summary')}\n## 언급\n{_region('mentions')}"
         )
-        return Path("wiki") / "people" / f"{core.safe_name(name)}.md", body
+        return Path("wiki") / "people" / f"{core.link_safe_name(name)}.md", body
     if kind == "topic":
         body = (
             f"---\ntype: topic\n{_fm_line('name', name)}aliases: []\nupdated: {today}\n---\n"
             f"# {name}\n\n## 개요\n\n## 최근 요약\n{_region('summary')}\n## 언급\n{_region('mentions')}"
         )
-        return Path("wiki") / "topics" / f"{core.safe_name(name)}.md", body
+        return Path("wiki") / "topics" / f"{core.link_safe_name(name)}.md", body
     if kind == "decisions":
         return Path("wiki") / "decisions.md", f"# 결정 로그\n\n> LLM이 쓴 항목은 '제안'. 사람이 '확정'/'기각'으로 바꾼다.\n\n{_region('decisions')}"
     if kind == "actions":
@@ -420,6 +420,15 @@ def ensure_page(cfg: Config, kind: str, name: str | None = None, *, title: str |
 # ---------------------------------------------------------------- 뷰 표
 
 
+def _strip_outer_pipes(line: str) -> str:
+    inner = line[1:] if line.startswith("|") else line
+    if inner.endswith("|"):
+        slashes = len(inner) - 1 - len(inner[:-1].rstrip("\\"))
+        if slashes % 2 == 0:
+            inner = inner[:-1]
+    return inner
+
+
 def parse_table(text: str) -> list[dict[str, str]]:
     """첫 마크다운 표를 헤더 이름 → 셀 문자열의 dict 목록으로 읽는다."""
     rows: list[dict[str, str]] = []
@@ -430,7 +439,7 @@ def parse_table(text: str) -> list[dict[str, str]]:
             if header is not None:
                 break
             continue
-        cells = [c.replace("\\|", "|").strip() for c in re.split(r"(?<!\\)\|", stripped.strip("|"))]
+        cells = [c.replace("\\|", "|").strip() for c in re.split(r"(?<!\\)\|", _strip_outer_pipes(stripped))]
         if header is None:
             header = cells
             continue
@@ -445,8 +454,13 @@ def read_view(cfg: Config, name: str) -> list[dict[str, str]]:
     path = cfg.path("jira", "_views", f"{name}.md")
     if not path.exists():
         return []
-    _front, body = frontmatter.split(path.read_bytes())
-    rows = parse_table(decode(body))
+    try:
+        _front, body = frontmatter.split(path.read_bytes())
+        text = decode(body)
+    except UnicodeDecodeError as exc:
+        core.get_logger(cfg.root).warning("%s: %s (%s)", NOT_UTF8, path, exc)
+        return []
+    rows = parse_table(text)
     for row in rows:
         raw = row.get("키", "")
         links = wikilinks(raw)

@@ -281,3 +281,26 @@ def test_find_keys_keeps_bracketed_links_and_skips_embeds():
     text = "- [[KB-12]] [[jira/KB-13]] ![[raw/assets/KB-12-whiteboard.png]] ![[KB-14]] [[KB-15-설계]] KB-16"
     found = notes.find_keys(text, ["KB"])
     assert [(m.key, m.bracketed) for m in found] == [("KB-12", True), ("KB-13", True), ("KB-16", False)]
+
+
+def test_page_template_link_safe():
+    rel, _ = notes.page_template("topic", "a #b [c]|d", title=None, today="2026-11-05")
+    assert rel.stem == "a -b -c-d"
+    assert not any(ch in rel.stem for ch in "[]#^|")
+
+
+def test_parse_table_keeps_empty_last_cell():
+    table = "| 키 | 제목 |\n|---|---|\n|| 요약 |\n| KB-1 ||\n"
+    rows = notes.parse_table(table)
+    assert rows == [{"키": "", "제목": "요약"}, {"키": "KB-1", "제목": ""}]
+    assert notes.parse_table("| A ||\n|---|---|\n| 1 | 2 |\n") == [{"A": "1", "": "2"}]
+
+
+def test_read_view_bad_utf8(vault):
+    cfg = _cfg(vault)
+    view = vault / "jira" / "_views" / "today.md"
+    view.parent.mkdir(parents=True, exist_ok=True)
+    view.write_bytes(b"\xff\xfe| bad |")
+    assert notes.read_view(cfg, "today") == []
+    log_text = (vault / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+    assert notes.NOT_UTF8 in log_text
