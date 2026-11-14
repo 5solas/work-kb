@@ -413,14 +413,15 @@ def detect_context(client: LlmClient, profile: str) -> dict:
     def assumed(why: str) -> dict:
         return {"context_tokens": ASSUMED_CONTEXT, "context_source": "assumed", "evidence": f"{why} → {ASSUMED_CONTEXT} 가정"}
 
-    try:
-        models = client.list_models(profile)
-    except core.PublicHostRefused:
-        raise
-    except ChatHttpError as exc:
-        return assumed(f"/models 실패({exc.status})")
-    except core.KbError as exc:
-        return assumed(f"/models 실패({_snippet(_error_text(exc), 120)})")
+    with _no_429_retry():
+        try:
+            models = client.list_models(profile)
+        except core.PublicHostRefused:
+            raise
+        except ChatHttpError as exc:
+            return assumed(f"/models 실패({exc.status})")
+        except core.KbError as exc:
+            return assumed(f"/models 실패({_snippet(_error_text(exc), 120)})")
     if models is None:
         return assumed("/models 없음")
     entry = next((m for m in models if str(m.get("id") or "") == model), None)
@@ -472,7 +473,9 @@ def detect_reasoning(client: LlmClient, profile: str, budget: Budget) -> dict:
     probes: list[dict] = []
     warnings: list[str] = []
     try:
-        baseline = _post(client, profile, budget, probes, "baseline", _messages(ARITHMETIC_PROMPT), None, "토글 없음")
+        baseline = _post_settled(
+            client, profile, budget, probes, "baseline", _messages(ARITHMETIC_PROMPT), None, "토글 없음"
+        )
     except BudgetExhausted as exc:
         raise DetectError(f"탐지 예산이 없어 기준선을 보내지 못했습니다: {exc}", probes) from exc
     if baseline is None:

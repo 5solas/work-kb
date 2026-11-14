@@ -55,6 +55,9 @@ FORCED_JSON_RULE = (
 )
 
 _FENCED = re.compile(r"^```[A-Za-z0-9_-]*[ \t]*\n(.*?)\n?```\s*$", re.DOTALL)
+_THINK_OPEN = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
+_THINK_ANY = re.compile(r"</?think(?:ing)?>", re.IGNORECASE)
 
 Messages = list[dict[str, Any]]
 MessagesFor = Union[Callable[[int], Messages], Sequence[Mapping[str, Any]]]
@@ -162,9 +165,9 @@ def _text_of(content: Any) -> str:
 def normalize_message(message: Mapping) -> tuple[str, str | None]:
     """(답, 생각)으로 나눈다(D39).
 
-    - 생각: `reasoning` 또는 `reasoning_content` 필드, content 안 마지막 `</think>` 앞부분
-      (`<think>`가 있든 없든), 닫히지 않은 `<think>…`(잘림).
-    - 답: 마지막 `</think>` 뒤의 글. content가 None이면 "".
+    - 생각: `reasoning` 또는 `reasoning_content` 필드, content 안 마지막 `</think>`·`</thinking>`
+      앞부분(대소문자 무시), 닫히지 않은 `<think>`·`<thinking>…`(잘림).
+    - 답: 전체 content가 이미 올바른 JSON이면 태그를 자르지 않고 그대로 둔다.
     """
     if not isinstance(message, Mapping):
         return "", None
@@ -174,17 +177,30 @@ def normalize_message(message: Mapping) -> tuple[str, str | None]:
         value = message.get(key)
         if isinstance(value, str) and value.strip() and value.strip() not in traces:
             traces.append(value.strip())
-    cut = content.rfind("</think>")
-    if cut >= 0:
-        head = content[:cut].replace("<think>", "").replace("</think>", "").strip()
-        content = content[cut + len("</think>"):]
-        if head:
-            traces.append(head)
-    elif content.lstrip().startswith("<think>"):
-        rest = content.lstrip()[len("<think>"):].strip()
-        if rest:
-            traces.append(rest)
-        content = ""
+    stripped = content.strip()
+    is_json = False
+    if stripped:
+        try:
+            json.loads(stripped)
+            is_json = True
+        except (ValueError, TypeError):
+            is_json = False
+    if not is_json:
+        closes = list(_THINK_CLOSE.finditer(content))
+        if closes:
+            last = closes[-1]
+            head = _THINK_ANY.sub("", content[: last.start()]).strip()
+            content = content[last.end() :]
+            if head:
+                traces.append(head)
+        else:
+            leading = content.lstrip()
+            opened = _THINK_OPEN.match(leading)
+            if opened:
+                rest = leading[opened.end() :].strip()
+                if rest:
+                    traces.append(rest)
+                content = ""
     return content.strip(), ("\n\n".join(traces) or None)
 
 

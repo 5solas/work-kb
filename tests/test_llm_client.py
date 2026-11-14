@@ -182,6 +182,19 @@ def test_normalize_message_not_mapping():
     assert normalize_message(None) == ("", None)  # type: ignore[arg-type]
 
 
+def test_literal_close_think_inside_json():
+    payload = '{"decisions":[{"title":"t","content":"use </think> to end","source_line":"L1"}],"actions":[]}'
+    content, reasoning = normalize_message({"content": payload})
+    assert content == payload and reasoning is None
+    assert llm_client.parse_json_object(content)["decisions"][0]["content"] == "use </think> to end"
+
+
+def test_uppercase_and_thinking_tags():
+    assert normalize_message({"content": '<THINK>reasoning {here}</THINK>{"x":1}'}) == ('{"x":1}', "reasoning {here}")
+    assert normalize_message({"content": '<thinking>reasoning {here}</thinking>{"x":1}'}) == ('{"x":1}', "reasoning {here}")
+    assert normalize_message({"content": "  \n<THINKING>cut off"}) == ("", "cut off")
+
+
 # ---------------------------------------------------------------- 분량
 
 
