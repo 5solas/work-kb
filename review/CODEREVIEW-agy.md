@@ -86,3 +86,20 @@
 | `P-15` (`nvim/lua/work-kb/config.lua`) | `in_dir`의 `real_path` 폴백 비활성화 | 실패 (`applies through a junction`, `RC=1`) |
 | `P-19` (`scripts/wheels.py`) | `core.refuse_if_agent("wheels")` 제거 | 실패 (`test_wheels_main_refuses_agent`, `RC=1`) |
 | `P-20` (`scripts/kb.py`) | `_preflight` Python 최소 버전을 `(3, 13)`으로 복원 | 실패 (`test_preflight_rejects_313`, `RC=1`) |
+
+---
+
+## 4. 재확인 (3단계-2, `claude` `d21456b..4f42e61` · 기록 `b72f46d`)
+
+내 브랜치(`f186c65`)에서 파생한 임시 브랜치 `tmp/recheck-claude-stage3`에 `b72f46d`를 충돌 없이 병합해 확인한 뒤 임시 브랜치·워크트리를 삭제했다(작업 브랜치 `5solas/nvim-review-agy`에는 미병합).
+
+| R-ID | 커밋 | 판정 | 확인 근거 |
+|---|---|---|---|
+| `R-agy-01` | `d21456b` | **해소** | `open.lua` `scan_char`/`person_name`이 `0x1100..0x11FF` 포함 후 `names.nfc` 변환·`name_char` 절단을 수행하며 `open_spec.lua`에 NFD·단독 자모 3건 추가. 병합 상태에서 `C-12_C-13_name_parity.py` 전 항목 `SAME` · `OK` (종료 0) |
+| `R-agy-02` | `a4b0707` | **해소** | `tests/test_serve.py::test_exits_after_code_change`가 `ping` 루프와 `utime` 경합을 분리(준비 줄 뒤·첫 요청 전 파일 갱신). 병합 상태에서 대상 4개 스위트 `77 passed, 1 skipped` 및 전체 `pytest -q -n auto` 2회 연속 각 `2284 passed, 4 skipped` |
+| `R-agy-03` | `0a8fe5f` | **해소** | `install.ps1:480`이 `Test-SamePath $entry.value $cur` 사용, `test_env_moved_clone_matches_path_case_insensitively` 통과 |
+| `R-agy-04` | `005c12b` | **해소** | `fileio.lua` `write_bytes`가 `current == nil and uv.fs_stat(path) ~= nil`일 때 `RENAME_TRIES` 백오프 재시도 후 잠금 오류 구분 보고, `capture_spec.lua`(`test_nvim.py` 포함) 통과 |
+| `R-agy-05` | `4f42e61` | **해소** | `tests/test_dash_args_claude.py::test_sync_jql_equals_form_accepts_dash_values`가 `--jql=...` 허용 및 `--jql -hong` 거부를 검증·통과 |
+
+- **`docs/DECISIONS.md` D-NV4 (`124fbca`) 확인**: `P-51`, `P-55`, `P-56`, `P-58`, `P-61`, `P-67`, `P-69`, `P-70`, `P-74` 요약 모두 실제 Python 구현과 일치한다(불일치 없음).
+- **최종 판정**: **승인**
