@@ -4,7 +4,9 @@
 
 ## 0. 상태 요약과 사용자 확인 대기 (2026-11-15 기준, nvim 판)
 
-Phase 0~6 구축과 Neovim 포팅(6장) 완료. 자동 관문은 전부 통과했고(§3의 Phase별 기록, `docs/USER-GUIDE.md` 9절), 아래는 코드로 확인할 수 없어 **사용자가 직접 확인해야 하는 항목**이다(D31). 확인되면 이 목록에서 지운다. Emacs 판의 같은 목록은 `main` 브랜치에 있다.
+Phase 0~6 구축, Neovim 포팅(6장), `nvim` 브랜치 개선 병합(`d168f6c..11a4a7c`, 커밋 `11a4a7c`) 완료. 현재 검증 대상은 Python 3.14(`uv venv --seed --python 3.14 .venv`, `uv pip install -r requirements-dev.txt`), Neovim 0.12 이상이다(`D-NV1`, `D-NV2`). 자동 관문은 통과했고(`docs/USER-GUIDE.md` 9절), 보류 항목(`P-97`~`P-101`)은 6장 `D-NV7`에 적었다.
+
+아래는 코드로 확인할 수 없어 **사용자가 직접 확인해야 하는 항목**이다(D31). 확인되면 이 목록에서 지운다. Emacs 판의 같은 목록은 `main` 브랜치에 있다.
 
 | Phase | 항목 | 방법 |
 |---|---|---|
@@ -17,6 +19,7 @@ Phase 0~6 구축과 Neovim 포팅(6장) 완료. 자동 관문은 전부 통과�
 | 6 | 스케줄 등록 | `kb.py schedule --print`가 낸 `/Create` 하나 등록 → `/Run` → `/Query` → `/Delete` |
 | 6 | capture.ahk (선택) | AutoHotkey v2 설치 후 Ctrl+Alt+Shift+C/V → `nvd` 데몬에 `:WorkKb capture`·`capture-clipboard-image` |
 | 6장 | 새 PC 설치 | nvim-config 설치 → `install.ps1` → 새 터미널에서 `nvd --restart` → `:checkhealth work-kb`(`docs/USER-GUIDE.md` 5.2절) |
+| 6장 | 보류 항목 확인(`D-NV7`) | 실제 Jira DC에서 `P-98`(상대 JQL 페이지네이션), `-m live`에서 `P-99`(스키마 재시도 피드백), `P-97`·`P-100`·`P-101` 처리 방침 확정 |
 | 회사 | §9 전체 | 실제 Jira·Confluence·사내 LLM은 집에서 확인 불가. `doctor`와 `sync --jql … --dry-run`으로 첫 실행 확인 |
 
 ## 1. 지시서와 달라지는 점
@@ -27,7 +30,7 @@ Phase 0~6 구축과 Neovim 포팅(6장) 완료. 자동 관문은 전부 통과�
 |---|---|---|
 | §2 최신 Python(3.13+) | 3.14 하나만 지원·검증(D-NV1, 6장). 3.13 게이트 없음. 3.15는 미지원으로 안내 | PyYAML 6.0.3에 cp315 wheel이 없음(확인함), `wheels/` 경로가 깨짐. 3.13만의 문제는 없었고 두 버전을 맞추는 비용만 있었음 |
 | §6.8 `work-kb-python` 기본 `py -3` | Neovim 플러그인 `python` 옵션은 기본 없음. `.venv` → `python` → `py -3` 순으로 찾음 | `py -3`이 이 PC에서 실패(확인함) |
-| §6.8 utf-8 인수 전달 | 명령줄은 ASCII만, 실제 인수는 stdin JSON(`--argv-stdin`). Neovim 판도 같은 방식 | 편집기가 한글 인수를 깨뜨림(Emacs에서 확인) |
+| §6.8 utf-8 인수 전달 | 명령줄은 ASCII만, 실제 인수는 stdin JSON(`--argv-stdin`). Neovim 판은 `--옵션=값` 형식과 위치 인수 앞 `--`를 함께 씀(`D-NV5`) | 편집기가 한글·`-`로 시작하는 자유 문자열 인수를 깨뜨리지 않게 함 |
 | §6.8 `clip_image.ps1` | `powershell.exe` 5.1 `-STA`로 실행 | pwsh 7에 `-Format` 없음(확인함) |
 | §6.8 AHK Win+Shift+C/V, `emacsclient -n -e` | Ctrl+Alt+Shift+C/V. Neovim 판은 nvim-config 데몬(`nvd`)에 `:WorkKb`를 보냄(6장 8) | PowerToys가 Win+Shift+C를 점유(에이전트 보고, 내 재확인 없음) |
 | §4 `emacs/` 폴더, §6.8 Emacs 판 | `nvim/` 폴더의 Neovim 플러그인(`lua/work-kb/`, `plugin/`, `after/ftplugin/`, `capture.ahk`). 일반 설정은 nvim-config | nvim 브랜치는 Neovim 판(6장 1·4) |
@@ -54,8 +57,8 @@ Phase 0~6 구축과 Neovim 포팅(6장) 완료. 자동 관문은 전부 통과�
 원문 D번호를 다음과 같이 고친다.
 
 **구축 시작**
-- D01: `UV_PYTHON_NO_REGISTRY=1`로 `uv venv --seed --managed-python`. 안 지정하면 낡은 레지스트리 항목 때문에 3.13 탐색이 오류로 끝남(확인함). 실패하면 `%APPDATA%`의 uv 3.13.0을 절대 경로로 사용.
-- D02: `kb.py` 맨 앞에 표준 라이브러리만 쓰는 사전 점검을 둠. Phase 6에서 cp315 PyYAML wheel 빌드를 시도하고 결과를 기록.
+- D01: `UV_PYTHON_NO_REGISTRY=1`로 `uv venv --seed --managed-python`. 안 지정하면 낡은 레지스트리 항목 때문에 3.13 탐색이 오류로 끝남(확인함). 실패하면 `%APPDATA%`의 uv 3.13.0을 절대 경로로 사용. *(3.13 관문·지원 범위는 대체됨 → 6장 `D-NV1`: Python 3.14 단일 대상)*
+- D02: `kb.py` 맨 앞에 표준 라이브러리만 쓰는 사전 점검을 둠. Phase 6에서 cp315 PyYAML wheel 빌드를 시도하고 결과를 기록. *(사전 점검 하한은 3.14, wheel 묶음은 cp314만 대상 → 6장 `D-NV1`)*
 - 코드 루트와 볼트 루트를 분리: `--root`/`KB_ROOT`, Neovim은 setup의 `root` + `vault`(요청마다 `--root`로 넘김. Emacs 판은 `work-kb-root` + `work-kb-vault`).
 - `is_public_host`를 Phase 0의 `lib/config.py`로 옮기고 Phase 0 doctor부터 사용. LLM 요청은 `allow_redirects=False`, 호스트 끝의 점 제거.
 - `kb_lock`은 프로세스 안에서 재진입 가능. `jira_act`는 네트워크 전송과 `sync_key` 전에 잠금 해제.
@@ -363,17 +366,17 @@ Principles are the §3 numbers.
 | D06 | Import only as `from lib import secrets as kb_secrets`. Never put `scripts/lib` on `sys.path`. | [I] §4 |
 | D07 | `kb_root` resolves against the config folder. Root order: argument, `KB_ROOT`, `parents[2]` of `config.py`. `prompts/` and `AGENTS.md` resolve from code. | [I] §5.7 |
 | D08 | Additions to the §4 tree: `scripts/lib/{core,net,notes}.py`, `scripts/{status,search,demo}.py`, `tests/{conftest,fake_keyring,mock_all}.py`, the editor test suite (nvim branch: `tests/nvim/spec/*_spec.lua`, `tests/test_nvim.py`; the original named the ERT file of the `main` branch), `pytest.ini`, `requirements-dev.txt`, `.gitattributes`, `wiki/엔티티.base`. | §4, §6.9, §6.10 |
-| D09 | Dev dependency is pytest only. No `truststore`. Per-connection `ca_bundle` and `trust_env` keys in `config.local.yaml` cover company TLS and proxy. `doctor` separates SSL, proxy and auth failures. | [I] §5.7 |
+| D09 | Dev dependency is pytest only. No `truststore`. Per-connection `ca_bundle` and `trust_env` keys in `config.local.yaml` cover company TLS and proxy. `doctor` separates SSL, proxy and auth failures. **Supplemented in part by D-NV1 / D-NV6 (chapter 6): `requirements-dev.txt` adds `hypothesis`; relative `ca_bundle` resolves from `cfg.config_dir`.** | [I] §5.7 |
 
 **Emacs and clipboard**
 
 | ID | Decision | Basis |
 |---|---|---|
-| D10 | All Emacs-to-Python calls run `python -X utf8 scripts/kb.py --argv-stdin` with `default-directory` set to root. Real arguments go as a JSON array on stdin. Command lines stay ASCII. This replaces the §6.8 utf-8 argv assumption. | [V] round trip; [R] argv loss |
+| D10 | All Emacs-to-Python calls run `python -X utf8 scripts/kb.py --argv-stdin` with `default-directory` set to root. Real arguments go as a JSON array on stdin. Command lines stay ASCII. This replaces the §6.8 utf-8 argv assumption. **Superseded in part by chapter 6 (`D-NV5`): Neovim uses the same `--argv-stdin` mechanism plus `--옵션=값` and `--` before free-text positionals.** | [V] round trip; [R] argv loss |
 | D11 | `work-kb.el` binds `utf-8-unix` for new files and registers `<root>/.*\.md` in `modify-coding-system-alist` as `utf-8`. Existing files keep their EOL. Scanners report a non-UTF-8 file by name and continue. Enables auto-revert for vault buffers. | [V] Korean default is EUC-KR |
 | D12 | `clip_image.ps1` runs via `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -STA -File`. The script is ASCII only. It takes an ASCII relative path `.state/tmp/clip-<ts>.png` and exits 0 (saved), 2 (no image), 3 (error). Emacs renames and owns all Korean messages. If GPO blocks it: `doctor` ✗, and the hint points to `F`. No extra fallback code. | [V] §6.8; [R] RemoteSigned |
 | D13 | AHK uses `emacsclient -n -c -e`, because the daemon has only an invisible frame [R]. Default hotkeys are Ctrl+Alt+Shift+C and V (PowerToys holds Win+Shift+C [R]). README shows `<f8>` instead of `<f9>`, with a "check with `C-h k`" note. | §6.8 |
-| D14 | Search chain: `consult-ripgrep`, then `rg` in a grep buffer with the pattern via `-f -`, then `kb.py search`. Never `rgrep` unless GNU find is detected. `markdown-mode` and `consult` are soft dependencies. Custom sentinel so status text stays out of `*work-kb*`. | [R] no grep on PATH |
+| D14 | Search chain: `consult-ripgrep`, then `rg` in a grep buffer with the pattern via `-f -`, then `kb.py search`. Never `rgrep` unless GNU find is detected. `markdown-mode` and `consult` are soft dependencies. Custom sentinel so status text stays out of `*work-kb*`. **대체됨 → 1장·6장 `D-NV5`(K6): Neovim 검색 순서(`fzf-lua` → `rg` → `kb.py search`).** | [R] no grep on PATH |
 | D15 | Capture text starting `[ ] ` writes `- [ ] HH:MM 내용`. Parsers treat time as optional. If `daily_prepare` fails, Emacs still creates `## 기록` and captures. | P1, §5.1 |
 | D16 | Prompts accept empty input: inbox title becomes the first line (40 chars) or `메모`, and image name becomes `capture`. `safe_name` strips forbidden chars and escapes reserved names via `os.path.isreserved`. Collisions take `-2`, `-3`, never overwrite. | P1, P7 |
 
@@ -384,13 +387,13 @@ Principles are the §3 numbers.
 | D17 | Region modes: replace (`mentions`, `issues`, `summary`, `index`, `extracted`, `proposals`, `lint`), append (`decisions`, `actions`, existing bytes never altered), merge (`today`, `carryover`, done in `daily_prepare`, keeps human state keyed by Jira key or line text). | P6; §5.0 vs §5.5 |
 | D18 | Authoritative daily-write allowlist in AGENTS.md: capture append, `daily_prepare` skeleton/regions/`[>]`, link normalisation, promote key append. `compile` and `ingest` stay byte-immutable. `[>]` form keeps the text: `- [>] 개인: 회의실 예약 (2026-11-06로 이월)`. | §5.1, §10 |
 | D19 | Carryover source: all earlier dailies' `## 기록` `- [ ]` lines with no key, plus unchecked items in the latest earlier carryover. `[>]` makes reruns idempotent, with no ledger. Skipped days are covered. | §5.1 |
-| D20 | Link: each region is a pure function of its sources, sorted deterministically. The ledger is a rebuildable cache. One `core.line_hash()` over normalised text. Skip managed regions, code blocks and URLs for matching and normalising. Truncate before an open `[[`, strip embed `!`, omit a missing time, inbox sources link by filename. `@` needs no word char before it. | P6, §6.1 |
-| D21 | Sidecars all go to `inbox/<image-stem>.md` with `source_image`. Under `extracted`, render `jira_keys` in `project_keys` as `[[KEY]]` and people as `@이름`. Images stay in inbox until processed. Duplicate-hash drops go to `_trash/`. | §5.2, §6.5 |
-| D22 | Topics: link matches explicit links and literal names or aliases of 2+ chars. `proposals accept` creates `wiki/topics/<name>.md` with `aliases`, and `merge_with` appends an alias. Tags stay in the ledger, and link renders counts into `index` when present. | §5.0, §6.5 |
+| D20 | Link: each region is a pure function of its sources, sorted deterministically. The ledger is a rebuildable cache. One `core.line_hash()` over normalised text. Skip managed regions, code blocks and URLs for matching and normalising. Truncate before an open `[[`, strip embed `!`, omit a missing time, inbox sources link by filename. `@` needs no word char before it. **보완 → 6장 `D-NV4`(P-51)·`D-NV6`(P-40~P-52): 미닫힌 `---`, CommonMark 울타리, NFC `@이름`, `wikilink_spans`로 임베드·비키 위키링크 안 베어 키 제외.** | P6, §6.1 |
+| D21 | Sidecars all go to `inbox/<image-stem>.md` with `source_image`. Under `extracted`, render `jira_keys` in `project_keys` as `[[KEY]]` and people as `@이름`. Images stay in inbox until processed. Duplicate-hash drops go to `_trash/`. **일부 대체됨 → 6장 `D-NV4`(P-69)·`D-NV6`(P-68): 충돌 시 `<이름.확장자>.md` 사용(`sidecar_for`), 노트·위키 참조 이미지는 유지.** | §5.2, §6.5 |
+| D22 | Topics: link matches explicit links and literal names or aliases of 2+ chars. `proposals accept` creates `wiki/topics/<name>.md` with `aliases`, and `merge_with` appends an alias. Tags stay in the ledger, and link renders counts into `index` when present. **세부 보완 → 6장 `D-NV4`(P-51).** | §5.0, §6.5 |
 | D23 | `jira/*.md` is regenerated whole except `mentions` (explicit exception to §5.0). `updated` is rewritten only when a region changed. `decisions.md` and `actions.md` templates carry title and markers. Stubs have `stub: true`, and `o` treats them as no cache. | §5.3, §5.4 |
 | D24 | Malformed markers (start without end, duplicates): refuse that file, warn, and show it in lint. Missing headings: `daily_prepare` appends the skeleton below existing text. End of `## 기록` is the line before the next `## ` or EOF, ignoring trailing blanks. | P6 |
 | D25 | All managed I/O is bytes. New text uses the file's dominant EOL, BOM is tolerated. Scanners skip `.#*`, `#*#`, `*~`, `.*.tmp`. | §5.0, §7 |
-| D26 | One lock `.state/kb.lock` (`msvcrt.locking`, 60s, then exit 6) around write sections only. LLM and network calls run outside it, and sources are reread inside. `core.atomic_write`: same-dir temp, fsync, `os.replace`, retry on winerror 5/32/33 with backoff. `expect_sha256` detects a human edit, and that file is skipped and reported. Emacs capture edits the live buffer. | §8 collisions; [I] |
+| D26 | One lock `.state/kb.lock` (`msvcrt.locking`, 60s, then exit 6) around write sections only. LLM and network calls run outside it, and sources are reread inside. `core.atomic_write`: same-dir temp, fsync, `os.replace`, retry on winerror 5/32/33 with backoff. `expect_sha256` detects a human edit, and that file is skipped and reported. Emacs capture edits the live buffer. **Emacs 버퍼 캡처 대체됨 → 6장 `D-NV5`(P-05 Neovim 원자적 쓰기)·잠금 대상 보완 → `D-NV4`(P-56).** | §8 collisions; [I] |
 | D27 | Front matter parses with `yaml.BaseLoader` (all strings), so `on`, `NO` and timestamps survive. `set_fields` edits only named lines. Config uses SafeLoader, normalises reasoning from bool or str, and casts project keys to validated strings. `config.yaml` quotes `"on"` and `"off"`. | §5.7 |
 
 **Phase allocation and gates**
@@ -413,12 +416,12 @@ Principles are the §3 numbers.
 | D36 | Distinguishing signal is the trace (`reasoning`, `reasoning_content`, or `</think>` in content). The token rule is a tiebreak only: no trace in either, usage present, on ≥ 2×off, gap ≥ 30 (my starting value, not sourced). `/think` is accepted on trace only. An off call must yield non-empty content. Probe `max_tokens` is 1024. | [R] template has no `/think` |
 | D37 | Candidate 4 tests only `reasoning:{enabled}`. `max_reasoning_tokens`, `reasoning_budget_tokens` and `medium_effort` are manual hand-edits, documented in TROUBLESHOOTING. Record shape stays §5.7 `param` (`on_value`/`off_value` may be dicts), plus `system_prefix` and `none`, plus `source` and `evidence`. | §5.7 |
 | D38 | Vision probe uses an embedded 64×64 solid red PNG and requires the colour in the answer (deviates from 1×1). JSON probe requires `json.loads` to succeed. Runtime: if reasoning-on plus `response_format` gives 400 or empty content, retry once with prompt-forced JSON and keep that for the run. | [I] §6.11 |
-| D39 | `normalize_message`: read `reasoning` or `reasoning_content`. If `</think>` is in content, keep the text after the last one, with or without an opening tag. Empty or None content, or `finish_reason=length`, counts as a schema failure. | [R] vLLM, template |
+| D39 | `normalize_message`: read `reasoning` or `reasoning_content`. If `</think>` is in content, keep the text after the last one, with or without an opening tag. Empty or None content, or `finish_reason=length`, counts as a schema failure. **일부 대체됨 → 6장 `D-NV6`(P-66): 전체가 유효한 JSON이면 원문 유지, `<think>`/`<thinking>`(대소문자 무시) 뒤 JSON이 되는 첫 닫힘 태그 우선 선택.** | [R] vLLM, template |
 | D40 | Retry order: `task.profile`, then the rest of `fallback_order`. Connection, timeout, 429 or 5xx moves to the next profile. Schema failure retries once on the same profile (length failure doubles the budget, cap 16384), then moves on. Exhausted gives `skipped`, and after 3 runs `gave_up`, shown by lint and status. Exit 0. | §6.5 |
 | D41 | Add `max_output_tokens` per task: tag 64, decisions 8192, entity_summary 2048, topic_proposal 8192, image_ingest 2048, contradictions 8192. Input limit is `min(max_input_tokens, 0.8×context_tokens)`, images excluded. Split by date then line. T1 and T3 keep newest. T4 and T5 merge partials. Context lookup: `metadata.context_length`, `max_model_len`, `context_length`, else 262144 with `source: assumed`. Keep temperature 0. | [V] metadata; §6.5 |
 | D42 | Images: convert to RGB and send PNG or JPEG, one image per request, long side 1600. | [R] HF card, §6.5 |
 | D43 | Home fallback is `google/gemma-4-26B-A4B-it`. It is the closest to "gemma4-26b 급", has the same context as main and has vision. Detection wins over the §5.7 example. Selection filters `embed` and non-chat. Fallback behaviour at home does not carry over to the company's thinking-less Gemma. | [V] §11 |
-| D44 | Company guard lives in `LlmClient.__init__`, the only path to LLM HTTP, covering detection, doctor, ingest, compile and lint. Case-insensitive suffix match at a label boundary. All profiles are checked, and any hit refuses. Effective blocklist is code default ∪ config, so overrides only add. Missing or invalid environment means company. `KB_ENVIRONMENT` is ignored. `env:` refs are ✗ at company, and at home only `DEEPINFRA_API_KEY` is allowed. | §2 |
+| D44 | Company guard lives in `LlmClient.__init__`, the only path to LLM HTTP, covering detection, doctor, ingest, compile and lint. Case-insensitive suffix match at a label boundary. All profiles are checked, and any hit refuses. Effective blocklist is code default ∪ config, so overrides only add. Missing or invalid environment means company. `KB_ENVIRONMENT` is ignored. `env:` refs are ✗ at company, and at home only `DEEPINFRA_API_KEY` is allowed. **보완 → 6장 `D-NV4`(P-55): 공개 IP(`is_global`, IPv4-mapped 포함) 차단, 사설·루프백 IP는 차단 목록 일치 시만 거부.** | §2 |
 | D45 | `init --dev` reads the home block of `config.local.example.yaml`, so code holds no DeepInfra URL except the blocklist. It refuses (exit 7) if existing config says company. Stores `mock-token` as the dummy PAT. URL overrides via `KB_INIT_*`. | §6.11, §10 |
 | D46 | `demo` copies the sample vault to temp, writes a temp config with `main` pointing at mock_llm, never reads the repo's config, `.state` or `DEEPINFRA_API_KEY`, and refuses at company or when `examples/` is absent. The test asserts mock_llm received over 0 chat and vision requests. | §7 |
 | D47 | T2 dedupes decisions and actions on (file, line_hash) and writes `<!-- src:hash -->` per entry, so state can be rebuilt. Whole day is context, consumed lines are marked. Drop output whose `source_line` does not resolve. Reject keys outside `project_keys`. Checkbox and `[>]` lines are not actions. `--dry-run` calls the LLM and writes nothing. | §5.5, §6.5 |
@@ -431,17 +434,17 @@ Principles are the §3 numbers.
 | D49 | `jql_mine` becomes `updated >= '-30d'` (quoted). Sync runs `project in (...) AND (jql_mine)`; `--key` and `--jql` are not wrapped. Each view runs independently: a 400 logs Jira's message, keeps the old file, and exits 4 after other work. `init` and `doctor` validate views with `maxResults=0`. Views can be overridden in `config.local.yaml`. | [R] §5.7, §6.2 |
 | D50 | Incremental uses relative JQL `updated >= '-Nm'`, N = minutes since `last_sync` (taken at run start) plus 5, avoiding the profile-timezone problem. `last_sync` older than 25 days means full. `--full` means `jql_mine` scope. | [R] §6.2 |
 | D51 | `max_results` is page size. Advance `startAt` by `len(issues)`, append `ORDER BY key ASC`. Page comments when `total` exceeds returned. Sprint field is found from `/field` by `schema.custom == com.pyxis.greenhopper.jira:gh-sprint` and stored as `jira.sprint_field`. Parser accepts string and object forms. | [R] §5.3 |
-| D52 | Outbox handling: 401/403 stays pending, exit 2. Other 4xx and transition 500 become `failed` immediately. 5xx and connection refused stay pending, attempts+1. 429 consumes no attempt. Read timeout stays pending with `last_error: uncertain`, skipped unless `--retry-uncertain`. `flush --retry-failed` exists. Worklog `started` serialises as `yyyy-MM-dd'T'HH:mm:ss.SSSZ`. `flush` refuses projects not in `project_keys`. | [R] §6.3 |
+| D52 | Outbox handling: 401/403 stays pending, exit 2. Other 4xx and transition 500 become `failed` immediately. 5xx and connection refused stay pending, attempts+1. 429 consumes no attempt. Read timeout stays pending with `last_error: uncertain`, skipped unless `--retry-uncertain`. `flush --retry-failed` exists. Worklog `started` serialises as `yyyy-MM-dd'T'HH:mm:ss.SSSZ`. `flush` refuses projects not in `project_keys`. **보완 → 6장 `D-NV4`(P-61)·`D-NV6`(P-58·P-59·P-60): uncertain 상태 유지, 숫자 id 전환 오프라인 큐, 오래된 `sending`의 `uncertain` 계산(`status`), `promote` 다중 프로젝트 검사.** | [R] §6.3 |
 | D53 | Promote stores the line hash, refuses on mismatch, and appends ` [[NEW-1]]` to the source line, so carryover stops treating it as personal. Keep `assign`, add transient key `a`. Emacs asks `y-or-n-p` and passes `--yes`. | §6.3, §6.8 |
 | D54 | `net.request` is the one retry helper for Jira and Confluence: honour `retry-after`, else exponential backoff with a ceiling. | [R] rate limits |
 | D55 | Confluence personal space order is reversed: `/user/current` (stop if anonymous), then `/rest/api/space?spaceKey=~<username>`, then list `type=personal` and require a numbered choice. Empty parent means space homepage. | [R] §6.11 |
 | D56 | Push removes `mentions` regions and all markers, and publishes only `상태: 확정` entries of `decisions.md`. Output is XML-checked in the mock. Forbidden folders are refused in code (exit 7). Always `expand=version`. | §6.7 intent |
-| D57 | `KB_AGENT=1` refuses external writes and config: `act` writes, `flush`, `push`, `init`, `proposals accept`, `doctor --redetect`. Checked in the scripts too, so direct runs are covered. Tool-run `sync`, `link`, `compile`, `ingest`, `lint` stay allowed. Agents never hand-edit. | §5.6 vs §6.10 |
+| D57 | `KB_AGENT=1` refuses external writes and config: `act` writes, `flush`, `push`, `init`, `proposals accept`, `doctor --redetect`. Checked in the scripts too, so direct runs are covered. Tool-run `sync`, `link`, `compile`, `ingest`, `lint` stay allowed. Agents never hand-edit. **보완 → 6장 `D-NV5`(P-03·P-19): 공용 `kb.subcommand` 파서(`--root`·옵션 뒤 첫 위치 인수)로 직접·`serve` 통일, `wheels.py` 직접 실행도 거부.** | §5.6 vs §6.10 |
 | D58 | Tasks are created from generated XML (`schtasks /Create /TN work-kb-<name> /XML`): InteractiveToken, WorkingDirectory, StartWhenAvailable, IgnoreNew, `.venv\Scripts\pythonw.exe -X utf8`. Never `/NP` or SYSTEM. Logs in `.state/logs/`. Six tasks with flat names `work-kb-<name>` (no `work-kb\` task folder, see §2 D58): sync, prepare, link, ingest, compile, lint. Link 12:30/18:30, ingest 12:31/18:31, compile 12:32/18:32 so failures stay separate. (Corrected in the nvim branch: the original listed five names under a task folder.) Compile runs T4 when 7+ days have passed. | [V] options; [R] CredWrite |
 | D59 | "Confluence from the start" means connected and `enabled: true`. Pushing stays manual. `work-kb\compile` is created disabled at company, enable command in SCHEDULING.md, which resolves §9.9 vs §9.10. | §9, §11 |
 | D60 | DEPLOY step 1 adds exclusions: `.venv*`, `.git`, `jira/*.md`, `jira/_views/*.md`, `jira/outbox.jsonl`, generated `wiki/` pages, `inbox/`, `raw/assets/`. | §9.1 |
 | D61 | Keyring: strict ref parsing, `len(utf-16-le) <= 2560`, read back after store, reject the `fail` backend, catch all backend errors and diagnose in Korean. No fallback to file or env. | [R] §2, §11 |
-| D62 | Env overrides: `KB_<SECTION>_<KEY>`, two levels only, YAML scalars. Reserved: `KB_AGENT`, `KB_ROOT`, `KB_REQUIRE_LIVE`, `KB_FAKE_NOW`, `KB_INIT_*` (the editor-skip flag of the `main` branch does not exist in the nvim branch). `KB_INIT_{ENVIRONMENT,JIRA_URL,JIRA_PAT,JIRA_PROJECTS,CONFLUENCE_URL,CONFLUENCE_PAT,CONFLUENCE_SPACE,LLM_URL,LLM_MODEL,LLM_KEY}`. Secrets go to keyring. | §5.7, §7 |
+| D62 | Env overrides: `KB_<SECTION>_<KEY>`, two levels only, YAML scalars. Reserved: `KB_AGENT`, `KB_ROOT`, `KB_REQUIRE_LIVE`, `KB_FAKE_NOW`, `KB_INIT_*` (the editor-skip flag of the `main` branch does not exist in the nvim branch). `KB_INIT_{ENVIRONMENT,JIRA_URL,JIRA_PAT,JIRA_PROJECTS,CONFLUENCE_URL,CONFLUENCE_PAT,CONFLUENCE_SPACE,LLM_URL,LLM_MODEL,LLM_KEY}`. Secrets go to keyring. **보완 → 6장 `D-NV6`(P-48·P-53): 목록 허용 키 4종(`jira.project_keys`, `confluence.push_globs`, `llm.fallback_order`, `llm.public_hosts_blocklist`)만 YAML 리스트 파싱, 비-매핑 섹션은 즉시 `ConfigError`.** | §5.7, §7 |
 | D63 | FTS5 with `unicode61`, each term auto-prefixed `term*`, LIKE on zero hits. `kb.py search` adds a pure-Python scan of daily, inbox and wiki. | [R] Korean miss |
 | D64 | Bases filter with `file.inFolder`, exclude `_views`, require `file.hasProperty("status_category")` so stubs drop out, and `status_category != "done"`. Syntax checked against obsidian-help commit 578f73cc and app 1.15.0 [R]. `setup.md`: enable Bases, absolute link format, exclude `examples/ tests/ scripts/ nvim/ docs/ prompts/ obsidian/ _trash/ wheels/ .venv/ .venv313/` (nvim branch: `nvim/` replaces the editor folder of the `main` branch). T6 parser resolves bare names in `raw/assets`. | §6.9 |
 | D65 | Test design: ports 8081-8083 are for demo and manual use only. pytest uses port 0, `allow_reuse_address=False`. Autouse: remove key, loopback-only sockets, fake keyring. Subprocess env adds a dead `HTTPS_PROXY` and `NO_PROXY=127.0.0.1,localhost`. ERT is added to the tree and run under both console locales. | [V], [R] |
@@ -1001,24 +1004,58 @@ Conventions:
 8. `capture.ahk`: 자체 서버가 아니라 nvim-config 데몬(`nvd`)을 구동한다. AutoHotkey가 없는 PC에서 썼으므로 실행해 보지 못했다(미확인).
 9. nvim 판에서 대체된 기록. 지우지 않고 표시만 한다(이력은 git과 `main` 브랜치에 있다).
    - §0의 Emacs 확인 항목(텍스트·클립보드·파일 캡처, 접두 키 교체) → Neovim 키로 바꾼 §0 항목.
-   - §1의 Emacs 전제 행 → 같은 표의 Neovim 행(`emacs/`→`nvim/`, transient→자체 Jira 메뉴, 접두 인수 `g`→`G`, consult→fzf-lua·rg·`kb.py search`, §9.7→DEPLOY 7단계).
+   - §1의 Emacs 전제 행 → 같은 표의 Neovim 행(`emacs/`→`nvim/`, transient→자체 Jira 메뉴, 접두 인수 `g`→`G`, consult→fzf-lua·rg·`kb.py search`, §9.7→DEPLOY 7단계), utf-8 인수 전달 → `--옵션=값`과 `--` 보완(`D-NV5`).
+   - §2의 D01·D02(3.13 관문·사전 점검 하한) → `D-NV1`.
    - §3 Phase 기록의 **Emacs** 항목 → `main` 브랜치의 기록. nvim 판의 대응은 `nvim/lua/work-kb/*.lua`와 `tests/nvim/spec/*_spec.lua`.
    - §3 Phase 6의 docs·repo-tree 줄 → 고쳐 적었다(키 표 대조 대상, `capture.ahk`가 부르는 것).
-   - 부록 A: D03(상대 인터프리터 경로·ERT), D10(`--argv-stdin`은 Neovim도 그대로 씀), D11(코딩 시스템 → `after/ftplugin/markdown.lua`와 플러그인의 UTF-8·LF 쓰기), D13(AHK → `nvd`), D53의 transient 키, 2절의 Emacs 내부 계약, 3절 Phase 표의 Emacs 행 → nvim 판의 플러그인·Lua 스펙.
-   - 부록 A의 D08(편집기 시험), D58(작업 6개·평면 이름), D62(편집기 건너뛰기 환경 변수 없음), D64(`setup.md` 제외 목록의 `nvim/`) → 행을 그 자리에서 고쳤다.
-   - 부록 A의 D01·D02와 §1 표의 Python 행 중 3.13 부분 → D-NV1.
-10. 2026-11 개선 합의(`review/PLAN.md`)에서 정한 것.
-   - **D-NV1 지원 Python은 3.14 하나**: 지시서 §2의 "최신 안정(3.13+)", D01의 3.13 두 번째 관문(`.venv313`), D02의 cp313 wheel 묶음, §1 표의 Python 행을 대체한다. `kb.py`의 사전 점검은 3.14 미만이면 "Python 3.14가 필요합니다"로 종료 4. `kb.py doctor`도 같은 기준으로 ✗. `kb.py wheels`는 기본·허용 대상이 3.14뿐(cp314). `install.ps1`은 3.14 `.venv`만 그대로 쓰고, 새로 만들 때 uv·`py` 후보도 3.14만. 3.15 안내(PyYAML wheel 없음)는 그대로. 이유: 3.13에서만 생기는 문제는 없었고, 문서·시험·설치가 서로 다른 버전 범위를 말하고 있었다. 검증은 3.14 하나로 한다.
+   - 부록 A: D03(상대 인터프리터 경로·ERT), D10(`--argv-stdin`·`--옵션=값` 보완 → `D-NV5`), D11(코딩 시스템 → `after/ftplugin/markdown.lua`와 플러그인의 UTF-8·LF 쓰기), D13(AHK → `nvd`), D14(검색 사슬 → `D-NV5` K6), D53의 transient 키, 2절의 Emacs 내부 계약, 3절 Phase 표의 Emacs 행 → nvim 판의 플러그인·Lua 스펙.
+   - 부록 A의 D08(편집기 시험), D58(작업 6개·평면 이름), D62(편집기 건너뛰기 환경 변수 없음·목록 오버라이드 `D-NV6`), D64(`setup.md` 제외 목록의 `nvim/`) → 행을 그 자리에서 고쳤다.
+   - 부록 A의 D01·D02와 §1 표의 Python 행 중 3.13 부분 → `D-NV1`.
+   - 부록 A의 D09·D20·D21·D22·D26·D39·D44·D52·D57 → 6장 `D-NV1`, `D-NV4`~`D-NV6`로 보완·일부 대체 표시.
+10. 2026-11 개선 합의(`review/PLAN.md`, `d168f6c..11a4a7c`)에서 정한 것.
+   - **D-NV1 지원 Python은 3.14 하나**: 지시서 §2의 "최신 안정(3.13+)", D01의 3.13 두 번째 관문(`.venv313`), D02의 cp313 wheel 묶음, §1 표의 Python 행을 대체한다. `kb.py`의 사전 점검은 3.14 미만이면 "Python 3.14가 필요합니다"로 종료 4. `kb.py doctor`도 같은 기준으로 ✗. `kb.py wheels`는 기본·허용 대상이 3.14뿐(cp314). `install.ps1`은 3.14 `.venv`만 그대로 쓰고, 새로 만들 때 uv·`py` 후보도 3.14만. 3.15 안내(PyYAML wheel 없음)는 그대로. 개발 환경은 `uv venv --seed --python 3.14 .venv`로 pip를 포함해 만들고(`packaging`·`install` 시험 필요), `uv pip install -r requirements-dev.txt`로 설치한다(`requirements-dev.txt`에 `hypothesis` 추가). 이유: 3.13에서만 생기는 문제는 없었고, 문서·시험·설치가 서로 다른 버전 범위를 말하고 있었다. 검증은 3.14 하나로 한다.
    - **D-NV2 Neovim 최소 0.12**: `health.lua`·`init.lua`(0.12)에 맞춰 `install.ps1`의 점검(`$MinNvim`)과 `kb.py doctor`의 편집기 줄도 0.12로. 문서도 0.12. 세 곳이 0.11과 0.12로 갈려 있었다. 플러그인은 0.12에서만 쓰고 시험했다.
-   - **D-NV3 상주 서버(`kb.py serve`) 정책**: 서버가 처리하는 명령은 `status`·`search`·`today`·`link`·`proposals list`·`act list`. `act transitions`는 Jira를 불러 오래 걸릴 수 있어 서버를 막지 않도록 빼고 한 번 실행으로 돌린다. 요청 하나의 시간 제한은 90초(kb 잠금 대기 60초 + 여유). 시간이 넘으면 서버를 끝낸다. 읽기 명령은 한 번 실행으로 한 번 다시 돌리고, 쓰기 명령(`today`·`link`)은 두 번 쓰지 않도록 다시 돌리지 않고 "시간 초과"로 실패한다. 시간 초과로 끝낸 뒤와 유휴 종료(0) 뒤에는 재시작 제한(60초)이 없다. 유휴 종료 순간 기다리던 요청은 한 번 실행으로 넘긴다. 서버는 가져온 `scripts/` 모듈 파일이 바뀌면 응답을 보낸 뒤 스스로 종료 0하고, 다음 요청이 새로 띄운다. 버린 안: 하트비트, Jira 시간 초과 단축(다른 명령에도 쓰여 부작용).
-   - **D-NV4 Python 쪽 동작 변경(agy 구현, 2단계)**: agy가 `review/IMPL-agy.md`에 낸 문안을 실제 코드(`ffcfca6`)와 대조해 고쳐 적었다.
+   - **D-NV3 상주 서버(`kb.py serve`) 정책**: 서버가 처리하는 명령은 `status`·`search`·`today`·`link`·`proposals list`·`act list`. `act transitions`는 Jira를 불러 오래 걸릴 수 있어 서버를 막지 않도록 빼고 한 번 실행으로 돌린다(K1). 요청 하나의 시간 제한은 90초(kb 잠금 대기 60초 + 여유). 시간이 넘으면 서버를 끝낸다. 읽기 명령은 한 번 실행으로 한 번 다시 돌리고, 쓰기 명령(`today`·`link`, `today --check-done`도 `proc.lua`의 `WRITES`에 포함)은 두 번 쓰지 않도록 다시 돌리지 않고 "시간 초과"로 실패한다. 시간 초과로 끝낸 뒤와 유휴 종료(0) 뒤에는 재시작 제한(60초)이 없다. 유휴 종료 순간 기다리던 요청은 한 번 실행으로 넘긴다. 서버는 가져온 `scripts/` 모듈 파일이 바뀌면 응답을 보낸 뒤 스스로 종료 0하고, 다음 요청이 새로 띄운다. `server.lua`의 `on_stdout`은 조각을 배열에 모았다가 `table.concat`으로 붙여 대용량 응답을 선형 시간에 처리한다(P-07). 버린 안: 하트비트, Jira 시간 초과 단축(다른 명령에도 쓰여 부작용).
+   - **D-NV4 Python 쪽 동작 변경(agy 구현, 2단계)**: agy가 `review/IMPL-agy.md`에 낸 문안을 실제 코드(`ffcfca6` 및 `11a4a7c`)와 대조해 적었다.
      - P-51 주제 연결(D22 세부): `link`는 `wiki/topics/*.md`의 `mentions`도 채운다. 주제는 파일 이름·front matter `name`·`aliases` 중 2자 이상인 것과 `[[topics/…]]` 링크로 찾는다. 캐시 지문에는 주제 목록의 `rel`·`name`·`aliases`만 넣어(본문·`updated:` 제외) 주제가 생기거나 별칭이 늘면 다시 맞춘다. 없는 주제 페이지는 만들지 않는다(주제 생성은 `proposals accept`만).
      - P-55 회사 모드 IP 차단(D44 보강): LLM 주소가 공개 IP(`ipaddress`의 `is_global`, IPv4-mapped 포함)면 공개 호스트로 보고 거부한다. 사설·루프백 IP는 허용하되 차단 목록에 그 IP가 있으면 거부한다.
-     - P-56 잠금: `config.save_local`, `ingest_images` 원장 저장(잠금 안에서 다시 읽어 병합), `lint`의 `wiki/_lint.md` 쓰기를 `kb_lock` 안에서 한다.
+     - P-56 잠금: `config.save_local`, `ingest_images` 원장 저장(성공 경로 `_write`의 `_merge_ledger` 포함, 잠금 안에서 다시 읽어 병합), `lint`의 `wiki/_lint.md` 쓰기를 `kb_lock` 안에서 한다.
      - P-58 전환 오프라인 큐(§6.3): `act transition KEY <숫자 id>`는 전환 목록 조회가 네트워크 오류면 확인 뒤 `{transition_id}`만 담아 pending으로 넣고 종료 3. 이름으로 준 전환은 목록이 있어야 하므로 지금처럼 실패한다. Neovim의 `t`는 목록을 먼저 받으므로 오프라인 큐는 명령줄에서만 쓰인다.
      - P-61 uncertain 유지(D52 보강): 원래 uncertain이던 기록은 다시 보낼 때 일시 오류(429·5xx·네트워크)가 나도 uncertain으로 남고 시도 횟수와 상관없이 failed가 되지 않는다. 확정 오류(그 밖의 4xx)는 failed.
      - P-67 HTML 주석 무력화 공용화(K2): `notes.defang_comments`가 `<!--`→`&lt;!--`, `-->`→`--&gt;`로 바꾼다. `compile`(모델 글), `ingest_images`(추출 글), `link`(멘션 줄), `lint`가 같이 쓴다. 지우지 않고 이스케이프하므로 중첩 입력으로 표식을 다시 만들 수 없다.
-     - P-69 사이드카 이름(K5): `lib/sidecar.sidecar_for(cfg, image)`. `inbox/<stem>.md`가 없거나 그 front matter `source_image`가 이 이미지면 그것, 아니면(사용자 노트·확장자만 다른 이미지) `inbox/<이름.확장자>.md`. `ingest_images`(수집·중복·이동 대상 이름)와 `status`(미처리 이미지 수)가 같이 쓴다.
+     - P-69 사이드카 이름(K5): `lib/sidecar.py`의 `sidecar_for(cfg, image)`. `inbox/<stem>.md`가 없거나 그 front matter `source_image`가 이 이미지면 그것, 아니면(사용자 노트·확장자만 다른 이미지) `inbox/<이름.확장자>.md`. `ingest_images`(수집·중복·이동 대상 이름)와 `status`(미처리 이미지 수)가 같이 쓴다.
      - P-70 Confluence 링크 거르기: storage 변환에서 링크는 `http`·`https`·`mailto`만 남기고 그 밖(`javascript:`·`data:`, 상대 경로·`#앵커` 포함)은 글자로 바꾼다. 이미지(`<img>`)는 주소와 상관없이 모두 alt 글자로 바꾼다. 위키링크(`[[…]]`)는 이 거르기와 따로 Confluence 링크·Jira 링크로 바뀐다.
-     - P-74 `init --yes`: 예/아니오 확인(`_confirm`)을 묻지 않고 "예"로 처리한다(기본값이 "아니오"인 질문도 예). 설정 값과 비밀값 입력은 그대로 묻는다. 작업 스케줄러 단계는 명령을 출력할 뿐 실행하지 않는다.
+     - P-74 `init --yes`: 예/아니오 확인(`_confirm`)을 묻지 않고 기본값과 상관없이 "예"로 처리한다(도움말에도 명시). 설정 값과 비밀값 입력은 그대로 묻는다. 작업 스케줄러 단계는 명령을 출력할 뿐 실행하지 않는다.
+   - **D-NV5 공통 파서·검색·Neovim 설계 결정(K3·K4·K6, `P-03`~`P-19`)**:
+     - K4(`P-03`) `kb.subcommand` 공용 파서: `kb.py`의 `subcommand(argv)`가 `--root` 값을 건너뛰고 첫 위치 인수로 명령(`act <하위 명령>` 포함)을 찾되 `--`나 다른 `-` 옵션을 만나면 멈추고 `None`을 반환한다. `kb.main`(`KB_AGENT=1`)과 `serve.refusal_reason`이 함께 쓰고, Neovim `proc.lua`의 `subcommand`가 같은 규칙을 따른다. `jira_act.main`에 검사를 미루는 안은 버렸다.
+     - K6(`P-23`) 검색 순서 문서화: Neovim `s` 검색(`fzf-lua` 정규식·대화형 → `rg` 리터럴 고정 문자열 → `kb.py search` 공백 AND 낱말)의 구현과 우선순위는 그대로 두고 차이만 `docs/USER-GUIDE.md`에 적는다.
+     - K3(`P-92`) `nvim/after` 경로: 수동 `rtp`에 `nvim/`만 넣으면 `nvim/after/`가 자동으로 추가되지 않으므로 `docs/USER-GUIDE.md`의 안내를 유지한다.
+     - `P-04` 자유 문자열 인수와 `--`: Neovim(`proc.lua`, `search.lua`)은 자유 문자열 옵션을 `--옵션=값`으로 넘기고 자유 문자열 위치 인수(`act assign`, `search`) 앞에 `--`를 넣어 `-`로 시작하는 글이 옵션으로 해석되지 않게 한다.
+     - `P-05` Neovim 원자적 캡처: `fileio.write_bytes`는 같은 폴더 임시 파일(`.파일명.pid.tmp`)에 쓰고 `uv.fs_fsync` 뒤 `uv.fs_rename`으로 바꾼다(공유 위반 시 최대 8회 백오프 재시도). 교체 직전 원본을 다시 읽어 사람이 고쳤으면 중단하고, 잠금 실패와 동시 편집을 구분해 알린다.
+     - `P-19` `wheels.py` 가드: `wheels.py`를 직접 실행할 때도 `core.refuse_if_agent("wheels")`로 `KB_AGENT=1` 실행을 거부한다.
+     - Neovim 링크·경로·키 정합(`P-10`~`P-18`):
+       - `open.lua`는 점 포함 페이지 링크(`[[Node.js]]`)에서 `.md`·이미지가 아니면 `<이름>`과 `<이름>.md`를 둘 다 찾는다(`P-10`).
+       - `today --check-done` 호출 시 현재 버퍼 날짜(`--date`)를 함께 넘긴다(`P-11`).
+       - `names.lua`의 공백 접기와 예약 문자(`ı`→`I`) 처리를 Python `core.safe_name`과 맞췄다(`P-12`).
+       - `open.lua`의 `@이름` 스캔은 한글 조합 자모(`U+1100`~`U+11FF`)를 포함해 읽고 `names.nfc`를 적용해 `notes.find_people`과 일치시킨다(`P-13`).
+       - `[[jira/KEY]]`·`[[KEY.md]]` 열기도 `[[KEY]]`와 같은 동기화 경로(`link_key`)를 쓴다(`P-14`).
+       - `config.vault_dir()`·`in_dir()`은 `fs_realpath`(없는 파일은 가장 가까운 기존 상위 폴더 기준)로 정션·심볼릭 링크·대소문자를 정규화해 상대 경로 또는 `nil`을 돌려준다(`P-15`).
+       - `rebind_prefix`는 `<leader>` 바인딩 시 실제 키(`keytrans(lhsraw)`)를 기억해 접두 변경 시 옛 키를 정확히 해제한다(`P-16`).
+       - `:checkhealth work-kb`는 상주 서버 `stopped` 상태를 오류가 아닌 `info`로 표시한다(`P-17`).
+       - `jira.promote`는 프로젝트 선택 프롬프트 전에 수정된 daily 버퍼를 저장해 `daily_line_ref()`를 고정하고, 실행 중 버퍼가 바뀌었으면 경고를 띄운다(`P-18`).
+   - **D-NV6 Python·Jira·LLM·파서 동작 정비(`P-40`~`P-75`)**:
+     - `P-57` 범위 밖 일감 403 처리: `jira_sync.fetch_out_of_scope`는 캐시된 `client.myself()`로 토큰 유효성을 확인한 뒤, 정상 토큰의 HTTP 403(권한 없는 타 프로젝트)을 404와 같이 범위 밖(`in_scope: false`)으로 처리한다. 만료 토큰은 기존처럼 종료 2, `sync --key` 직접 조회의 403 처리도 유지한다.
+     - `P-59`·`P-60` 오프라인 큐와 `promote`: `outbox.state_of`·`stale_after`·`pid_alive`를 `lib/outbox.py`로 옮겨 `status`도 오래되거나 죽은 프로세스의 `sending`을 `uncertain`으로 계산한다(`"불확실 N개"`). `act promote`는 설정된 모든 `project_keys`에 대해 `[[KEY-N]]` 중복을 검사하고, 완료(`done`) 뒤 후속 `link_promoted`·`outbox.update`의 `KbError`는 경고로 남기며 `linked: false`는 중복 완료로 치지 않는다.
+     - `P-65` `status --json`: JSON 출력에 `"jira": {"project_keys": [...]}`를 포함한다.
+     - `P-62`·`P-64` TLS 경로와 FTS 잠금: `net.resolve_conn`이 상대 경로 `ca_bundle`을 `cfg.config_dir` 기준으로 해석해 Jira·Confluence·LLM에 공통 적용한다(`P-62`). `fts.py`는 SQLite 잠금 오류를 `FileBusy`(종료 6)로 올려 FTS 인덱스 부재와 구분한다(`P-64`).
+     - `P-66`·`P-71`·`P-72` LLM 응답·탐지 내성: `llm_client.normalize_message`는 본문 전체가 유효한 JSON이면 그대로 두고, 아니면 `<think>`/`<thinking>`(대소문자 무시) 뒤에서 JSON(코드 울타리 포함)이 되는 첫 닫힘 태그 이후를 우선 취하며 없으면 마지막 닫힘 태그 이후를 쓴다(`P-66`). `llm_detect.detect_context`의 `GET /models`는 `_no_429_retry()`로 감싸고(`P-71`), `detect_reasoning` 기준 호출은 `_post_settled`로 일시 오류 시 1회 재시도한다(`P-72`).
+     - `P-68`·`P-73` 이미지 보존·Confluence 주석 제거: `ingest_images`는 `inbox/*.md`·`wiki/**/*.md`에서 참조 중인 inbox 이미지를 유지한다(`P-68`). `confluence_push.prepare`는 코드 울타리·인라인 코드 밖의 HTML 주석만 제거한다(`_strip_comments_outside_code`, `P-73`).
+     - `P-40`~`P-54`·`P-63` 파서·보안 세부: 미닫힌 `---`는 본문으로 처리(`frontmatter._locate` 기준, `P-40`), CommonMark 울타리 규칙(`P-41`)과 `section_span` 코드 안 제목 무시(`P-42`), Jira 키 숫자 `[0-9]+` ASCII 한정(`P-43`), `find_people`·제목·사이드카 이름 NFC 정규화(`P-44`·`P-47`), 단독 `\r`·`\r\r\n`·`NEL`·`U+2028`·`U+2029` 큰따옴표 스칼라 왕복(`P-45`·`P-46`·`P-49`), `config.parse_env_overrides`는 4개 목록 키(`jira.project_keys`, `confluence.push_globs`, `llm.fallback_order`, `llm.public_hosts_blocklist`)만 YAML 리스트로 파싱(`P-48`), 비-매핑 설정 섹션은 오버라이드 전 즉시 `ConfigError`(`P-53`), `safe_name` 예약 접두 포함 `max_len` 준수(`P-50`), `notes.find_keys`는 공용 `wikilink_spans`로 `![[...]]` 임베드·비키 위키링크 안 베어 키 제외(`P-52`), `page_template`의 `link_safe_name` 적용 및 표 파싱·비-UTF-8 방어(`P-54`), Confluence `wikimarkup` 중첩 플레이스홀더 반복 복원 및 `{quote}` 안 `{code}` 줄 앞 접두 처리(`P-63`).
+   - **D-NV7 보류·기각 기록(`P-97`~`P-101`, `P-93`)**:
+     - `P-97` (`link` 같은 크기·과거 mtime 소스 누락 및 `daily_prepare` 단독 실행 `FileBusy` 전파): 기존 동작 유지로 보류.
+     - `P-98` (상대 날짜 JQL 페이지네이션 쏠림): 실제 Jira DC 환경 확인 필요로 보류.
+     - `P-99` (LLM 스키마 재시도 직전 오류 피드백): `-m live` 검증 불가로 보류.
+     - `P-100` (`lint._fit` 최소 예산 2줄): 실제 효과 미검증으로 보류.
+     - `P-101` (`gave_up` 이미지 유령 경고): 정책 선택 필요로 보류.
+     - `P-93` (기각): 클립보드 임시 파일(`.state/tmp/clip-<ts>.png`)은 볼트 경로의 한글 문제로 ASCII 이름 유지.
    - 설치(`install.ps1`·`uninstall.ps1`): 매니페스트(`%LOCALAPPDATA%\work-kb\install-manifest.json`)는 클론끼리 함께 쓴다. `WORK_KB_ROOT` 기록에 정한 클론(`repo`)을 적고, `uninstall.ps1`은 자기 클론이 정한 값만 되돌린다. 다른 클론이 정한 값(그 폴더가 있음)은 `install.ps1`이 묻고(`-Yes`) 바꾸며 그 값을 이전 값으로 기록한다. 기록된 값의 폴더가 없으면(옮긴 클론) 우리 값으로 보고 처음 이전 값을 이어받는다. `-Offline`이면 uv 후보에 `--offline --no-python-downloads`를 붙인다.
