@@ -5,7 +5,7 @@
 저장소 전체(`main` 기반 핵심 모듈 + `nvim` 브랜치 프런트엔드, `scripts/`·`nvim/`·`prompts/`·`install.ps1`·`uninstall.ps1`·`tests/`·`docs/`)를 `work-kb-build-brief-v3.md`와 `docs/DECISIONS.md` 기준으로 교차 점검했다.
 Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5 passed`)·병렬 `-n auto`·`chcp 949`·선택 마커(`perf`·`demo`·`packaging`)와 Neovim 모의 E2E·정적/속성 검증까지 전수 실행했다.
 기존 `nvim` 브랜치 11건(`A-01`~`A-11`)에 더해 `link.py` 주제(`wiki/topics/*.md`) 연결 누락(D22), `jira_act` `uncertain`→`failed` 전락(D52), `wheels.py` `KB_AGENT=1` 거부 누락, 상대 `ca_bundle`·FTS 잠금 예외 누수·`ingest`/`lint`/`config` 잠금·경계 결함 16건을 새로 확인했다.
-정확성 23건(높음 5, 중간 15, 낮음 3)과 개선 4건(중간 2, 낮음 2), 총 27건을 보고하며 21건은 `review/repro/` 최소 재현 스크립트로 실패를 직접 재현했다.
+정확성 23건(높음 1, 중간 21, 낮음 1)과 개선 4건(낮음 4), 총 27건을 보고하며 21건은 `review/repro/` 최소 재현 스크립트로 실패를 직접 재현했다. (1단계-2 상호 검증에서 심각도 기준 및 코드 재확인에 따라 8건 심각도 정정 및 2건 설명 보완 반영)
 
 ## 검증 결과
 
@@ -35,7 +35,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 ### A-01
 - **파일:줄**: `scripts/kb.py:116-124`, `scripts/serve.py:66-78`, `nvim/lua/work-kb/proc.lua:574-580`
 - **분류**: 정확성
-- **심각도**: 높음
+- **심각도**: 중간 *(정정: 높음→중간, 과잉 거부만 발생하며 쓰기를 허용하지 않아 복구 가능)*
 - **문제**: `act list`·`act transitions`·`proposals list` 같은 2단어 하위 명령을 판정할 때 `argv[1]`(Lua는 `args[2]`) 고정 인덱스만 본다. `--root <경로>` 같은 옵션이 하위 명령 앞에 오면 `KB_AGENT=1`에서 읽기 허용 명령을 거부하고 `serve` 판정도 어긋난다.
 - **근거·재현**:
   - 재현 스크립트: `.venv\Scripts\python.exe -X utf8 review/repro/A-01_kb_agent_flag_order.py`
@@ -48,7 +48,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 ### A-02
 - **파일:줄**: `nvim/lua/work-kb/init.lua:408-427`, `nvim/lua/work-kb/server.lua:253-263, 352-378, 412-432`, `nvim/lua/work-kb/health.lua:76-91`
 - **분류**: 정확성
-- **심각도**: 높음
+- **심각도**: 중간 *(정정: 높음→중간, `server.available(key)`가 다음 요청 시 재시작하므로 영구 불일치는 아니며 `setup()` 즉시 종료 누락·주석 불일치에 해당)*
 - **문제**: `init.lua:422` 주석은 설정이 바뀌면 떠 있는 서버를 내린다고 적었지만, `init.lua:424`는 `not (cfg.server and cfg.server.enable)`일 때만 `server.stop()`을 부른다. `server.enable = true`인 채로 `root`·`vault`·`python`·`server.idle_sec`를 바꿔 `setup()`을 다시 불러도 기존 서버가 내려가지 않는다.
 - **근거·재현**:
   - 재현 스크립트: `nvim --headless -u tests/nvim/minimal_init.lua -l review/repro/A-02_setup_server_restart.lua`
@@ -127,7 +127,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 ### A-09
 - **파일:줄**: `nvim/lua/work-kb/health.lua:11-14`, `install.ps1:24, 75`, `scripts/doctor.py:1129`, `docs/DEPLOY.md:14`, `README.md:19`, `docs/USER-GUIDE.md:98-99, 170-175, 219`, `nvim/lua/work-kb/search.lua:200-209`, `tests/nvim/minimal_init.lua:45-47`
 - **분류**: 정확성
-- **심각도**: 낮음
+- **심각도**: 중간 *(정정: 낮음→중간, 문서·요구사항 불일치 기준 적용)*
 - **문제**:
   1. 최소 Neovim 버전: `health.lua:11-14`·`docs/TROUBLESHOOTING.md:87`은 `0.12` 미만을 오류로 보지만 `install.ps1:75`·`scripts/doctor.py:1129`·`docs/DEPLOY.md:14`·`README.md:19`는 `0.11` 이상으로 적혀 있다.
   2. `<leader>ks` 검색: `USER-GUIDE.md:219`는 공백 AND 검색이라 설명하나 `search.lua:201-209`는 `fzf-lua`(정규식)·`rg --fixed-strings`(고정 문자열) 우선이고 공백 AND는 `kb.py search` 폴백에만 적용된다.
@@ -139,7 +139,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 ### A-10
 - **파일:줄**: `tests/nvim/spec/server_spec.lua`, `tests/nvim/spec/proc_spec.lua`, `tests/test_serve.py`, `tests/test_install_script.py`
 - **분류**: 개선
-- **심각도**: 중간
+- **심각도**: 낮음 *(정정: 중간→낮음, 테스트 품질 기준 적용)*
 - **문제**: `A-01`~`A-03`, `A-07` 경계 조건(`act --root ... list`, `setup()` 설정 변경 재시작, `on_exit(0)` 중 대기 요청, `-Offline` `uv venv` 플래그)에 대한 회귀 테스트가 없다.
 - **근거·재현**: `tests/test_serve.py:279-281`, `tests/test_install_script.py:510-564`, `tests/nvim/spec/server_spec.lua`, `tests/nvim/spec/proc_spec.lua` 점검 결과.
 - **제안 수정**: 해당 수정과 함께 경계 회귀 테스트를 추가한다.
@@ -157,7 +157,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 ### A-12
 - **파일:줄**: `scripts/link.py:41, 250-260, 304-312`, `scripts/compile.py:80, 1168, 1179, 1185-1186` (`work-kb-build-brief-v3.md:149`, `docs/DECISIONS.md:378` D22)
 - **분류**: 정확성
-- **심각도**: 높음
+- **심각도**: 중간 *(정정: 높음→중간, 데이터 손상·핵심 흐름 중단이 아닌 잘못된 결과·D22 요구사항 불일치)*
 - **문제**: 스펙과 D22는 `link`가 `wiki/topics/*.md`의 명시적 링크와 2자 이상 주제명/별칭을 매칭해 `mentions` 구역을 갱신한다고 정했지만, `link.py:41` `MANAGED_DIRS`와 `_extract`/`_targets`가 `jira`·`projects`·`people`만 처리하고 `topics`를 완전히 누락한다. 그 결과 `compile.py`의 `entity_summary`(T3)가 승인된 주제의 `mentions`를 읽지 못해 주제 요약도 비어 있게 된다.
 - **근거·재현**:
   - 재현 스크립트: `.venv\Scripts\python.exe -X utf8 review/repro/A-12_link_topics_mentions.py`
@@ -179,7 +179,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 ### A-14
 - **파일:줄**: `scripts/wheels.py:222-281` (대조: `scripts/kb.py:96`, `scripts/init.py:1385`, `scripts/jira_act.py:979`, `scripts/compile.py:1799`)
 - **분류**: 정확성
-- **심각도**: 높음
+- **심각도**: 중간 *(정정: 높음→중간, `kb.py wheels`는 이미 종료 7로 거부되며 직접 모듈 실행만 D57 요구사항 불일치)*
 - **문제**: 다른 모든 `KB_AGENT=1` 거부 명령(`init`, `jira_act`, `compile`, `confluence_push`, `demo`, `schedule`, `doctor`)은 모듈 `main()` 첫머리에서도 `core.refuse_if_agent(...)`를 호출하지만, `wheels.py`만 누락되어 `wheels.main` 직접 실행 시 `KB_AGENT=1` 거부를 우회한다.
 - **근거·재현**:
   - 재현 스크립트: `.venv\Scripts\python.exe -X utf8 review/repro/A-14_wheels_direct_kb_agent.py`
@@ -307,9 +307,9 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 - **예상 수정 파일 목록**: `scripts/lib/llm_detect.py`, `scripts/lint.py`, `tests/test_llm_detect.py`, `tests/test_lint.py`
 
 ### A-25
-- **파일:줄**: `scripts/init.py:1388`, `docs/README.md:83, 91`, `docs/DECISIONS.md:11-18, 277-280, 429, 435-436`, `scripts/compile.py:73, 648`, `scripts/schedule.py:67-78`, `AGENTS.md:41-47`, `prompts/image_ingest.md:7-11`, `docs/DEPLOY.md:28-39`
+- **파일:줄**: `scripts/init.py:1388`, `docs/README.md:83, 91`, `docs/DECISIONS.md:3, 9-43, 277-280, 429, 435-436`, `scripts/compile.py:73, 648`, `scripts/schedule.py:67-78`, `AGENTS.md:41-47`, `prompts/image_ingest.md:7-11`, `docs/DEPLOY.md:28-39`
 - **분류**: 정확성
-- **심각도**: 낮음
+- **심각도**: 중간 *(정정: 낮음→중간, 문서·요구사항 불일치 기준 적용; `DECISIONS.md` ch.6 우선순위 누락 및 `KB_SKIP_EMACS` 잔재 보완)*
 - **문제**: 구현·스펙·문서 불일치 묶음이다.
   1. `scripts/init.py:1388`의 `--yes` 옵션(`docs/README.md:83` 기재)이 `init.py` 전체에서 한 번도 참조되지 않는 dead flag다.
   2. `scripts/compile.py:648`은 `inbox/`의 이미지 사이드카만 읽고 일반 `inbox/` 노트는 편찬하지 않으며(`73`줄 `DEFAULT_SINCE_DAYS=7`), `docs/README.md:91`에 7일 기본 범위가 빠져 있다.
@@ -324,7 +324,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 ### A-26
 - **파일:줄**: `pytest.ini:3`, `scripts/doctor.py:1120-1154`, `tests/test_doctor.py`, `tests/test_schedule.py`, `tests/test_clip_image.py`, `tests/test_install_script.py`, `tests/test_init_full.py`, `tests/test_docs.py`
 - **분류**: 개선
-- **심각도**: 중간
+- **심각도**: 낮음 *(정정: 중간→낮음, 테스트 품질 기준 적용)*
 - **문제**: 저장소 전역 회귀 테스트 공백이 있다.
   - `doctor.py`의 Neovim(`< 0.11`)·Neovide·Obsidian 점검(`1120-1154`줄)이 커버리지 측정(`76%`)에서 미실행으로 확인됐다.
   - `init --yes` 테스트가 없어 dead flag가 검출되지 않았고, `test_docs.py`는 버전 모순(`0.11`/`0.12`)·`DECISIONS.md`·`AGENTS.md`·`prompts/*.md` 일관성을 검사하지 않는다.
@@ -339,7 +339,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 - **심각도**: 낮음
 - **문제**: 소규모 경계·정리 개선점 4건이다.
   1. `notes.page_template`(`365, 371`줄)가 `link_safe_name` 대신 `safe_name`을 써서 직접 호출 시 `#` 같은 위키링크 금지 문자가 파일명에 들어갈 수 있다.
-  2. `notes.section_span`(`147-173`줄)이 코드 펜스 안 `## `를 제목으로 끊고, `parse_table`(`408`줄)이 `strip("|")`로 빈 끝 열 `||`을 잘라내며, `read_view`(`424`줄)가 `UnicodeDecodeError`를 잡지 않는다.
+  2. `notes.section_span`(`147-173`줄)이 코드 펜스 안 `## `를 제목으로 끊고 *(정정: `C-21` 재현으로 개인 할 일 이월 누락(`중간`) 영향이 확인됨)*, `parse_table`(`408`줄)이 `strip("|")`로 빈 끝 열 `||`을 잘라내며, `read_view`(`424`줄)가 `UnicodeDecodeError`를 잡지 않는다.
   3. `status.py`·`lint.py`의 `gave_up` 이미지 카운트가 `.state/images.json`에서 원본 이미지 삭제 여부와 비전 프로필 변경을 확인하지 않아 유령 경고가 남을 수 있다.
   4. `core.py` `_HELD`와 `atomic_write` 임시 파일명이 단일 스레드 실행을 전제한다(현재 `kb.py`/`serve.py` 직렬 실행에서는 안전).
 - **근거·재현**: 각 파일 해당 줄 코드 직접 확인.
