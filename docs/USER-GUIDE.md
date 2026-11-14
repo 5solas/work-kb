@@ -1,8 +1,8 @@
 # work-kb 사용자 안내서 (Neovim 판)
 
-이 문서는 `nvim` 브랜치의 work-kb를 설치하고 매일 쓰는 방법을 설명한다. 왜 이렇게 만들었는지, 어떤 파일과 폴더가 어디에 있어야 하는지, 어떻게 설치하는지, 어떤 키로 무엇을 하는지를 차례로 적는다.
-Neovim 자체(Neovide, 폰트, 데몬, `nvd` 명령)는 별도 저장소 nvim-config의 몫이고, 그 사용법은 nvim-config의 `docs\USER_GUIDE.md`(특히 "work-kb" 절과 "파일 위치" 표)에 있다. 이 문서는 그 내용을 되풀이하지 않고 work-kb 쪽만 다룬다.
-Python 쪽 명령(`kb.py`), 볼트 구조, Jira·Confluence·LLM 동작은 `docs/README.md`, 회사 PC 이식은 `docs/DEPLOY.md`, 오류 대응은 `docs/TROUBLESHOOTING.md`에 있다.
+이 문서는 `nvim` 브랜치 work-kb의 설치와 일상 사용법을 다룬다.
+Neovim 자체(Neovide, 폰트, 데몬, `nvd` 명령)는 별도 저장소 nvim-config의 몫이다. 그 사용법은 nvim-config의 `docs\USER_GUIDE.md`("work-kb" 절, "파일 위치" 표)에 있다.
+`kb.py` 명령, 볼트 구조, Jira·Confluence·LLM 동작은 `docs/README.md`, 회사 PC 이식은 `docs/DEPLOY.md`, 오류 대응은 `docs/TROUBLESHOOTING.md`에 있다.
 
 ## 1. 취지
 
@@ -58,7 +58,7 @@ Neovim 판은 이 입력 창을 Neovim 플러그인으로 만든 것이다. 같�
 | `main` | Emacs (`emacs\work-kb.el`) | |
 | `nvim` | Neovim (`nvim\`) | 이 문서의 대상. Emacs 파일은 없다 |
 
-Python 쪽, 볼트 구조, 설정 파일, Jira·Confluence·LLM 동작은 두 브랜치가 거의 같다. nvim 판에는 `kb.py serve`(상주 도우미)와 `kb.py doctor`의 Neovim 점검이 더 있다. 작성자의 집 PC에서는 `main`을 `D:\work\work-kb`에, `nvim`을 git worktree로 `D:\work\work-kb-nvim`에 두었다. 한 PC에서 한 브랜치만 쓰면 worktree는 필요 없다.
+Python 쪽, 볼트 구조, 설정 파일, Jira·Confluence·LLM 동작은 두 브랜치가 거의 같다. nvim 판에는 `kb.py serve`(상주 도우미)와 `kb.py doctor`의 Neovim 점검이 더 있다. 두 브랜치를 한 PC에서 함께 쓰려면 git worktree로 따로 받는다.
 
 ## 4. 파일과 폴더 위치
 
@@ -119,8 +119,8 @@ Windows 10/11, git, PowerShell, Python 3.14(또는 `uv`), Neovim 0.12 이상. Ne
 
    | 단계 | 하는 일 |
    |---|---|
-   | `venv` | Python 3.14 `.venv`가 있으면 유지하고 없으면 만든다. `kb.py --help`가 돌고 `requirements.txt`의 패키지가 모두 설치돼 있으면 그대로 두고, 아니면 `requirements.txt`를 설치한다. 인터넷이 막혀 있으면 `wheels\`에서 설치한다(`-Offline`이면 `uv`도 아무것도 내려받지 않는다) |
-   | `env` | 사용자 환경 변수 `WORK_KB_ROOT`를 이 저장소 폴더로 정한다. 다른 값이 이미 있으면(다른 클론이 정한 값도) 바꿀지 묻는다(`-Yes`면 묻지 않고 바꾼다). 이전 값과 이 클론을 기록해 둔다 |
+   | `venv` | Python 3.14 `.venv`가 있으면 유지하고 없으면 만든다. 다른 버전이면 `.venv.bak-<시각>`으로 옮길지 묻는다. `kb.py --help`가 돌고 패키지가 모두 있으면 그대로 두고, 아니면 `requirements.txt`를 설치한다. 인터넷이 막혀 있으면 `wheels\`에서 설치한다(`-Offline`이면 `uv`도 아무것도 내려받지 않는다) |
+   | `env` | 사용자 환경 변수 `WORK_KB_ROOT`를 이 저장소 폴더로 정한다. 다른 값이 있으면(다른 클론이 정한 값도) 바꿀지 묻는다. 이 클론이 정한 옛 경로가 없어졌으면(폴더를 옮김) 묻지 않는다. 이전 값은 기록해 둔다 |
    | `check` | 읽기 전용 점검: `nvim` 버전, nvim-config가 work-kb를 불러오는지, `nvd`가 PATH에 있는지, `WORK_KB_ROOT`, 옛 설치 잔재를 보고 `kb.py doctor`를 실행한다. 문제는 경고(`warn`)로만 알린다. nvim-config를 받거나 설치하지는 않는다 |
 
    옵션: `-WhatIf`(할 일만 출력하고 아무것도 바꾸지 않는다), `-Only venv,env,check` 또는 `-Skip …`(단계 선택), `-Yes`(질문에 자동 승인), `-Offline`(인터넷 없이 `wheels\`에서만 설치), `-WheelsDir <폴더>`(wheels 위치 지정). 종료 코드는 성공 0, 단계 실패 1, 인자 오류 2이다. 끝에 "놓은 것"과 "다음 단계"를 출력한다.
@@ -190,7 +190,7 @@ nvim-config를 회사 PC에 설치하는 방법은 이 저장소의 범위 밖�
 powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 ```
 
-`install.ps1`이 정한 `WORK_KB_ROOT`를 이전 값으로 되돌리거나(없었으면 지운다) 한다. 누가 그 뒤에 값을 바꿨으면 그대로 둔다. 다른 클론의 `install.ps1`이 정한 값이면 그대로 두고, 그 클론의 `uninstall.ps1`이 되돌린다. `-RemoveVenv`를 주면 `install.ps1`이 만든 `.venv`도 지운다. `-WhatIf`로 먼저 볼 수 있다. 저장소, 볼트 내용, nvim-config, `%LOCALAPPDATA%\nvim*`는 건드리지 않는다. 끝나면 새 터미널에서 `nvd --restart`를 한다(`WORK_KB_ROOT`가 없으면 nvim-config는 work-kb를 불러오지 않는다).
+`install.ps1`이 정한 `WORK_KB_ROOT`를 이전 값으로 되돌리거나(없었으면 지운다) 한다. 누가 그 뒤에 값을 바꿨으면 그대로 둔다. 다른 클론의 `install.ps1`이 정한 값이면 그대로 두고, 그 클론의 `uninstall.ps1`이 되돌린다. `-RemoveVenv`를 주면 `install.ps1`이 만든 `.venv`도 지운다. `-Only env,venv`로 단계를 고르고, `-WhatIf`로 먼저 볼 수 있다. 저장소, 볼트 내용, nvim-config, `%LOCALAPPDATA%\nvim*`는 건드리지 않는다. 끝나면 새 터미널에서 `nvd --restart`를 한다(`WORK_KB_ROOT`가 없으면 nvim-config는 work-kb를 불러오지 않는다).
 
 ## 6. 사용법
 
@@ -201,7 +201,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 1. 아침: `<leader>kt`로 오늘 daily를 연다. `## 오늘`(Jira 일감과 할 일)과 `## 이월`이 준비되어 있다.
 2. 하루 중: `<leader>kc`로 한 줄씩 던진다. `daily\오늘.md`의 `## 기록` 끝에 `- HH:MM …`으로 쌓인다. 분류하지 않는다. 스크린샷은 `<leader>kC`(클립보드) 또는 `<leader>kF`(파일), 제목이 필요한 긴 글은 `<leader>ki`.
 3. 찾기와 열기: `<leader>ks`로 검색하고, 커서가 Jira 키나 링크 위에 있을 때 `<leader>ko`로 연다.
-4. 연결: `<leader>kl`이 노트의 Jira 키와 `@이름`을 엔티티 페이지에 엮는다(LLM 불필요).
+4. 연결: `<leader>kl`이 노트의 Jira 키, `@이름`, 기존 주제를 엔티티 페이지에 엮는다(LLM 불필요).
 5. Jira: `<leader>kj` 메뉴에서 댓글, 전환, 워크로그, 동기화를 한다(6.4절).
 6. 편찬: `<leader>kG`로 미리 보고 `<leader>kg`로 이미지 추출(ingest)과 위키 편찬(compile)을 돌린다. LLM이 없으면 이 단계만 빠진다. 주제 제안은 `<leader>ka`로 승인한다.
 7. 상태: `<leader>k?`.
@@ -212,17 +212,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 
 | 키 | 이름 | 하는 일 |
 |---|---|---|
-| `c` | `capture` | 아래쪽 분할 버퍼 `*work-kb-capture*`를 연다. 내용을 쓰고 `C-c C-c`로 저장하면 오늘 daily `## 기록` 끝에 추가되고, `C-c C-k`는 저장하지 않고 닫는다 |
+| `c` | `capture` | 아래쪽 분할 버퍼 `*work-kb-capture*`를 연다. 내용을 쓰고 `C-c C-c`로 저장하면 오늘 daily `## 기록` 끝에 추가되고, `C-c C-k`는 저장하지 않고 닫는다. `[ ] `로 시작하면 할 일 줄이 된다 |
 | `C` | `capture-clipboard-image` | 클립보드의 이미지를 `raw\assets\`에 저장하고 daily에 링크를 남긴다. Windows PowerShell 5.1이 필요하다(회사 정책으로 막히면 `F`) |
-| `F` | `capture-image-file` | 이미지 파일을 골라 같은 방식으로 캡처한다 |
+| `F` | `capture-image-file` | 이미지 파일을 골라 같은 방식으로 캡처한다. oil·netrw 버퍼에서는 커서 아래 파일이 기본값이다 |
 | `i` | `capture-inbox` | 제목을 묻고 분할 버퍼 `*work-kb-inbox*`를 연다. 본문을 쓰고 `C-c C-c`로 저장하면 `inbox\`에 글이 생기고, `C-c C-k`는 저장하지 않고 닫는다 |
 | `t` | `today` | 오늘 daily를 준비하고(오늘·이월 구역) 연다 |
 | `s` | `search` | daily·inbox·wiki·jira에서 찾는다. 쓸 수 있는 첫 방법을 고른다: fzf-lua가 있으면 대화형 검색(정규식), 없으면 rg(입력한 구를 글자 그대로 찾아 quickfix에), 둘 다 없으면 `kb.py search`(공백은 AND, quickfix에) |
-| `o` | `open-at-point` | 커서 위치의 Jira 키나 링크를 연다 |
-| `l` | `link` | 키와 `@이름`을 엔티티 페이지에 연결한다 |
-| `?` | `status` | 상태 요약(마지막 동기화, 대기 outbox, 미처리 제안·이미지 등) |
+| `o` | `open-at-point` | 커서 위치의 Jira 키, 위키링크, `@이름`을 연다. 캐시에 없거나 뼈대뿐인 일감은 먼저 받아 온다 |
+| `l` | `link` | Jira 키, `@이름`, 기존 주제(`wiki/topics/`의 파일명·`name`·`aliases`)를 엔티티 페이지에 연결한다. 주제 페이지는 만들지 않는다(`a`로 승인) |
+| `?` | `status` | 상태 요약(마지막 동기화, 대기·`불확실` outbox, 미처리 제안·이미지 등) |
 | `j` | `jira` | Jira 작업 메뉴를 연다(6.4절) |
-| `g` | `ingest` | 이미지 글자 추출(ingest)에 이어 위키 편찬(compile)을 실행한다 |
+| `g` | `ingest` | 이미지 글자 추출(ingest)에 이어 위키 편찬(compile)을 실행한다. ingest가 공개 호스트 차단(종료 5)으로 멈추면 compile은 돌리지 않는다 |
 | `G` | `ingest-dry-run` | 위와 같되 `--dry-run`으로 실행한다: LLM은 똑같이 부르고(시간·비용이 든다), 바뀔 내용만 보이며 파일은 바꾸지 않는다 |
 | `a` | `proposals` | 주제 제안을 보고 승인한다 |
 
@@ -247,23 +247,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 
 | 키 | 작업 이름 | 하는 일 |
 |---|---|---|
-| `v` | `view` | 커서·현재 줄의 Jira 키(없으면 물어본 키)의 `jira\KEY.md`를 연다 |
+| `v` | `view` | 커서·현재 줄의 Jira 키(없으면 물어본 키)의 `jira\KEY.md`를 연다. 없거나 뼈대뿐이면 먼저 받아 온다 |
 | `c` | `comment` | 댓글. 기본 본문은 현재 줄이고, daily 줄을 고치지 않고 보내면 그 줄을 근거로 보낸다 |
 | `t` | `transition` | 가능한 전환 목록에서 고르고, 확인한 뒤에만 보낸다 |
 | `a` | `assign` | 담당자(Jira 사용자명) 지정 |
 | `w` | `worklog` | 워크로그. 시간은 `1h30m`, `2h`, `45m` 꼴만 된다. 설명은 선택 |
 | `n` | `create` | 새 일감. 프로젝트(`project_keys`에서 고름)·요약·유형·설명을 받고 확인 뒤에 만든다 |
-| `p` | `promote` | 현재 daily 줄을 새 일감으로 올린다. daily 파일에서만 되고 확인을 묻는다. 성공하면 줄 끝에 `[[새키]]`가 붙는다 |
+| `p` | `promote` | 현재 daily 줄을 새 일감으로 올린다. daily 파일에서만 되고 확인을 묻는다. 성공하면 줄 끝에 `[[새키]]`가 붙는다. 이미 승격했거나 승격 대기 중인 줄은 다시 올리지 않는다 |
 | `q` | `query` | 라이브 JQL 조회. 캐시에는 쓰지 않는다 |
-| `S` | `sync` | 동기화 (`kb.py sync`) |
+| `S` | `sync` | 동기화 (`kb.py sync`). 볼 권한이 없는(403) 일감은 범위 밖으로 표시하고 계속한다 |
 | `f` | `flush` | outbox에 남은 대기 항목을 다시 보낸다 |
 | `d` | `check-done` | 완료 전환 제안 목록. 제안만 보이고 아무것도 바꾸지 않는다 |
 
-쓰기 작업은 outbox 큐를 거친다. 네트워크가 끊기면 큐에 남고 나중에 `f`로 보낸다. 인증 실패(PAT 만료)면 `kb.py init`으로 토큰을 다시 넣는다. 결과는 `*work-kb-jira*` 등의 버퍼에 남는다.
+쓰기 작업은 outbox 큐를 거친다. 네트워크가 끊기면 큐에 남고 나중에 `f`로 보낸다. 보내다 끊겨 결과를 모르는 항목은 `?`에 `불확실`로 나온다. 인증 실패(PAT 만료)면 `kb.py init`으로 토큰을 다시 넣는다. 결과는 `*work-kb-jira*` 등의 버퍼에 남는다. `q`·`d`의 결과 버퍼에서는 `<CR>`로 항목을 열고 `q`로 닫는다.
 
 ### 6.5 볼트 안 Markdown 버퍼의 설정
 
-볼트 폴더 아래의 `.md` 파일을 열면 `nvim\after\ftplugin\markdown.lua`가 그 버퍼에만 다음을 적용한다. 볼트 밖의 Markdown과 다른 파일 형식은 건드리지 않는다. 볼트는 `setup`의 `vault`이고, 없으면 저장소 폴더이다.
+볼트 폴더 아래의 `.md` 파일을 열면 `nvim\after\ftplugin\markdown.lua`가 그 버퍼에만 다음을 적용한다(정션을 거친 경로와 대소문자 차이도 볼트로 본다). 볼트 밖의 Markdown과 다른 파일 형식은 건드리지 않는다. 볼트는 `setup`의 `vault`이고, 없으면 저장소 폴더이다.
 
 | 설정 | 효과 |
 |---|---|
@@ -279,21 +279,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 
 기본값은 `server.enable = true`, 놀면 끝나는 시간 1800초, `VimEnter` 뒤 300 ms에 띄운다. Python은 직접 지정 → `<repo>\.venv\Scripts\python.exe` → PATH의 `python` → `py -3` 순으로 찾는다. 도우미 상태는 `:checkhealth work-kb`에서 본다.
 
-- 도우미가 처리하는 명령은 `status`, `search`, `today`, `link`, `proposals list`, `act list`뿐이다. 그 밖의 명령(Jira 전환 목록 등)은 한 번 실행으로 돈다. `today`·`link`는 파일을 쓴다.
-- 요청 하나의 시간 제한은 90초다(잠금 대기 60초보다 길다). 넘으면 도우미를 끝낸다. 읽기 명령은 한 번 실행으로 한 번 더 돌린다. 쓰기 명령(`today`·`link`)은 두 번 쓰지 않도록 다시 돌리지 않고 "시간 초과"로 알린다.
-- 도우미는 저장소 코드(`scripts\`)가 바뀌면 응답을 보낸 뒤 스스로 끝난다. 놀다가 끝났을 때와 같이 다음 요청에서 새로 뜬다.
+- 도우미가 처리하는 명령은 `status`, `search`, `today`, `link`, `proposals list`, `act list`뿐이다. 그 밖의 명령(`act transitions` 등)은 한 번 실행으로 돈다. `today`·`link`는 파일을 쓴다.
+- Neovim은 도우미의 답을 90초까지 기다린다(잠금 대기 60초보다 길다). 넘으면 도우미를 멈춘다.
+  - 읽기 명령은 한 번 실행으로 다시 돌린다.
+  - 쓰기 명령(`today`·`link`)은 두 번 쓰지 않도록 다시 돌리지 않고 "시간 초과"로 실패를 알린다.
+- 도우미는 저장소 코드(`scripts\`)가 바뀌면 응답을 보낸 뒤 스스로 끝난다. 놀다가 또는 시간 초과로 끝났으면 다음 요청에서 바로 다시 뜬다. 놀다가 끝난 상태는 `:checkhealth work-kb`에 경고가 아닌 안내로 나온다.
 
 ### 6.7 선택 사항: 전역 캡처 단축키 `capture.ahk` (미확인)
 
-`nvim\capture.ahk`는 AutoHotkey v2 스크립트이다. 어느 프로그램에 있든 Ctrl+Alt+Shift+C로 `:WorkKb capture`, Ctrl+Alt+Shift+V로 `:WorkKb capture-clipboard-image`를 nvim-config 데몬에 보낸다(`nvd`로 창을 앞으로 가져온다). **미확인**: 이 파일은 한 번도 실행해 보지 못했다(개발 PC에 AutoHotkey가 없다). 데몬 쪽 절반만 헤드리스로 시험했다. 쓰려면 AutoHotkey v2를 설치하고 파일을 더블클릭하며, 처음에 두 단축키를 한 번씩 눌러 본다. 로그온 때 자동 실행은 `shell:startup` 폴더에 바로 가기를 넣는다(이 저장소는 넣지 않는다).
+`nvim\capture.ahk`는 AutoHotkey v2 스크립트이다. 어느 프로그램에 있든 Ctrl+Alt+Shift+C로 `:WorkKb capture`, Ctrl+Alt+Shift+V로 `:WorkKb capture-clipboard-image`를 nvim-config 데몬에 보낸다(`nvd`로 창을 앞으로 가져온다). 실행해 본 적은 없다(개발 PC에 AutoHotkey가 없어 데몬 쪽만 헤드리스로 시험했다). 쓰려면 AutoHotkey v2를 설치하고 파일을 더블클릭하며, 처음에 두 단축키를 한 번씩 눌러 본다. 로그온 때 자동 실행은 `shell:startup` 폴더에 바로 가기를 넣는다(이 저장소는 넣지 않는다).
 
 ## 7. 안전 규칙
 
+- 캡처는 daily를 원자적으로 쓴다(임시 파일 → `fsync` → 이름 바꾸기). 그사이 파일이나 버퍼가 바뀌었으면 덮어쓰지 않고 멈춘다.
 - 자동 Jira 전환은 없다. 전환·새 일감·승격은 고르고 확인한 뒤에만 보낸다. `d`는 제안만 보인다.
 - 작은 Jira 쓰기(댓글, 전환, 워크로그, 생성)는 outbox 큐를 거친다. 결과를 모르는 항목(`uncertain`)은 자동으로 다시 보내지 않는다(`docs/README.md` 10절).
 - 삭제는 `_trash\`로 옮기는 것이다.
 - 기계는 `jira\`·`wiki\`의 관리 구역만 다시 쓴다. 그 구역은 직접 고치지 않는다.
-- LLM이 없으면 편찬(compile) 단계만 빠진다. 회사 환경(`environment: company`)에서는 공개 LLM 호스트로 보내는 일이 코드로 막힌다.
+- LLM이 없으면 편찬(compile) 단계만 빠진다. 회사 환경(`environment: company`)에서는 공개 LLM 호스트(공인 IP 주소 포함)로 보내는 일이 코드로 막힌다(종료 5).
 - 토큰은 Windows 자격 증명 관리자에만 둔다. 파일, 메모, 채팅에 적지 않는다.
 
 ## 8. 문제 해결
@@ -302,37 +305,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 |---|---|
 | `<leader>k` 키나 `:WorkKb`가 없다 | 데몬이 `WORK_KB_ROOT` 없이 시작됐거나 `<값>\nvim\lua\work-kb\init.lua`가 없다. 새 터미널에서 `echo $env:WORK_KB_ROOT`로 확인한다. 비어 있으면 `install.ps1 -Only env`를 실행하고, **터미널을 한 번 더 새로 연 뒤** `nvd --restart`를 실행한다(데몬은 자기를 띄운 터미널의 환경을 물려받는다) |
 | 설치는 됐는데 상태를 모르겠다 | Neovim에서 `:checkhealth work-kb` |
-| `nvd`가 `daemon is not responding` | 데몬이 스왑 파일 질문 등에서 입력을 기다린다. 창에서 답하거나 `nvd --stop --force`(수정 내용은 사라진다). 개발 중 gitsigns가 `git`을 시작하는 순간 헤드리스 Neovim이 멈춘 적이 있다(원인 미확인) |
+| `nvd`가 `daemon is not responding` | 데몬이 스왑 파일 질문 등에서 입력을 기다린다. 창에서 답하거나 `nvd --stop --force`(수정 내용은 사라진다) |
 | `Python을 찾지 못했습니다` | `<repo>`에서 `.venv`를 만든다(`install.ps1 -Only venv`). 그래도 안 되면 `docs/TROUBLESHOOTING.md`의 "`py -3`이 동작하지 않는다" |
+| `Python 3.14가 필요합니다` | 지원 Python은 3.14 하나다. `install.ps1 -Only venv -Yes`로 옛 `.venv`를 백업하고 다시 만든다 |
+| `파일이 읽은 뒤 바뀌었습니다` 등 | 캡처하는 사이 파일이나 버퍼가 따로 바뀌어 쓰지 않았다. 저장·정리한 뒤 다시 캡처한다 |
 | `nvd --restart`가 거부한다 | 수정한 버퍼가 있다. `:wa`로 저장한 뒤 다시 실행한다 |
 | `install.ps1`의 `check`가 경고한다 | 경고 줄 아래의 안내를 따른다(nvim-config 없음, `nvd` 없음 등). 새 터미널에서 다시 확인한다 |
 
-그 밖의 오류(연결, 인코딩, outbox)는 `docs/TROUBLESHOOTING.md`, nvim-config 쪽 증상은 nvim-config의 `docs\USER_GUIDE.md` 7절을 본다.
+그 밖의 오류(시간 초과, 잠금(종료 6), 클립보드, 연결, 인코딩, outbox)는 `docs/TROUBLESHOOTING.md`, nvim-config 쪽 증상은 nvim-config의 `docs\USER_GUIDE.md` 7절을 본다.
 
 ## 9. 검증 상태
 
-2026-11-06 기준.
-
-**자동 시험으로 확인한 것 (집 PC)**
-
-- Python 시험 전체: Python 3.14(지원하는 유일한 버전).
-- 플러그인의 Lua 스펙: 헤드리스 Neovim.
-- `install.ps1`, `uninstall.ps1`: 가짜 프로필에서 Windows PowerShell 5.1과 PowerShell 7.
-- nvim-config의 스모크 시험: 가짜 플러그인으로 연결 확인.
-
-| 시험 | 결과 |
-|---|---|
-| 전체(`pytest`), Python 3.14 | 2170 통과, 3 건너뜀 |
-| 그중 플러그인 Lua 스펙 | 166개, 콘솔 상속과 창 없는 콘솔(cp949) 두 방식 모두 통과 |
-| 그중 설치·제거 스크립트 | 37개 |
-
-건너뛴 3개는 이 PC의 실행 조건 때문이다: 클립보드를 열 수 없는 세션 2개, 심볼릭 링크 권한 1개.
+2026-11-15 기준. 자동 시험은 모두 통과했다: Python 3.14 전체, 헤드리스 Neovim의 플러그인 Lua 스펙, 가짜 프로필에서 Windows PowerShell 5.1·PowerShell 7로 돌린 설치·제거. 건너뛴 몇 개는 실행 환경 조건(클립보드, 심볼릭 링크 권한, nvim-config 없음) 때문이다.
 
 **확인하지 못한 것**
 
 - 실제 Neovide 창에서의 동작(키, 입력창, 한글 입력기 IME).
 - `nvim\capture.ahk`(실행해 본 적 없음).
-- 실제 Jira·Confluence Data Center와 사내 LLM 서버(집 시험은 모의 서버).
+- 실제 Jira·Confluence Data Center와 사내 LLM 서버(시험은 모의 서버).
 - 새 PC에서 처음부터 설치하는 과정.
 
 **알려진 미해결 점**: 개발 중 gitsigns 플러그인이 `git`을 시작하는 순간 헤드리스 Neovim이 멈춘 적이 있다. 원인은 찾지 못했다. `nvd`가 데몬이 응답하지 않는다고 하면 8절을 본다.

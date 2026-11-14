@@ -1,6 +1,7 @@
 # work-kb 구조 설정 (커밋함). 연결 값(주소·토큰·참조)은 두지 않는다.
 # 환경별 값은 config.local.yaml(kb.py init이 만듦), 비밀값은 자격 증명 저장소에 둔다.
 # 환경변수 KB_<SECTION>_<KEY>로 한 값씩 덮을 수 있다. 예: KB_JIRA_MAX_RESULTS=50
+# kb_root와 묶음 값(views·tasks)은 환경변수로 못 바꾼다. 볼트 위치는 --root 또는 KB_ROOT로 준다.
 kb_root: .
 timezone: Asia/Seoul
 people_prefix: "@"
@@ -17,7 +18,7 @@ jira:
     review: "reporter = currentUser() AND status = 'In Review'"
   poll_minutes: 15
   max_results: 500
-  # 전체 동기화 주기(시간). 범위에서 빠진 일감(담당 변경·삭제·이동)을 정리한다.
+  # 전체 동기화 주기(시간). 범위에서 빠진 일감(담당 변경·삭제·이동·권한 없음)을 정리한다.
   full_every_hours: 24
   # `today --check-done`이 제안하는 완료 전환 이름(앞에서부터 시도). 자동 전환은 없다.
   done_transition_names: [Done, 완료]
@@ -27,10 +28,9 @@ confluence:
   push_globs: ["wiki/projects/*.md", "wiki/topics/*.md", "wiki/decisions.md"]
 
 llm:
-  # reasoning은 따옴표 필수. 따옴표가 없으면 YAML이 on/off를 참·거짓으로 읽는다(D27).
-  # max_output_tokens: 작업별 출력 상한(D41). 탐지 결과가 method: none이고 기준 상태가 추론 켜짐이면 하한 2048.
-  # tag의 max_output_tokens는 **줄 하나당** 값이다. T1은 여러 줄(최대 40줄)을 한 요청에 묶으므로
-  # compile은 요청 상한으로 줄당 값 × 묶음 크기(최대 16384)를 준다.
+  # reasoning은 "on"/"off"로 따옴표를 붙여 쓴다(D27).
+  # max_output_tokens: 작업별 출력 상한(D41, 최대 16384). method: none이고 기준 상태가 추론 켜짐이면 하한 2048.
+  # tag의 값은 줄 하나당이다. compile은 40줄씩 묶어 요청하므로 줄당 값 × 40(최대 16384)을 준다.
   tasks:
     tag:            {profile: main, reasoning: "off", max_input_tokens: 2000,  max_output_tokens: 64}
     decisions:      {profile: main, reasoning: "on",  max_input_tokens: 30000, max_output_tokens: 8192}
@@ -40,6 +40,6 @@ llm:
     contradictions: {profile: main, reasoning: "on",  max_input_tokens: 60000, max_output_tokens: 8192}
   temperature: 0
   timeout_sec: 180
-  # 회사 환경에서 LLM 주소가 이 목록에 걸리면 실행을 거부한다.
+  # 회사 환경(environment가 없거나 틀리면 회사)에서 LLM 주소가 이 목록에 걸리거나 공인 IP면 거부한다.
   # 코드에도 같은 목록이 있다. 여기에는 더할 수만 있고 뺄 수는 없다.
   public_hosts_blocklist: [deepinfra.com, openai.com, together.xyz, openrouter.ai, anthropic.com, googleapis.com, groq.com, fireworks.ai, mistral.ai, baseten.co, nebius.com]
