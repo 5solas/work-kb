@@ -15,7 +15,7 @@ import pytest
 from lib import config, core, llm_client, net
 from lib.llm_client import ChatHttpError, LlmClient
 
-from test_llm_client import FakeLLM, chat_reply
+from llm_fakes import FakeLLM, chat_reply
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC = "https://api.deepinfra.com/v1/openai"
