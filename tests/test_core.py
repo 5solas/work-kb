@@ -418,3 +418,23 @@ def test_safe_name_reserved_respects_max_len():
     once = core.safe_name(name)
     assert len(once) <= 80
     assert core.safe_name(once) == once
+
+
+def test_atomic_write_gives_file_busy(tmp_path, monkeypatch):
+    target = tmp_path / "locked.txt"
+    attempts = 0
+
+    def always_locked(_src, _dst):
+        nonlocal attempts
+        attempts += 1
+        err = PermissionError(13, "sharing violation")
+        err.winerror = 32  # ERROR_SHARING_VIOLATION
+        raise err
+
+    monkeypatch.setattr(core.os, "replace", always_locked)
+    monkeypatch.setattr(core.time, "sleep", lambda _s: None)
+    with pytest.raises(core.FileBusy):
+        core.atomic_write(target, b"hello", retries=3)
+    assert attempts == 4
+    assert not target.exists()
+

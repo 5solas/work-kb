@@ -170,6 +170,7 @@ class Wizard:
         steps: list[Callable[["Wizard", dict], None]] | None = None,
         values: Mapping[str, str] | None = None,
         cfg: Any = None,
+        yes: bool = False,
     ) -> None:
         self.root = Path(root)
         self.ask = ask or default_ask
@@ -178,6 +179,7 @@ class Wizard:
         self.steps: list[Callable[[Wizard, dict], None]] = list(steps or [])
         self.values = values  # None이면 대화형
         self.cfg = cfg  # 병합된 설정(lib.config.Config). 뷰 JQL·연결 설정을 읽는다
+        self.yes = yes
         # 확인을 마친 비밀값 {저장소 이름: 값}. 마지막에 설정 파일과 함께 저장한다(실패·취소면 저장소는 그대로)
         self.pending_secrets: dict[str, str] = {}
         # 이번 실행에서 정한 LLM 키 {프로필: (값, 참조)}. 보조 프로필이 main 키를 다시 쓸 때 본다
@@ -816,7 +818,10 @@ def parse_model_choice(raw: str, ids: list[str]) -> str:
 
 
 def _confirm(wizard: Wizard, prompt: str, default: str) -> bool:
-    """대화형 예/아니오. 틀린 답은 다시 묻는다(MAX_TRIES번)."""
+    """대화형 예/아니오. --yes면 묻지 않고 예(True), 아니면 틀린 답은 다시 묻는다(MAX_TRIES번)."""
+    if wizard.yes:
+        wizard.out(f"{prompt}: 예 (--yes)")
+        return True
     for attempt in range(1, MAX_TRIES + 1):
         raw = (wizard.ask(prompt, default) or "").strip()
         try:
@@ -1211,6 +1216,7 @@ def run_wizard(
     out: Callable[[str], None] | None = None,
     run_doctor: bool = True,
     schedule_step: bool = False,
+    yes: bool = False,
 ) -> int:
     """마법사 전체 또는 한 구역을 돌리고 config.local.yaml을 저장한다. doctor를 돌리면 그 종료 코드.
 
@@ -1229,7 +1235,7 @@ def run_wizard(
     else:
         steps = FULL_STEPS + ([step_schedule] if schedule_step else [])
     say = out or print
-    wizard = Wizard(config_dir, ask=ask, ask_secret=ask_secret, out=say, steps=steps, values=values, cfg=cfg)
+    wizard = Wizard(config_dir, ask=ask, ask_secret=ask_secret, out=say, steps=steps, values=values, cfg=cfg, yes=yes)
     if cfg.local_exists:
         say(f"기존 설정을 기본값으로 씁니다: {local_path}")
     data = wizard.run(existing)  # 구역만 다시 할 때 environment 등 다른 값은 그대로 남는다
@@ -1405,7 +1411,7 @@ def main(argv: list[str]) -> int:
     if args.non_interactive != args.from_env:
         raise core.ConfigError("--non-interactive와 --from-env는 함께 씁니다 (KB_INIT_* 환경변수에서 값을 읽음)")
     values = {name: os.environ.get(name, "") for name in ENV_FIELDS.values()} if args.from_env else None
-    return run_wizard(args.root, section=args.section, values=values, out=_flush_print, schedule_step=True)
+    return run_wizard(args.root, section=args.section, values=values, out=_flush_print, schedule_step=True, yes=args.yes)
 
 
 if __name__ == "__main__":

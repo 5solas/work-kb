@@ -864,3 +864,12 @@ def test_moved_image_sidecar_matches_source_image(vault, fake_now):
     new_inbox = vault / "inbox" / "2026-11-05-1430-a.png"
     put(new_inbox)
     assert sidecar_lib.sidecar_for(cfg, new_inbox) == vault / "inbox" / "2026-11-05-1430-a.png.md"
+
+
+def test_image_ingest_prompt_has_no_code_fence():
+    text = (ROOT / "prompts" / "image_ingest.md").read_text(encoding="utf-8")
+    assert "```" not in text
+    json_lines = [line.strip() for line in text.splitlines() if line.strip().startswith("{")]
+    assert len(json_lines) == 1
+    assert json.loads(json_lines[0])["kind"] == "photo"
+

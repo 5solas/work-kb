@@ -438,3 +438,39 @@ def test_stale_sending_shown_as_uncertain(vault, capsys):
     assert "불확실 1개" in out and "전송 중 0개" in out
     info = json.loads(_json_out(vault, capsys))
     assert info["outbox"]["sending"] == 0 and info["outbox"]["uncertain"] == 1
+
+
+def test_outbox_counts(vault):
+    from lib import outbox
+
+    items = [
+        {"status": "pending"},
+        {"status": "pending"},
+        {"status": "sending"},
+        {"status": "failed"},
+        {"status": "done"},
+        {"status": "done"},
+        {"status": "unknown"},
+    ]
+    assert outbox.counts(items) == {"pending": 2, "sending": 1, "failed": 1, "done": 2}
+
+    _write_local(vault, {"environment": "home"})
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    now_iso = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    records = [
+        {"id": "01J00000000000000000000001", "status": "pending", "last_error": None},
+        {"id": "01J00000000000000000000002", "status": "pending", "last_error": "uncertain"},
+        {"id": "01J00000000000000000000003", "status": "sending", "pid": os.getpid(), "claimed_at": now_iso},
+        {"id": "01J00000000000000000000004", "status": "sending", "pid": dead.pid, "claimed_at": "2026-11-05T07:05:00+00:00"},
+        {"id": "01J00000000000000000000005", "status": "failed", "last_error": "HTTP 400"},
+        {"id": "01J00000000000000000000006", "status": "done", "last_error": None},
+    ]
+    (vault / "jira").mkdir(exist_ok=True)
+    lines = [json.dumps(r, ensure_ascii=False) for r in records] + ["{broken-json"]
+    (vault / "jira" / "outbox.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    problems: list[str] = []
+    counts = status.outbox_counts(config.load(vault), problems)
+    assert counts == {"pending": 1, "sending": 1, "failed": 1, "uncertain": 2}
+    assert any("outbox.jsonl" in p for p in problems)
+

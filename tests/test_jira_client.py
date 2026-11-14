@@ -551,3 +551,20 @@ def test_relative_ca_bundle_from_config_dir(tmp_path, monkeypatch):
     with JiraClient.from_config(cfg) as jc, ConfluenceClient.from_config(cfg) as cc:
         assert jc._session.verify == str(pem)
         assert cc._session.verify == str(pem)
+
+
+def test_retry_after_http_date():
+    import email.utils
+    import time
+
+    import requests
+
+    resp = requests.Response()
+    resp.headers["Retry-After"] = email.utils.formatdate(time.time() + 12.0, usegmt=True)
+    delay = net._retry_after(resp, 0)
+    assert 5.0 <= delay <= 12.5
+
+    bad = requests.Response()
+    bad.headers["Retry-After"] = "not-a-date"
+    assert net._retry_after(bad, 2) == 4.0
+

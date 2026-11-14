@@ -1333,3 +1333,27 @@ def test_uncertain_never_becomes_failed_on_429(make_env, capsys):
     assert code == 3
     after = only(env.vault)
     assert after["status"] == "pending" and after["last_error"] == "uncertain"
+
+
+def test_done_record_failure_does_not_resend(make_env, capsys, monkeypatch):
+    env = make_env()
+
+    def busy(*_a, **_kw):
+        raise core.FileBusy("outbox.jsonl 잠김")
+
+    monkeypatch.setattr(jira_act, "_finish", busy)
+    code, _out, err = run(capsys, env.vault, "comment", "KB-12", "--body", "완료 기록 실패 테스트")
+    assert code == 6
+    assert "Jira에는 보냈지만 outbox에 완료를 적지 못했습니다" in err
+    assert "다시 보내지 마세요" in err
+    writes_after_first = [entry for entry in env.jira.log if entry["method"] == "POST" and "/comment" in entry["path"]]
+    assert len(writes_after_first) == 1
+    assert only(env.vault)["status"] == "sending"
+
+    monkeypatch.undo()
+    flush_code, flush_out, _flush_err = run(capsys, env.vault, "flush")
+    assert flush_code == 0
+    assert "보낼 항목이 없습니다" in flush_out
+    writes_after_flush = [entry for entry in env.jira.log if entry["method"] == "POST" and "/comment" in entry["path"]]
+    assert len(writes_after_flush) == 1
+
