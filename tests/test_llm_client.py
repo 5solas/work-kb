@@ -14,6 +14,8 @@ from pathlib import Path
 
 import keyring
 import pytest
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 from lib import config, core, llm_client, net, prompts
 from lib.llm_client import ChatHttpError, LlmClient, normalize_message
@@ -193,6 +195,38 @@ def test_uppercase_and_thinking_tags():
     assert normalize_message({"content": '<THINK>reasoning {here}</THINK>{"x":1}'}) == ('{"x":1}', "reasoning {here}")
     assert normalize_message({"content": '<thinking>reasoning {here}</thinking>{"x":1}'}) == ('{"x":1}', "reasoning {here}")
     assert normalize_message({"content": "  \n<THINKING>cut off"}) == ("", "cut off")
+
+
+def test_think_prefix_followed_by_json_with_literal_close_tag():
+    body = '{"t":"use </think> x"}'
+    content, reasoning = normalize_message({"content": f"<think>r</think>{body}"})
+    assert content == body and reasoning == "r"
+    assert llm_client.parse_json_object(content) == {"t": "use </think> x"}
+
+    # 추론 뒤에 코드 펜스로 감싼 JSON 안에 리터럴 닫기 태그가 있어도 보존
+    fenced = f"```json\n{body}\n```"
+    content2, reasoning2 = normalize_message({"content": f"<THINK>생각 중</THINK>\n{fenced}"})
+    assert content2 == fenced and reasoning2 == "생각 중"
+    assert llm_client.parse_json_object(content2) == {"t": "use </think> x"}
+
+    # 추론 내부의 선행 </think> 다음 부분이 JSON이 아니면 지나가고 실제 JSON 시작 앞의 </think>에서 자름
+    content3, reasoning3 = normalize_message({"content": f"<think>a</think> b </thinking>{body}"})
+    assert content3 == body and reasoning3 == "a b"
+
+
+@example(thought="r", value="use </think> x", close_tag="</think>")
+@given(
+    thought=st.text(alphabet=st.characters(blacklist_characters="<>"), min_size=0, max_size=40),
+    value=st.text(max_size=60).map(lambda s: f"{s}</think>x" if "</think>" not in s.lower() else s),
+    close_tag=st.sampled_from(["</think>", "</THINK>", "</thinking>", "</Thinking>"]),
+)
+def test_property_normalize_preserves_json_containing_close_tags(thought, value, close_tag):
+    payload = json.dumps({"t": value}, ensure_ascii=False)
+    raw = f"<think>{thought}{close_tag}{payload}"
+    content, reasoning = normalize_message({"content": raw})
+    assert json.loads(content) == {"t": value}
+    expected_trace = thought.strip() or None
+    assert reasoning == expected_trace
 
 
 # ---------------------------------------------------------------- 분량

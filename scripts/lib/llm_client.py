@@ -162,11 +162,34 @@ def _text_of(content: Any) -> str:
     return ""
 
 
+def _is_json_reply(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    fenced = _FENCED.match(stripped)
+    candidate = fenced.group(1).strip() if fenced else stripped
+    if not candidate:
+        return False
+    try:
+        json.loads(candidate)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _select_think_close(content: str, closes: list[re.Match[str]]) -> re.Match[str]:
+    for match in closes:
+        if _is_json_reply(content[match.end() :]):
+            return match
+    return closes[-1]
+
+
 def normalize_message(message: Mapping) -> tuple[str, str | None]:
     """(답, 생각)으로 나눈다(D39).
 
-    - 생각: `reasoning` 또는 `reasoning_content` 필드, content 안 마지막 `</think>`·`</thinking>`
-      앞부분(대소문자 무시), 닫히지 않은 `<think>`·`<thinking>…`(잘림).
+    - 생각: `reasoning` 또는 `reasoning_content` 필드, content 안 `</think>`·`</thinking>`
+      앞부분(대소문자 무시, 뒤쪽이 올바른 JSON이 되는 첫 닫기 태그 우선, 없으면 마지막),
+      닫히지 않은 `<think>`·`<thinking>…`(잘림).
     - 답: 전체 content가 이미 올바른 JSON이면 태그를 자르지 않고 그대로 둔다.
     """
     if not isinstance(message, Mapping):
@@ -188,9 +211,9 @@ def normalize_message(message: Mapping) -> tuple[str, str | None]:
     if not is_json:
         closes = list(_THINK_CLOSE.finditer(content))
         if closes:
-            last = closes[-1]
-            head = _THINK_ANY.sub("", content[: last.start()]).strip()
-            content = content[last.end() :]
+            cut = _select_think_close(content, closes)
+            head = _THINK_ANY.sub("", content[: cut.start()]).strip()
+            content = content[cut.end() :]
             if head:
                 traces.append(head)
         else:
