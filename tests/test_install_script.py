@@ -550,7 +550,8 @@ def test_check_follows_xdg_config_home_and_nvim_appname(env):
 def test_venv_whatif_plan(env):
     code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-WhatIf", "-Offline", "-WheelsDir", str(env.base / "wheels"))
     assert code == 0, out
-    assert f'venv --seed --python 3.14 "{env.repo / ".venv"}"' in out  # 공백 있는 경로는 따옴표로
+    # 공백 있는 경로는 따옴표로. -Offline이면 uv도 내려받지 않는다(A-07)
+    assert f'venv --seed --python 3.14 --offline --no-python-downloads "{env.repo / ".venv"}"' in out
     assert f"--no-index --find-links {env.base / 'wheels'}" in out
     assert f'-X utf8 "{env.repo / "scripts" / "kb.py"}" --help' in out
 
@@ -560,6 +561,22 @@ def test_venv_whatif_plan_online_first(env):
     assert code == 0, out
     assert re.search(r"(?m)^WHATIF venv .*python\.exe\" -X utf8 -m pip install -r .*requirements\.txt\"\r?$", out), out
     assert "WHATIF venv (only if the online install fails)" in out and "--no-index --find-links" in out
+
+
+def test_offline_uv_has_no_download_flags(env):
+    """A-07: -Offline이면 uv venv에 --offline·--no-python-downloads를 붙인다 (Python·pip seed를 받지 않는다)."""
+    wheels = env.base / "empty wheels"
+    wheels.mkdir()
+    code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Offline", "-WheelsDir", str(wheels))
+    uv_calls = [c["argv"] for c in env.stub_calls() if c["name"] == "uv"]
+    assert uv_calls, out
+    for argv in uv_calls:
+        assert argv[0] == "venv" and "--offline" in argv and "--no-python-downloads" in argv, argv
+    assert code == 1 and _steps(out) == {"venv": "failed"}, out  # uv 대역은 venv를 만들지 않는다
+    env.log.unlink()
+    code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-WheelsDir", str(wheels))  # 온라인: 플래그 없음
+    uv_calls = [c["argv"] for c in env.stub_calls() if c["name"] == "uv"]
+    assert uv_calls and all("--offline" not in a and "--no-python-downloads" not in a for a in uv_calls), uv_calls
 
 
 def test_venv_existing_good_is_kept(env):

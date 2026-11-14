@@ -383,9 +383,12 @@ function Step-venv {
         }
         $candidates = @()
         $uv = Get-CommandPath 'uv'
+        # -Offline: uv must not download a Python or the pip it seeds (it then fails and the next candidate is tried)
+        $uvOffline = @()
+        if ($Offline) { $uvOffline = @('--offline', '--no-python-downloads') }
         if ($uv) {
-            $candidates += , @($uv, @('venv', '--seed', '--python', '3.14', $venv))
-            $candidates += , @($uv, @('venv', '--seed', '--python', '3.13', $venv))
+            $candidates += , @($uv, (@('venv', '--seed', '--python', '3.14') + $uvOffline + @($venv)))
+            $candidates += , @($uv, (@('venv', '--seed', '--python', '3.13') + $uvOffline + @($venv)))
         }
         $pyl = Get-CommandPath 'py'
         if ($pyl) {
