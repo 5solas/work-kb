@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
-from lib import config, core, managed, notes
+from lib import config, core, managed, notes, sidecar
 from lib.config import Config
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
@@ -173,12 +173,12 @@ def unprocessed_images(cfg: Config) -> int:
     if inbox.is_dir():
         for path in inbox.iterdir():
             if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file() and core.is_scannable(path):
-                if not path.with_suffix(".md").exists():
+                if not sidecar.sidecar_for(cfg, path).exists():
                     count += 1
     assets = cfg.path("raw", "assets")
     for name in sorted(_embedded_assets(cfg)):
         image = assets / name
-        if image.is_file() and not cfg.path("inbox", f"{Path(name).stem}.md").exists():
+        if image.is_file() and not sidecar.sidecar_for(cfg, image).exists():
             count += 1
     return count
 

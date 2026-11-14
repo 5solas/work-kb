@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from lib import config, core, frontmatter, llm_client, managed, notes, prompts
+from lib import sidecar as sidecar_lib
 from lib.config import Config
 
 TASK = "image_ingest"
@@ -190,11 +191,35 @@ def scan_daily(cfg: Config) -> tuple[dict[str, tuple[str, str]], set[str]]:
                 name = _asset_name(target)
                 if name is not None and name not in assets:
                     assets[name] = (rel, line.text)
+    _collect_note_refs(cfg, ("inbox",), recursive=False, refs=refs)
+    _collect_note_refs(cfg, ("wiki",), recursive=True, refs=refs)
     return assets, refs
 
 
-def sidecar_path(cfg: Config, image_name: str) -> Path:
-    return cfg.path("inbox", f"{Path(image_name).stem}.md")
+def _collect_note_refs(cfg: Config, folder: tuple[str, ...], *, recursive: bool, refs: set[str]) -> None:
+    base = cfg.path(*folder)
+    if not base.is_dir():
+        return
+    paths = sorted(base.rglob("*.md") if recursive else base.glob("*.md"))
+    for path in paths:
+        if not core.is_scannable(path) or not path.is_file():
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError:
+            continue
+        if b"![" not in data:
+            continue
+        rel = notes.rel_path(cfg, path)
+        try:
+            lines = list(notes.iter_lines(rel, data))
+        except UnicodeDecodeError:
+            continue
+        for line in lines:
+            if line.in_code or "![" not in line.text:
+                continue
+            embeds = notes.image_embeds(line.text)
+            refs.update(_ref_key(t) for t in embeds + markdown_image_targets(line.text))
 
 
 def _asset_exists(asset_dir: Path, name: str) -> bool:
@@ -218,13 +243,13 @@ def collect(cfg: Config) -> list[Target]:
         for path in sorted(inbox.iterdir()):
             if path.suffix.lower() not in IMAGE_SUFFIXES or not path.is_file() or not core.is_scannable(path):
                 continue
-            if path.with_suffix(".md").exists():
-                continue  # 옆에 사이드카가 이미 있다(옮기지 않은 채 처리됨)
+            if sidecar_lib.sidecar_for(cfg, path).exists():
+                continue  # 사이드카가 이미 있다(옮기지 않은 채 처리됨)
             pinned = is_pinned(path.name, refs, lambda name=path.name: _asset_exists(asset_dir, name))
             targets.append(Target("inbox", path, f"inbox/{path.name}", pinned=pinned))
     for name in sorted(assets):
         image = asset_dir / name
-        if not image.is_file() or sidecar_path(cfg, name).exists():
+        if not image.is_file() or sidecar_lib.sidecar_for(cfg, image).exists():
             continue
         note, hint = assets[name]
         targets.append(Target("daily", image, f"raw/assets/{name}", hint=hint, note=note))
@@ -495,7 +520,7 @@ def asset_destination(cfg: Config, original: Path, when: dt.datetime, taken: set
     for i in range(1, 10_000):
         name = stem if i == 1 else f"{stem}-{i}"
         candidate = assets / f"{name}{suffix}"
-        if candidate.name.lower() in taken or candidate.exists() or sidecar_path(cfg, candidate.name).exists():
+        if candidate.name.lower() in taken or candidate.exists() or sidecar_lib.sidecar_for(cfg, candidate).exists():
             continue
         return candidate
     raise core.KbError(f"{original}: 빈 이름을 찾지 못했습니다")
@@ -692,7 +717,7 @@ class _Run:
             self._trash(target, sha, original)
             return
         # 임베드(또는 daily가 가리키는 inbox) 이미지: 옮기지 않고 duplicate_of 사이드카만
-        sidecar = sidecar_path(self.cfg, target.name)
+        sidecar = sidecar_lib.sidecar_for(self.cfg, target.path)
         rel = _rel(self.cfg, sidecar)
         link = original[:-3] if original.endswith(".md") else original
         body = render_sidecar(
@@ -753,7 +778,7 @@ class _Run:
     def _plan(self, target: Target, ex: Extraction, profile: str | None, now: dt.datetime) -> tuple[Path, Path, bytes, dict]:
         """(이미지 최종 위치, 사이드카, 사이드카 바이트, 원장 항목)."""
         asset = asset_destination(self.cfg, target.path, now, self.planned) if target.moves else target.path
-        sidecar = sidecar_path(self.cfg, asset.name)
+        sidecar = sidecar_lib.sidecar_for(self.cfg, asset)
         source_rel, sidecar_rel = _rel(self.cfg, asset), _rel(self.cfg, sidecar)
         model = self._model(profile)
         at = now.isoformat(timespec="seconds")

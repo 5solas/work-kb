@@ -802,3 +802,65 @@ def test_ledger_merges_concurrent_update(vault, fake_now):
     after = ingest_images.load_ledger(cfg)
     assert "concurrent-sha" in after["images"]
     assert "sha-a" in after["skipped"]
+
+
+def test_referenced_inbox_image_not_moved(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    put(vault / "inbox" / "사진1.png")
+    put(vault / "inbox" / "사진2.png")
+    (vault / "inbox" / "현장 메모.md").write_text("# 메모\n![[사진1.png]]\n", encoding="utf-8")
+    (vault / "wiki" / "topics" / "배포.md").parent.mkdir(parents=True, exist_ok=True)
+    (vault / "wiki" / "topics" / "배포.md").write_text("![[inbox/사진2.png]]\n", encoding="utf-8")
+    targets = {t.name: t for t in ingest_images.collect(cfg)}
+    assert targets["사진1.png"].pinned and not targets["사진1.png"].moves
+    assert targets["사진2.png"].pinned and not targets["사진2.png"].moves
+
+
+def test_user_note_with_same_stem(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    put(vault / "inbox" / "회의.png")
+    user_note = vault / "inbox" / "회의.md"
+    user_note.write_text("# 회의 (사용자가 쓴 inbox 글)\n", encoding="utf-8")
+    targets = [t.rel for t in ingest_images.collect(cfg)]
+    assert "inbox/회의.png" in targets
+    (vault / "inbox" / "현장.md").write_text("![[회의.png]]\n", encoding="utf-8")  # pinned
+    ingest_images.run(cfg, out=quiet)
+    assert user_note.read_text(encoding="utf-8") == "# 회의 (사용자가 쓴 inbox 글)\n"
+    assert (vault / "inbox" / "회의.png.md").is_file()
+
+
+def test_two_extensions_same_stem(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    put(vault / "raw" / "assets" / "shot.png")
+    jpg = vault / "raw" / "assets" / "shot.jpg"
+    jpg.write_bytes((FIX / "mail.png").read_bytes())
+    (vault / "inbox" / "shot.md").write_text("---\nsource_image: raw/assets/shot.png\n---\n", encoding="utf-8")
+    (vault / "daily" / "2026-11-15.md").write_text(
+        "## 기록\n- ![[raw/assets/shot.png]]\n- ![[raw/assets/shot.jpg]]\n",
+        encoding="utf-8",
+    )
+    targets = [t.rel for t in ingest_images.collect(cfg)]
+    assert targets == ["raw/assets/shot.jpg"]
+    ingest_images.run(cfg, out=quiet)
+    assert (vault / "inbox" / "shot.jpg.md").is_file()
+
+
+def test_moved_image_sidecar_matches_source_image(vault, fake_now):
+    from lib import sidecar as sidecar_lib
+
+    fake_now(NOW)
+    cfg = make_cfg(vault, "http://127.0.0.1:1")
+    moved = vault / "raw" / "assets" / "2026-11-05-1430-a.png"
+    put(moved)
+    stem_md = vault / "inbox" / "2026-11-05-1430-a.md"
+    stem_md.write_text("---\nsource_image: raw/assets/2026-11-05-1430-a.png\n---\n", encoding="utf-8")
+    assert sidecar_lib.sidecar_for(cfg, moved) == stem_md
+    new_inbox = vault / "inbox" / "2026-11-05-1430-a.png"
+    put(new_inbox)
+    assert sidecar_lib.sidecar_for(cfg, new_inbox) == vault / "inbox" / "2026-11-05-1430-a.png.md"

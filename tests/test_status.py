@@ -107,7 +107,7 @@ def sample(tmp_path):
     (inbox / "화이트보드.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     (inbox / "메일 캡처.JPG").write_bytes(b"\xff\xd8\xff")
     (inbox / "처리됨.webp").write_bytes(b"RIFF")
-    (inbox / "처리됨.md").write_text("---\nsource_image: raw/assets/x.webp\n---\n", encoding="utf-8")
+    (inbox / "처리됨.md").write_text("---\nsource_image: inbox/처리됨.webp\n---\n", encoding="utf-8")
     (inbox / "메모.txt").write_text("이미지 아님", encoding="utf-8")
     return root
 
@@ -387,3 +387,16 @@ def test_never_touches_network(sample, monkeypatch):
     monkeypatch.setattr(socket, "create_connection", refuse)
     info = status.collect(config.load(sample))
     assert info["llm"]["profiles"]["main"]["host"] == "127.0.0.1"
+
+
+def test_unprocessed_images_uses_sidecar_for(vault):
+    _write_local(vault, {"environment": "home"})
+    (vault / "inbox" / "회의.png").write_bytes(b"\x89PNG")
+    (vault / "inbox" / "회의.md").write_text("# 회의 사용자 노트\n", encoding="utf-8")
+    (vault / "raw" / "assets" / "shot.png").write_bytes(b"\x89PNG")
+    (vault / "raw" / "assets" / "shot.jpg").write_bytes(b"\x89PNG")
+    (vault / "inbox" / "shot.md").write_text("---\nsource_image: raw/assets/shot.png\n---\n", encoding="utf-8")
+    (vault / "daily" / "2026-11-15.md").write_text(
+        "## 기록\n- ![[raw/assets/shot.png]]\n- ![[raw/assets/shot.jpg]]\n", encoding="utf-8"
+    )
+    assert status.unprocessed_images(config.load(vault)) == 2
