@@ -6,19 +6,19 @@
 ## 1. `kb.py wheels` — 오프라인 설치 묶음 (집에서)
 
 ```
-.venv\Scripts\python.exe scripts\kb.py wheels                    # 기본: 3.13·3.14, wheels\
+.venv\Scripts\python.exe scripts\kb.py wheels                    # 기본: 3.14, wheels\
 .venv\Scripts\python.exe scripts\kb.py wheels --targets 3.14 --dir D:\임시\wheels
 .venv\Scripts\python.exe scripts\kb.py wheels --dry-run           # 실행할 pip 명령만 보기
 ```
 
 | 옵션 | 뜻 |
 |---|---|
-| `--targets 3.13,3.14` | 대상 Python 버전(3.13 이상). 기본 `3.13,3.14` |
+| `--targets 3.14` | 대상 Python 버전. 지원하는 3.14만 받는다(기본) |
 | `--dir wheels` | 받을 폴더. 상대 경로는 저장소 폴더 기준 |
 | `--no-sdist` | 3.15용 PyYAML 원본을 받지 않는다 |
 | `--dry-run` | 명령만 출력, 아무것도 받지 않는다 |
 
-대상마다 지금 venv의 pip로 다음을 실행한다(네트워크 필요, `KB_AGENT=1`이면 거부).
+지금 venv의 pip로 다음을 실행한다(네트워크 필요, `KB_AGENT=1`이면 거부).
 
 ```
 python -m pip download --only-binary=:all: --platform win_amd64 --implementation cp ^
@@ -30,18 +30,18 @@ python -m pip download --no-binary pyyaml --no-deps pyyaml==<같은 판> -d whee
 
 ```
 wheels\
-├── *.whl                 cp313·cp314 wheel (순수 Python wheel은 함께 씀)
+├── *.whl                 cp314 wheel과 순수 Python wheel
 ├── sdist\pyyaml-X.tar.gz Python 3.15용 PyYAML 원본
 └── MANIFEST.txt          대상별 wheel 목록, sha256·크기
 ```
 
-`MANIFEST.txt`의 `[cp313]`·`[cp314]` 구역에 `requirements.txt`의 다섯 패키지
+`MANIFEST.txt`의 `[cp314]` 구역에 `requirements.txt`의 다섯 패키지
 (requests, pyyaml, markdown, keyring, pillow)가 모두 있어야 한다. 빠지면 `누락:` 줄이 생기고 종료 코드 1이다.
 `wheels/`는 `.gitignore`에 있어 커밋되지 않지만, 이식 복사본에는 들어간다(§3).
 
 ## 2. 회사에서 설치
 
-지원 인터프리터는 Python 3.13·3.14다.
+지원 인터프리터는 Python 3.14 하나다(`docs/DECISIONS.md` D-NV1).
 
 ```
 python -m venv .venv
@@ -53,7 +53,7 @@ REM 인터넷이 안 되면:
 ### Python 3.15
 
 PyPI에 PyYAML의 cp315 wheel이 없다. 3.15 venv에서는 `kb.py`의 사전 점검이 설치 안내와 함께 종료 4로 멈춘다.
-회사에는 3.14(또는 3.13)를 쓰는 것이 기본이다.
+회사에는 3.14를 쓴다.
 
 집에서 해 본 결과(2026-11-05, PyYAML 6.0.3, Python 3.15.2):
 
@@ -61,7 +61,7 @@ PyPI에 PyYAML의 cp315 wheel이 없다. 3.15 venv에서는 `kb.py`의 사전 �
   `pyyaml-6.0.3-cp315-cp315-win_amd64.whl`이 나왔다. 단, C 컴파일러가 없어 libyaml C 확장 없이
   **순수 Python**으로 빌드되었다(느리지만 동작은 같다). 빌드에는 빌드 도구를 내려받을 네트워크가 필요하다.
 - pillow와 charset_normalizer는 PyPI에 cp315 wheel이 있다.
-- `kb.py wheels --targets 3.15`는 PyYAML 때문에 실패한다. 3.15 묶음이 꼭 필요하면 위 빌드 결과를
+- `kb.py wheels --targets 3.15`는 지원 대상이 아니라 거부된다(종료 4). 3.15 묶음이 꼭 필요하면 위 빌드 결과를
   `wheels\`에 넣은 다음 나머지는 `pip download ... --python-version 3.15 --abi cp315`로 따로 받아야 한다.
 
 ## 3. `scripts/deploy_check.py` — 이식 복사본 만들기 (집에서)

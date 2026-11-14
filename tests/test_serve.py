@@ -342,16 +342,26 @@ def test_mixed_stdout_stderr_keeps_write_order(vault, tmp_path, fake_now, start_
     assert buffered_code == code and sorted(_norm(buffered).splitlines()) == sorted(_norm(out).splitlines())
 
 
-def test_act_transitions_parity_reads_only(vault, tmp_path, fake_now, start_server, mock_jira):
+def test_act_transitions_is_not_served(vault, tmp_path, fake_now, start_server, mock_jira):
+    """`act transitions`는 Jira를 부르므로 서버에서 돌리지 않는다: 느린 Jira가 한 줄 서버를 막지 않는다(A-06, P-01)."""
+    assert serve.SERVED["act"] == frozenset({"list"})
     fake_now(NOW)
     prepare(vault, jira_url=mock_jira.base_url)
     env = child_env(tmp_path, vault)
     server = start_server(env)
     for argv in (["act", "transitions", "KB-12", "--root", str(vault)],
-                 ["act", "transitions", "KB-12", "--json", "--root", str(vault)]):  # fmt: skip
-        code, out = server.run(argv)
-        assert (code, out) == oneshot(env, argv)
-        assert code == 0 and "In Review" in out
+                 ["act", "transitions", "KB-12", "--json", "--root", str(vault)],
+                 ["act", "--root", str(vault), "transitions", "KB-12"]):  # fmt: skip
+        response = server.request(argv)
+        assert response["refused"] is True and "transitions" in response["reason"], (argv, response)
+        assert "code" not in response
+    started = time.monotonic()
+    assert server.ping()
+    assert time.monotonic() - started < 5
+    assert mock_jira.log == []
+    # 클라이언트가 돌리는 한 번 실행은 그대로 읽기만 한다
+    code, out = oneshot(env, ["act", "transitions", "KB-12", "--root", str(vault)])
+    assert code == 0 and "In Review" in out
     assert mock_jira.log and all(entry["method"] == "GET" for entry in mock_jira.log)
     assert not outbox.path_for(vault).exists()
 
@@ -386,6 +396,24 @@ def test_refused_commands_do_not_run(vault, tmp_path, fake_now, start_server, mo
     assert not outbox.path_for(vault).exists()
     assert tree(vault) == before
     assert server.ping()
+
+
+def test_root_before_subcommand_is_served(vault, tmp_path, fake_now, start_server):
+    """하위 명령 앞의 --root(`act --root V list`)도 kb.subcommand 규칙으로 가른다(C-33·A-01)."""
+    v = str(vault)
+    assert serve.refusal_reason(["act", "--root", v, "list"]) is None
+    assert serve.refusal_reason(["proposals", f"--root={v}", "list"]) is None
+    assert serve.refusal_reason(["act", "--root", v, "comment", "list"]) is not None
+    assert serve.refusal_reason(["act", "--root", v, "--", "list"]) is not None
+    assert serve.refusal_reason(["act", "--root", "list"]) is not None
+    fake_now(NOW)
+    prepare(vault)
+    env = child_env(tmp_path, vault, {"KB_AGENT": "1"})
+    server = start_server(env)
+    for argv in (["proposals", "--root", v, "list"], ["act", "--root", v, "list"], ["act", f"--root={v}", "list", "--json"]):
+        code, out = server.run(argv)
+        assert (code, out) == oneshot(env, argv)
+        assert code == 0, out
 
 
 def test_served_set_is_agent_allowed():
@@ -588,6 +616,36 @@ def test_leaked_lock_ends_the_server(vault, tmp_path, start_server, wrapper):
     assert server.proc.wait(timeout=15) == 0
     with core.kb_lock(vault, "다른 프로세스", timeout=2):
         pass
+
+
+def test_exits_after_code_change(vault, tmp_path, fake_now, start_server):
+    """가져온 scripts/ 모듈 파일이 바뀌면 응답을 보낸 뒤 종료 0: 옛 코드로 계속 돌지 않는다(C-04, P-06).
+
+    저장소 파일의 mtime을 건드리지 않게 scripts/를 임시 폴더에 복사해 그 복사본으로 서버를 띄운다.
+    """
+    fake_now(NOW)
+    prepare(vault)
+    scripts = tmp_path / "scripts-copy"
+    shutil.copytree(SCRIPTS, scripts, ignore=shutil.ignore_patterns("__pycache__"))
+    env = child_env(tmp_path, vault)
+    v = str(vault)
+    # 바뀐 것이 없으면 응답 뒤에도 계속 돈다
+    server = start_server(env, script=scripts / "kb.py")
+    assert server.run(["status", "--root", v])[0] == 0
+    assert server.ping() and server.proc.poll() is None
+    server.close()
+    # 서버는 응답을 보낸 "뒤"에 파일을 본다. 응답 사이에 파일을 바꾸면 바로 앞 응답 뒤의 확인과 경쟁한다
+    # (R-agy-02). 그래서 서버가 준비 줄을 낸 뒤(감시 기준은 그 전에 잡힌다), 첫 요청 전에 바꾼다:
+    # 그 사이에는 서버가 파일을 보지 않으므로 첫 응답 뒤의 확인이 반드시 변경을 본다.
+    for changed in ("status.py", "lib/core.py"):
+        server = start_server(env, script=scripts / "kb.py")
+        target = scripts / changed
+        stat = target.stat()
+        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+        code, out = server.run(["status", "--root", v])  # 이 응답은 보낸 뒤 끝난다
+        assert code == 0, out
+        assert server.proc.wait(timeout=15) == 0, changed
+        assert "코드가 바뀌어" in server.err(), server.err()
 
 
 def test_two_vaults_alternate_without_cross_talk(vault, tmp_path, fake_now, start_server):

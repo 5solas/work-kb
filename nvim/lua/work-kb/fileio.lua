@@ -1,6 +1,6 @@
 -- 바이트 단위 파일 도구와 열린 버퍼 규칙 (capture·daily·inbox가 쓴다).
 -- daily 쓰기 허용 목록 1: capture가 `## 기록` 끝에 덧붙인다. 그 밖의 바이트(BOM, CRLF, EOL이 섞인
--- 줄, 마지막 줄의 줄바꿈 유무)는 그대로 둔다.
+-- 줄, 마지막 줄의 줄바꿈 유무)는 그대로 둔다. 디스크 쓰기는 임시 파일 뒤 바꾸기(원자적, write_bytes).
 --
 -- 열린 버퍼 규칙 (Emacs work-kb--append-entry, D26):
 --   - 버퍼가 수정되지 않았으면 디스크 바이트를 고친 뒤 버퍼를 묻지 않고 다시 읽는다.
@@ -58,16 +58,65 @@ local function write_all(fd, data)
   return true
 end
 
----PATH에 DATA를 바이트 그대로 쓴다 (덮어씀, 제자리). 실패하면 오류.
-function M.write_bytes(path, data)
-  local fd, err = uv.fs_open(path, "w", 438)
+-- 다른 프로세스가 파일을 열어 두면 Windows는 바꾸기를 막는다 (공유 위반). 잠깐 기다려 다시 한다.
+local BUSY = { EBUSY = true, EACCES = true, EPERM = true }
+local RENAME_TRIES = 8
+
+---PATH에 DATA를 바이트 그대로 쓴다 (Python core.atomic_write와 같은 원자적 교체).
+---같은 폴더의 `.<이름>.<pid>.tmp`에 쓰고 fsync 뒤 PATH로 바꾼다. 다른 프로세스는 옛 바이트나 새 바이트만 본다.
+---EXPECT(읽은 바이트)를 주면 바꾸기 직전 디스크가 그대로인지 다시 본다. 다르면 쓰지 않고 오류 (사람 편집 보호).
+---실패해도 임시 파일은 지운다.
+---@param path string
+---@param data string
+---@param expect string|nil
+function M.write_bytes(path, data, expect)
+  local function fail(what, detail)
+    error(string.format("work-kb: %s: %s (%s)", what, path, tostring(detail)), 0)
+  end
+  local tmp = string.format("%s/.%s.%d.tmp", M.dirname(path), M.basename(path), vim.fn.getpid())
+  local fd, err = uv.fs_open(tmp, "w", 438)
   if not fd then
-    error(string.format("work-kb: 파일을 쓰지 못했습니다: %s (%s)", path, tostring(err)), 0)
+    fail("파일을 쓰지 못했습니다", err)
   end
   local ok, werr = write_all(fd, data)
+  if ok then
+    ok, werr = uv.fs_fsync(fd)
+  end
   uv.fs_close(fd)
-  if not ok then
-    error(string.format("work-kb: 파일을 쓰지 못했습니다: %s (%s)", path, tostring(werr)), 0)
+  local done, why = pcall(function()
+    if not ok then
+      fail("파일을 쓰지 못했습니다", werr)
+    end
+    local wait = 50
+    for try = 1, RENAME_TRIES do
+      local busy_read = nil
+      if expect ~= nil then
+        local current, rerr0 = M.read_bytes(path)
+        if current == nil and uv.fs_stat(path) ~= nil then
+          -- 있는데 읽지 못함: 다른 프로그램이 공유 없이 잡고 있다. 사람 편집이 아니므로 기다렸다 다시 본다 (R-agy-04)
+          busy_read = rerr0 or "읽지 못함"
+        elseif current ~= expect then
+          fail("파일이 읽은 뒤 바뀌었습니다. 다시 시도하세요", "쓰지 않음")
+        end
+      end
+      if busy_read == nil then
+        local renamed, rerr, code = uv.fs_rename(tmp, path)
+        if renamed then
+          return
+        end
+        if not BUSY[code] or try == RENAME_TRIES then
+          fail("파일을 바꾸지 못했습니다", rerr)
+        end
+      elseif try == RENAME_TRIES then
+        fail("다른 프로그램이 잡고 있어 파일을 읽지 못했습니다. 쓰지 않았습니다", busy_read)
+      end
+      uv.sleep(wait)
+      wait = wait * 2
+    end
+  end)
+  if not done then
+    uv.fs_unlink(tmp)
+    error(why, 0)
   end
 end
 
@@ -528,7 +577,7 @@ function M.append(path, entry)
   if not M.is_utf8(bytes) then
     not_utf8(path)
   end
-  M.write_bytes(path, M.insert_entry(bytes, entry))
+  M.write_bytes(path, M.insert_entry(bytes, entry), bytes)
   if live then
     M.reload(live, true)
   end

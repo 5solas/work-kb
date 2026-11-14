@@ -24,6 +24,30 @@ describe("names", function()
     H.eq(n.safe_name("탭\t과\n줄"), "탭과줄", "제어 문자는 지운다 (공백으로 바꾸지 않음)")
   end)
 
+  it("folds unicode spaces like core.safe_name", function()
+    -- Python 3.14 core.safe_name 결과 (`\s`는 유니코드 공백: U+0085 U+00A0 U+1680 U+2000–200A U+2028/9 U+202F U+205F U+3000)
+    local n = names()
+    local cases = {
+      { "회의 메모", "회의 메모" },
+      { "회의\227\128\128메모", "회의 메모" }, -- U+3000
+      { "\227\128\128앞 공백", "앞 공백" },
+      { "끝 공백\194\160", "끝 공백" }, -- U+00A0
+      { "a\194\133b", "a b" }, -- U+0085
+      { "a\226\128\168b\226\128\169c", "a b c" }, -- U+2028 U+2029
+      { "x\225\154\128y\226\128\128z\226\128\138", "x y z" }, -- U+1680 U+2000 U+200A
+      { "p\226\128\175q\226\129\159r", "p q r" }, -- U+202F U+205F
+      { "\194\160 \227\128\128 ", "_" },
+      { "a\226\128\139b", "a\226\128\139b" }, -- U+200B는 공백이 아니다
+      { "가\226\128\130\226\128\131나", "가 나" }, -- U+2002 U+2003 이어진 것은 하나로
+    }
+    for _, c in ipairs(cases) do
+      H.eq(n.safe_name(c[1]), c[2], vim.inspect(c[1]))
+    end
+    -- 예약 이름 판정은 Python str.upper(): 점 없는 ı는 I
+    H.eq(n.safe_name("conın$"), "_conın$")
+    H.eq(n.safe_name("auxı"), "auxı", "AUXI는 예약 이름이 아니다")
+  end)
+
   it("80글자 제한은 바이트가 아니라 글자", function()
     local n = names()
     local long = string.rep("가", 100)

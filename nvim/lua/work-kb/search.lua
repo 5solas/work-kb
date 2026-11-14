@@ -158,10 +158,10 @@ function M.rg_search(rg, query, vault)
   return handle
 end
 
----`kb.py search --root V QUERY` 결과를 quickfix에 넣는다. proc.run 핸들.
+---`kb.py search --root V -- QUERY` 결과를 quickfix에 넣는다. proc.run 핸들.
 function M.kb_search(query, vault)
   local p = proc()
-  return p.run(p.kb_args("search", query), {
+  return p.run(p.kb_args("search", "--", query), {
     buffer = M.BUFFER,
     on_exit = function(code, bufnr)
       if code ~= 0 then

@@ -83,6 +83,8 @@ function M.check()
     health.ok(string.format("준비됨 (pid %s)", tostring(st.pid)))
   elseif st.state == "starting" then
     health.info("띄우는 중")
+  elseif st.state == "stopped" then
+    health.info("놀고 있음, 다음 요청 때 띄움")
   else
     health.warn(string.format("쓰지 못함 (%s): %s — 한 번 실행으로 돌립니다", st.state, tostring(st.last_error or "-")))
     if st.stderr ~= "" then

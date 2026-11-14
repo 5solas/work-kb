@@ -63,14 +63,16 @@ function M.ensure_today(force, t)
   local fio = fileio()
   if force or not fio.exists(file) then
     local p = proc()
-    local ok, code = pcall(function()
+    local ok, code, reason = pcall(function()
       return p.run_sync(p.kb_args("today", "--date", day))
     end)
     if not ok then
       ui().notify("work-kb: today 실행 실패: " .. tostring(code))
       code = nil
     end
-    if code ~= 0 then
+    if ok and reason == "timeout" then
+      ui().notify(p.timeout_message("today", p.get_buffer(p.OUTPUT)))
+    elseif code ~= 0 then
       ui().notify(
         string.format("work-kb: daily_prepare 실패 (종료 %s). %s 버퍼를 보세요", code == nil and "nil" or tostring(code), p.OUTPUT)
       )

@@ -197,12 +197,12 @@ def check(label: str) -> Callable[[Checker], Checker]:
 @check("Python")
 def check_python(ctx: Context) -> None:
     version = ".".join(str(x) for x in sys.version_info[:3])
-    if sys.version_info < (3, 13):
-        ctx.report.fail("Python", f"{version} ({sys.executable}) → Python 3.13 이상으로 venv를 다시 만드세요")
+    if sys.version_info < (3, 14):  # 지원 Python은 3.14 하나(D-NV1). kb.py 사전 점검과 같은 기준
+        ctx.report.fail("Python", f"{version} ({sys.executable}) → Python 3.14가 필요합니다. venv를 다시 만드세요")
     else:
         ctx.report.ok("Python", f"{version} ({sys.executable})")
     if sys.version_info >= (3, 15):
-        ctx.report.info("Python 3.15", "PyYAML wheel이 아직 없습니다. 회사 배포(wheels/)에는 3.14 또는 3.13을 쓰세요")
+        ctx.report.info("Python 3.15", "PyYAML wheel이 아직 없습니다. 회사 배포(wheels/)에는 3.14를 쓰세요")
 
 
 @check("의존성")
@@ -1115,6 +1115,9 @@ def check_timezone(ctx: Context) -> None:
     ctx.report.info("시간대", text)
 
 
+MIN_NVIM = (0, 12)  # health.lua·init.lua·install.ps1과 같은 최소 버전(D-NV2)
+
+
 @check("편집기")
 def check_editors(ctx: Context) -> None:
     nvim = shutil.which("nvim")
@@ -1126,17 +1129,17 @@ def check_editors(ctx: Context) -> None:
             m = re.search(r"NVIM v(\d+)\.(\d+)\.(\d+)", out)
             if m:
                 version = f"{m.group(1)}.{m.group(2)}.{m.group(3)}"
-                old = (int(m.group(1)), int(m.group(2))) < (0, 11)
+                old = (int(m.group(1)), int(m.group(2))) < MIN_NVIM
             else:
                 old = False
         except Exception:
             old = False
         text = nvim + (f", {version}" if version else "")
         if old:
-            text += " → 0.11 이상이 필요합니다. Neovim을 올리세요"
+            text += f" → {MIN_NVIM[0]}.{MIN_NVIM[1]} 이상이 필요합니다. Neovim을 올리세요"
         ctx.report.info("Neovim", text)
     else:
-        ctx.report.info("Neovim", "PATH에 없습니다. nvim/을 쓰려면 Neovim 0.11 이상을 설치하세요")
+        ctx.report.info("Neovim", f"PATH에 없습니다. nvim/을 쓰려면 Neovim {MIN_NVIM[0]}.{MIN_NVIM[1]} 이상을 설치하세요")
     neovide = shutil.which("neovide")
     if neovide:
         ctx.report.info("Neovide", neovide)

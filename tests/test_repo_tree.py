@@ -70,7 +70,7 @@ LIB_MODULES = [
     "confluence_client",
 ]
 PROMPT_TASKS = ["tag", "decisions", "entity_summary", "topic_proposal", "image_ingest", "contradictions"]
-DOCS = ["README", "DEPLOY", "SCHEDULING", "DECISIONS", "TROUBLESHOOTING", "LIVE"]
+DOCS = ["README", "DEPLOY", "SCHEDULING", "DECISIONS", "TROUBLESHOOTING", "LIVE", "USER-GUIDE", "PACKAGING"]
 # work-kb 플러그인 진입점. 플러그인 폴더를 옮기면 이 상수 하나만 고친다.
 PLUGIN_INIT = "nvim/lua/work-kb/init.lua"
 OTHER_FILES = [

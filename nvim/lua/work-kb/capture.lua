@@ -251,14 +251,10 @@ function M.asset_path(name, ext, t)
   return names().unique_path(path)
 end
 
----ASSET의 볼트 기준 상대 경로 (슬래시).
+---ASSET의 볼트 기준 상대 경로 (슬래시). 볼트 밖이면 경로 그대로.
+---config.in_dir: 대소문자 무시, 정션·비ASCII 대소문자는 실제 경로로.
 local function vault_relative(path)
-  local v = vault()
-  local p = vim.fs.normalize(path)
-  if p:sub(1, #v + 1):lower() == (v .. "/"):lower() then
-    return p:sub(#v + 2)
-  end
-  return p
+  return config().in_dir(path, vault()) or vim.fs.normalize(path)
 end
 
 ---`- HH:MM ![[raw/assets/…]] 설명` 캡처 줄.

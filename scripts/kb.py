@@ -45,8 +45,8 @@ def _err(text: str) -> None:
 
 def _preflight() -> None:
     """표준 라이브러리만으로 Python 버전과 의존성을 확인한다(D02). 실패하면 종료 4."""
-    if sys.version_info < (3, 13):
-        _err(f"오류: Python 3.13 이상이 필요합니다 (현재 {sys.version.split()[0]}).\n")
+    if sys.version_info < (3, 14):
+        _err(f"오류: Python 3.14가 필요합니다 (현재 {sys.version.split()[0]}).\n")
         sys.exit(4)
     missing = [pkg for mod, pkg in _REQUIRED if importlib.util.find_spec(mod) is None]
     if missing:
@@ -54,7 +54,7 @@ def _preflight() -> None:
         lines.append("  설치: python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt")
         lines.append("  오프라인: .venv\\Scripts\\pip install --no-index --find-links wheels -r requirements.txt")
         if sys.version_info >= (3, 15) and "pyyaml" in missing:
-            lines.append("  Python 3.15에는 PyYAML wheel이 아직 없습니다. Python 3.14(또는 3.13)로 venv를 만드세요.")
+            lines.append("  Python 3.15에는 PyYAML wheel이 아직 없습니다. Python 3.14로 venv를 만드세요.")
         _err("\n".join(lines) + "\n")
         sys.exit(4)
 
@@ -107,6 +107,26 @@ def usage() -> str:
     return "사용법: python scripts/kb.py <명령> [옵션]\n\n명령:\n" + "\n".join(rows) + "\n\n각 명령의 옵션: python scripts/kb.py <명령> --help\n"
 
 
+def subcommand(args: list[str]) -> str | None:
+    """명령 이름 뒤 인수 ARGS에서 하위 명령(첫 위치 인수)을 찾는다. `act --root V list`도 `list`.
+
+    `--root X`·`--root=X`는 건너뛴다. `--`를 만나거나 다른 옵션이 먼저 오면 정하지 않고 None
+    (명령 파서의 전역 옵션은 --root뿐이다). KB_AGENT 허용 하위 명령과 serve의 실행 대상 판정이 함께 쓴다.
+    """
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--root":
+            i += 2
+        elif arg.startswith("--root="):
+            i += 1
+        elif arg.startswith("-"):
+            return None
+        else:
+            return arg
+    return None
+
+
 def main(argv: list[str]) -> int:
     from lib import core
 
@@ -117,7 +137,7 @@ def main(argv: list[str]) -> int:
     command = COMMANDS.get(name)
     if command is None:
         raise core.ConfigError(f"알 수 없는 명령: {argv[0]}\n{usage()}")
-    sub_allowed = len(argv) > 1 and argv[1] in command.agent_ok_sub
+    sub_allowed = subcommand(argv[1:]) in command.agent_ok_sub
     if not command.agent_ok and not sub_allowed:
         core.refuse_if_agent(name)
     module = importlib.import_module(command.module)

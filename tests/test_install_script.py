@@ -17,12 +17,14 @@ install.ps1은 이제 venv, 사용자 환경 변수 WORK_KB_ROOT, 읽기 전용 
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 import uuid
 from pathlib import Path
@@ -55,7 +57,7 @@ with open(LOG, "a", encoding="utf-8") as f:
 if sys.argv[1] == "nvim" and sys.argv[2:] == ["--version"]:
     print("NVIM v" + os.environ.get("STUB_NVIM_VERSION", "0.12.6"))
     print("Build type: Release")
-# uv venv 흉내: 작업 트리 .venv의 런처(python.exe)를 복사해 Python 3.14 가상환경처럼 보이게 한다 (설치는 없음)
+# uv venv 흉내: 시험을 돌리는 인터프리터의 venv 런처를 복사해 Python 3.14 가상환경처럼 보이게 한다 (설치는 없음)
 if sys.argv[1] == "uv" and sys.argv[2:3] == ["venv"] and os.environ.get("STUB_PYTHON_LAUNCHER"):
     venv = sys.argv[-1]
     os.makedirs(os.path.join(venv, "Scripts"), exist_ok=True)
@@ -197,31 +199,43 @@ def _steps(out: str) -> dict[str, str]:
     return {m.group(1): m.group(2) for m in re.finditer(r"(?m)^STEP (\S+) (\S+)", out)}
 
 
-def _real_venv_launcher() -> tuple[Path, Path]:
-    src = ROOT / ".venv"
-    launcher, cfg = src / "Scripts" / "python.exe", src / "pyvenv.cfg"
-    if not (launcher.is_file() and cfg.is_file()):
-        pytest.skip("작업 트리에 .venv가 없음 (런처를 빌려 올 수 없음)")
-    return launcher, cfg
+def _venv_launcher() -> Path:
+    """시험을 돌리는 인터프리터(sys.base_prefix)의 venv 런처. `python -m venv`가 Scripts\\python.exe로 복사하는 파일."""
+    launcher = Path(sys.base_prefix) / "Lib" / "venv" / "scripts" / "nt" / "venvlauncher.exe"
+    if not launcher.is_file():
+        pytest.skip(f"{sys.base_prefix}에 venv 런처(Lib\\venv\\scripts\\nt\\venvlauncher.exe)가 없음")
+    return launcher
 
 
-def _fake_venv(env: Env, version: str, packages: bool = True) -> None:
-    """작업 트리 .venv의 런처(python.exe)와 pyvenv.cfg를 복사해 만든 가짜 .venv (설치하지 않는다).
+def _pyvenv_cfg(version: str) -> str:
+    return f"home = {sys.base_prefix}\ninclude-system-site-packages = false\nversion = {version}\n"
 
-    packages=True면 .pth 한 줄로 작업 트리 .venv의 site-packages를 보이게 한다: pip과 requirements.txt의
-    패키지가 "이미 설치된" 상태가 된다 (install.ps1의 의존성 확인이 통과한다). False면 빈 venv다.
+
+def _site_packages_with_pip() -> Path:
+    """시험을 돌리는 인터프리터의 site-packages. pip가 없으면 이유를 적고 건너뛴다."""
+    if importlib.util.find_spec("pip") is None:
+        pytest.skip(f"{sys.executable}에 pip가 없음: install.ps1의 의존성 확인(pip install --no-index)을 흉내 낼 수 "
+                    "없다. 개발 venv는 `uv venv --seed`로 만든다")
+    return Path(sysconfig.get_paths()["purelib"])
+
+
+def _fake_venv(env: Env, version: str, packages: bool = False) -> None:
+    """시험을 돌리는 인터프리터로 만든 가짜 .venv: venv 런처 + pyvenv.cfg (설치하지 않는다).
+
+    packages=True면 .pth 한 줄로 그 인터프리터의 site-packages를 보이게 한다: pip과 requirements.txt의
+    패키지가 "이미 설치된" 상태가 된다 (install.ps1의 의존성 확인이 통과한다). pip가 없으면 건너뛴다.
+    False면 빈 venv다 (pip 없이 돈다).
     """
-    launcher, cfg_path = _real_venv_launcher()
+    launcher = _venv_launcher()
+    site_src = _site_packages_with_pip() if packages else None
     dst = env.repo / ".venv" / "Scripts"
     dst.mkdir(parents=True)
     shutil.copy(launcher, dst / "python.exe")
-    cfg = cfg_path.read_text(encoding="utf-8")
-    cfg = re.sub(r"(?m)^(version(?:_info)?\s*=\s*)\S+", lambda m: m.group(1) + version, cfg)
-    (env.repo / ".venv" / "pyvenv.cfg").write_text(cfg, encoding="utf-8")
-    if packages:
+    (env.repo / ".venv" / "pyvenv.cfg").write_text(_pyvenv_cfg(version), encoding="utf-8")
+    if site_src is not None:
         site = env.repo / ".venv" / "Lib" / "site-packages"
         site.mkdir(parents=True)
-        (site / "borrowed.pth").write_text(str(ROOT / ".venv" / "Lib" / "site-packages") + "\n", encoding="utf-8")
+        (site / "borrowed.pth").write_text(str(site_src) + "\n", encoding="utf-8")
 
 
 @pytest.fixture
@@ -324,7 +338,8 @@ def test_env_set_rerun_and_uninstall_removes(shell, env):
     assert code == 0 and _steps(out) == {"env": "changed"}, out
     assert env.user_vars() == {"WORK_KB_ROOT": str(env.repo)}
     manifest = json.loads(env.manifest.read_text(encoding="utf-8"))
-    assert manifest["env"]["WORK_KB_ROOT"] == {"value": str(env.repo), "hadPrevious": False, "previous": None}
+    assert manifest["env"]["WORK_KB_ROOT"] == {"value": str(env.repo), "hadPrevious": False, "previous": None,
+                                               "repo": str(env.repo)}
     assert not env.manifest.read_bytes().startswith(b"\xef\xbb\xbf")
     assert "WORK_KB_ROOT" in out and str(env.manifest) in out  # 요약에 놓은 것
 
@@ -352,7 +367,7 @@ def test_env_replaces_other_value_only_with_yes_and_uninstall_restores(shell, en
     assert code == 0 and _steps(out) == {"env": "changed"}, out
     assert env.user_vars() == {"WORK_KB_ROOT": str(env.repo), "UNRELATED": "x"}
     entry = json.loads(env.manifest.read_text(encoding="utf-8"))["env"]["WORK_KB_ROOT"]
-    assert entry == {"value": str(env.repo), "hadPrevious": True, "previous": other}
+    assert entry == {"value": str(env.repo), "hadPrevious": True, "previous": other, "repo": str(env.repo)}
 
     code, out = env.run(shell, "uninstall.ps1", "-WhatIf")
     assert code == 0 and _steps(out)["env"] == "whatif", out
@@ -365,20 +380,79 @@ def test_env_replaces_other_value_only_with_yes_and_uninstall_restores(shell, en
 
 
 def test_env_moved_clone_keeps_the_original_previous_value(env):
-    """같은 변수를 install.ps1이 두 번 바꾸면(저장소를 옮김) 처음 값을 기억한다."""
+    """같은 변수를 install.ps1이 두 번 바꾸면(저장소를 옮겨 옛 폴더가 없음) 처음 값을 기억한다."""
     env.set_user_vars({"WORK_KB_ROOT": r"C:\원래 값"})
     code, out = env.run("ps51", "install.ps1", "-Only", "env", "-Yes")
     assert code == 0, out
     moved = env.base / "moved repo"
-    shutil.copytree(env.repo, moved)
-    code, out = nvim_run_script(env, moved / "install.ps1", "-Only", "env")  # 우리 값이므로 묻지 않는다
+    env.repo.rename(moved)
+    code, out = nvim_run_script(env, moved / "install.ps1", "-Only", "env")  # 우리 값이고 옛 폴더가 없으므로 묻지 않는다
     assert code == 0 and _steps(out) == {"env": "changed"}, out
     assert env.user_vars()["WORK_KB_ROOT"] == str(moved)
     entry = json.loads(env.manifest.read_text(encoding="utf-8"))["env"]["WORK_KB_ROOT"]
-    assert entry["previous"] == r"C:\원래 값" and entry["hadPrevious"] is True
+    assert entry["previous"] == r"C:\원래 값" and entry["hadPrevious"] is True and entry["repo"] == str(moved)
     code, out = nvim_run_script(env, moved / "uninstall.ps1")
     assert code == 0, out
     assert env.user_vars() == {"WORK_KB_ROOT": r"C:\원래 값"}
+
+
+@pytest.mark.parametrize("variant", ["upper", "trailing-backslash"])
+def test_env_moved_clone_matches_path_case_insensitively(env, variant):
+    """R-agy-03: 기록한 값과 지금 값이 대소문자·끝 역슬래시만 다르면 같은 경로다(uninstall.ps1의 Test-SamePath와 같게).
+
+    옮긴 클론이므로 묻지 않고 바꾸며 처음 이전 값을 이어받아야 한다.
+    """
+    env.set_user_vars({"WORK_KB_ROOT": r"C:\원래 값"})
+    code, out = env.run("ps51", "install.ps1", "-Only", "env", "-Yes")
+    assert code == 0, out
+    old = str(env.repo)
+    env.set_user_vars({"WORK_KB_ROOT": old.upper() if variant == "upper" else old + "\\"})
+    moved = env.base / "moved repo"
+    env.repo.rename(moved)
+    code, out = nvim_run_script(env, moved / "install.ps1", "-Only", "env")
+    assert code == 0 and _steps(out) == {"env": "changed"}, out
+    entry = json.loads(env.manifest.read_text(encoding="utf-8"))["env"]["WORK_KB_ROOT"]
+    assert entry["previous"] == r"C:\원래 값" and entry["hadPrevious"] is True, entry
+
+
+def _second_clone(env: Env) -> Path:
+    """같은 프로필(LOCALAPPDATA·사용자 환경 변수)을 쓰는 두 번째 클론."""
+    other = env.base / "clone B"
+    (other / "scripts").mkdir(parents=True)
+    for name in ("install.ps1", "uninstall.ps1", "requirements.txt", "scripts/kb.py"):
+        shutil.copy(env.repo / name, other / name)
+    return other
+
+
+def test_second_clone_install_records_previous(env):
+    """다른 클론(폴더가 있음)이 설정한 값은 우리 값이 아니다: -Yes로만 바꾸고, 그 값을 이전 값으로 기록한다."""
+    code, out = env.run("ps51", "install.ps1", "-Only", "env")
+    assert code == 0, out
+    other = _second_clone(env)
+    code, out = nvim_run_script(env, other / "install.ps1", "-Only", "env")  # -NonInteractive: 묻지만 답이 없음
+    assert code == 1 and _steps(out) == {"env": "failed"}, out
+    assert env.user_vars() == {"WORK_KB_ROOT": str(env.repo)}
+    code, out = nvim_run_script(env, other / "install.ps1", "-Only", "env", "-Yes")
+    assert code == 0 and _steps(out) == {"env": "changed"}, out
+    entry = json.loads(env.manifest.read_text(encoding="utf-8"))["env"]["WORK_KB_ROOT"]
+    assert entry == {"value": str(other), "hadPrevious": True, "previous": str(env.repo), "repo": str(other)}
+
+
+def test_uninstall_from_other_clone_keeps_variable(env):
+    """C-07: 클론 A의 uninstall이 클론 B가 설정한 WORK_KB_ROOT를 지우지 않는다. B의 uninstall은 A 값을 되돌린다."""
+    code, out = env.run("ps51", "install.ps1", "-Only", "env")
+    assert code == 0, out
+    other = _second_clone(env)
+    code, out = nvim_run_script(env, other / "install.ps1", "-Only", "env", "-Yes")
+    assert code == 0, out
+    code, out = env.run("ps51", "uninstall.ps1", "-Only", "env")
+    assert code == 0 and _steps(out) == {"env": "skipped"} and "another clone" in out, out
+    assert env.user_vars() == {"WORK_KB_ROOT": str(other)}
+    assert env.manifest.exists()  # B의 기록은 남는다
+    code, out = nvim_run_script(env, other / "uninstall.ps1", "-Only", "env")
+    assert code == 0 and _steps(out) == {"env": "changed"}, out
+    assert env.user_vars() == {"WORK_KB_ROOT": str(env.repo)}
+    assert not env.manifest.exists()
 
 
 def nvim_run_script(env: Env, script: Path, *args: str) -> tuple[int, str]:
@@ -428,7 +502,7 @@ def test_full_install_with_nvim_config_present_never_touches_it(shell, env):
     neovide = env.roaming / "neovide"
     neovide.mkdir()
     (neovide / "config.toml").write_bytes(b"# nvim-config's own\n")
-    _fake_venv(env, "3.14.0")
+    _fake_venv(env, "3.14.0", packages=True)
     guarded = (env.config, neovide)
     before = env.snapshot(*guarded)
     code, out = env.run(shell, "install.ps1")
@@ -469,10 +543,19 @@ def test_check_old_nvim_and_config_without_spec(env):
     env.set_user_vars({"WORK_KB_ROOT": r"D:\elsewhere"})
     code, out = env.run("ps51", "install.ps1", "-Only", "check", extra_env={"STUB_NVIM_VERSION": "0.10.4"})
     assert code == 0 and _steps(out) == {"check": "warn"}, out
-    assert "nvim 0.10.4 < 0.11" in out
+    assert "nvim 0.10.4 < 0.12" in out
     assert "config does not load work-kb" in out and f'git -C "{env.config}" pull' in out
     assert "WORK_KB_ROOT not this repository" in out
     assert (env.config / "init.lua").read_bytes() == b"-- some other config\n"
+
+
+def test_nvim_011_is_old(env):
+    """Neovim 최소 버전은 0.12다(D-NV2, health.lua·doctor와 같음)."""
+    env.make_config()
+    env.set_user_vars({"WORK_KB_ROOT": str(env.repo)})
+    code, out = env.run("ps51", "install.ps1", "-Only", "check", extra_env={"STUB_NVIM_VERSION": "0.11.4"})
+    assert code == 0 and _steps(out) == {"check": "warn"}, out
+    assert "nvim 0.11.4 < 0.12" in out and "0.12" in out, out
 
 
 def test_check_reports_old_installer_leftovers_without_touching_them(env):
@@ -509,7 +592,8 @@ def test_check_follows_xdg_config_home_and_nvim_appname(env):
 def test_venv_whatif_plan(env):
     code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-WhatIf", "-Offline", "-WheelsDir", str(env.base / "wheels"))
     assert code == 0, out
-    assert f'venv --seed --python 3.14 "{env.repo / ".venv"}"' in out  # 공백 있는 경로는 따옴표로
+    # 공백 있는 경로는 따옴표로. -Offline이면 uv도 내려받지 않는다(A-07)
+    assert f'venv --seed --python 3.14 --offline --no-python-downloads "{env.repo / ".venv"}"' in out
     assert f"--no-index --find-links {env.base / 'wheels'}" in out
     assert f'-X utf8 "{env.repo / "scripts" / "kb.py"}" --help' in out
 
@@ -521,8 +605,24 @@ def test_venv_whatif_plan_online_first(env):
     assert "WHATIF venv (only if the online install fails)" in out and "--no-index --find-links" in out
 
 
+def test_offline_uv_has_no_download_flags(env):
+    """A-07: -Offline이면 uv venv에 --offline·--no-python-downloads를 붙인다 (Python·pip seed를 받지 않는다)."""
+    wheels = env.base / "empty wheels"
+    wheels.mkdir()
+    code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Offline", "-WheelsDir", str(wheels))
+    uv_calls = [c["argv"] for c in env.stub_calls() if c["name"] == "uv"]
+    assert uv_calls, out
+    for argv in uv_calls:
+        assert argv[0] == "venv" and "--offline" in argv and "--no-python-downloads" in argv, argv
+    assert code == 1 and _steps(out) == {"venv": "failed"}, out  # uv 대역은 venv를 만들지 않는다
+    env.log.unlink()
+    code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-WheelsDir", str(wheels))  # 온라인: 플래그 없음
+    uv_calls = [c["argv"] for c in env.stub_calls() if c["name"] == "uv"]
+    assert uv_calls and all("--offline" not in a and "--no-python-downloads" not in a for a in uv_calls), uv_calls
+
+
 def test_venv_existing_good_is_kept(env):
-    _fake_venv(env, "3.14.0")
+    _fake_venv(env, "3.14.0", packages=True)
     code, out = env.run("ps51", "install.ps1", "-Only", "venv")
     assert code == 0, out
     assert _steps(out) == {"venv": "ok"} and "kb.py --help works, requirements satisfied" in out, out
@@ -532,12 +632,25 @@ def test_venv_existing_good_is_kept(env):
 
 def test_venv_existing_but_missing_packages_is_not_reported_ok(env):
     """kb.py --help는 표준 라이브러리만으로 돈다. 패키지가 빠진 venv를 'ok'로 넘기면 안 된다 (git pull 뒤 재실행)."""
-    _fake_venv(env, "3.14.0", packages=False)
+    _fake_venv(env, "3.14.0")
     wheels = env.base / "empty wheels"
     wheels.mkdir()
     code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Offline", "-WheelsDir", str(wheels))
     assert code == 1 and _steps(out) == {"venv": "failed"}, out
     assert "--no-index --find-links" in out, out  # 설치를 시도했다
+
+
+def test_venv_313_is_not_good(env):
+    """지원 Python은 3.14 하나다(D-NV1): 3.13 venv는 그대로 쓰지 않는다. 후보에도 3.13이 없다."""
+    _fake_venv(env, "3.13.5")
+    before = env.snapshot()
+    code, out = env.run("ps51", "install.ps1", "-Only", "venv")
+    assert code == 1 and _steps(out) == {"venv": "failed"}, out
+    assert ".venv is Python 3.13" in out and "3.14" in out, out
+    assert env.snapshot() == before and env.stub_calls() == []
+    code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Yes", "-WhatIf")
+    assert code == 0 and "--python 3.14" in out, out
+    assert not re.search(r"'3\.13'|'-3\.13'", INSTALL.read_text(encoding="ascii"))  # uv·py 후보에 3.13 없음
 
 
 def test_venv_wrong_version_without_yes_is_left_alone(env):
@@ -551,7 +664,9 @@ def test_venv_wrong_version_without_yes_is_left_alone(env):
 
 def test_created_venv_is_recorded_and_removed_only_with_remove_venv(env):
     """uv 대역이 가짜 venv를 만든다. pip는 그 venv에 없으므로 설치는 실패하지만(네트워크 없음) 만든 사실은 기록된다."""
-    launcher, cfg = _real_venv_launcher()
+    launcher = _venv_launcher()
+    cfg = env.base / "template-pyvenv.cfg"
+    cfg.write_text(_pyvenv_cfg("3.14"), encoding="utf-8")
     wheels = env.base / "empty wheels"
     wheels.mkdir()
     code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Offline", "-WheelsDir", str(wheels),

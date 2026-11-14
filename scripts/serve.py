@@ -7,12 +7,15 @@
 - `{"id": n, "argv": [...]}` → kb.py와 같은 진입점(core.run_main + kb.main, KB_AGENT 검사 포함)으로
   프로세스 안에서 실행하고 `{"id": n, "code": <종료 코드>, "out": "<stdout·stderr를 쓴 순서대로, LF>"}`.
 - `{"id": n, "op": "ping"}` → `{"id": n, "ok": true}`. `{"op": "shutdown"}` → 종료 0(응답 없음).
-- 빠른 로컬 명령(SERVED)만 실행한다. 그 밖의 kb.py 명령(SERVED에 없는 하위 명령 포함)과 잘못된 요청은
+- 빠른 명령(SERVED: status·search·today·link·proposals list·act list)만 실행한다. today·link는 볼트 파일을
+  쓴다(kb_lock 안에서). 그 밖의 kb.py 명령(SERVED에 없는 하위 명령 포함)과 잘못된 요청은
   실행하지 않고 `{"id": n, "refused": true, "reason": "..."}`로 답한다. 클라이언트는 그 명령을 한 번
   실행(one-shot)으로 돌린다. 예외: kb.py가 명령 모듈을 가져오기 전에 끝내는 argv(빈 argv, 첫 인수가
   도움말, 알 수 없는 명령 이름)는 부작용이 없어 그대로 실행한다 (한 번 실행과 같은 종료 0·4와 출력).
   줄을 읽지 못한 요청(UTF-8·JSON 오류)의 거부는 id를 알 수 없어 `"id": null`이다.
 - 요청은 도착 순서대로 하나씩 처리한다. stdin EOF 또는 `--idle-sec`(기본 1800) 동안 요청이 없으면 종료 0.
+  가져온 scripts/ 모듈 파일이 바뀌었거나 요청이 kb 잠금을 남겼으면 응답을 보낸 뒤 종료 0
+  (클라이언트는 정상 종료로 보고 다음 요청 때 새로 띄운다).
 
 stdout에는 응답 말고는 아무것도 나가지 않는다: 시작할 때 파일 서술자 0·1을 복제해 프로토콜 전용으로 쓰고,
 0·1 자리는 NUL로 바꾼다(명령이나 하위 프로세스가 fd 1에 써도 프로토콜이 깨지지 않는다).
@@ -44,7 +47,7 @@ SERVED: dict[str, frozenset[str] | None] = {
     "today": None,
     "link": None,
     "proposals": frozenset({"list"}),
-    "act": frozenset({"list", "transitions"}),
+    "act": frozenset({"list"}),  # transitions는 Jira를 불러 느릴 수 있어 한 번 실행으로 (서버를 막지 않게)
 }
 _HELP_WORDS = ("-h", "--help", "help")
 
@@ -72,9 +75,9 @@ def refusal_reason(argv: list[str]) -> str | None:
     if name not in SERVED:
         return f"서버에서 실행하지 않는 명령입니다: {argv[0]}"
     subs = SERVED[name]
-    if subs is not None and (len(argv) < 2 or argv[1] not in subs):
-        sub = argv[1] if len(argv) > 1 else ""
-        return f"서버에서 실행하지 않는 하위 명령입니다: {argv[0]} {sub}".rstrip()
+    sub = kb.subcommand(argv[1:])  # `act --root V list`도 list (kb.main의 KB_AGENT 판정과 같은 규칙)
+    if subs is not None and sub not in subs:
+        return f"서버에서 실행하지 않는 하위 명령입니다: {argv[0]} {sub or ''}".rstrip()
     return None
 
 
@@ -132,6 +135,45 @@ def _reset_logging() -> None:
         if hasattr(logger, "_kb_log_dir"):
             with contextlib.suppress(AttributeError):
                 delattr(logger, "_kb_log_dir")
+
+
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+class CodeWatch:
+    """가져온 scripts/ 모듈 파일의 mtime을 기억해 코드가 바뀌었는지 본다(바뀌면 서버가 스스로 끝난다).
+
+    서버는 시작할 때 가져온 모듈을 계속 쓰므로, 저장소를 고친 뒤에도 옛 코드로 돌지 않게 한다. 요청 중에
+    처음 가져온 모듈은 그때 기록한다(가져온 시점의 파일이 쓰이고 있다).
+    """
+
+    def __init__(self, root: str = SCRIPTS_DIR) -> None:
+        self.root = os.path.normcase(root) + os.sep
+        self.mtimes: dict[str, int] = {}
+        self.update()
+
+    def _files(self) -> Iterator[str]:
+        for module in list(sys.modules.values()):
+            path = getattr(module, "__file__", None)
+            if isinstance(path, str) and os.path.normcase(os.path.abspath(path)).startswith(self.root):
+                yield os.path.abspath(path)
+
+    def update(self) -> None:
+        """새로 가져온 모듈 파일을 기록한다(이미 기록한 파일은 그대로)."""
+        for path in self._files():
+            if path not in self.mtimes:
+                with contextlib.suppress(OSError):
+                    self.mtimes[path] = os.stat(path).st_mtime_ns
+
+    def changed(self) -> str | None:
+        """기록한 뒤 바뀌거나 없어진 파일이 있으면 그 경로."""
+        for path, mtime in self.mtimes.items():
+            try:
+                if os.stat(path).st_mtime_ns != mtime:
+                    return path
+            except OSError:
+                return path
+        return None
 
 
 def locks_leaked() -> bool:
@@ -301,7 +343,7 @@ def preimport() -> None:
             sys.stderr.flush()
 
 
-def serve(channel: _Channel, idle_sec: float) -> int:
+def serve(channel: _Channel, idle_sec: float, watch: CodeWatch | None = None) -> int:
     channel.start()
     channel.send({"ready": True, "pid": os.getpid(), "version": PROTOCOL_VERSION})
     while True:
@@ -328,6 +370,13 @@ def serve(channel: _Channel, idle_sec: float) -> int:
             if sys.stderr is not None:
                 sys.stderr.write("kb.py serve: 요청이 kb 잠금을 풀지 않아 서버를 끝냅니다\n")
             return 0
+        if watch is not None:
+            changed = watch.changed()
+            if changed is not None:
+                if sys.stderr is not None:
+                    sys.stderr.write(f"kb.py serve: 코드가 바뀌어 서버를 끝냅니다 ({changed})\n")
+                return 0
+            watch.update()
 
 
 def main(argv: list[str]) -> int:
@@ -338,7 +387,7 @@ def main(argv: list[str]) -> int:
         raise core.ConfigError("--idle-sec은 0보다 커야 합니다")
     channel = _take_stdio()
     preimport()
-    return serve(channel, args.idle_sec)
+    return serve(channel, args.idle_sec, CodeWatch())
 
 
 if __name__ == "__main__":

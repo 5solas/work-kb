@@ -132,11 +132,22 @@ local function del_if_ours(mode, lhs)
   end
 end
 
----접두 키에 키를 붙인다 (보통 모드 n 전부, 비주얼 모드 x의 c·i). 전에 붙인 접두와 다르면 옛 키는
----아직 work-kb 것일 때만 뗀다. PREFIX가 false·nil·""이면 붙이지 않는다.
+---MODE의 LHS를 붙인 실제 키 (<leader>를 그때의 mapleader로 푼 것, 키 표기: ",kc", "<Space>kc", "<F8>c").
+---mapleader가 나중에 바뀌어도 이 값으로 뗄 수 있다.
+local function bound_lhs(mode, lhs)
+  local m = vim.fn.maparg(lhs, mode, false, true)
+  if type(m) == "table" and type(m.lhsraw) == "string" and m.lhsraw ~= "" then
+    return vim.fn.keytrans(m.lhsraw)
+  end
+  return lhs
+end
+
+---접두 키에 키를 붙인다 (보통 모드 n 전부, 비주얼 모드 x의 c·i). 전에 붙인 키는 아직 work-kb 것일
+---때만 먼저 뗀다 (붙일 때의 실제 키로: mapleader를 바꾼 뒤에도 옛 키가 남지 않는다).
+---PREFIX가 false·nil·""이면 붙이지 않는다.
 function M.rebind_prefix(prefix)
   local old = M._bound
-  if old and old.prefix ~= prefix then
+  if old then
     for _, lhs in ipairs(old.lhs) do
       del_if_ours("n", lhs)
     end
@@ -155,7 +166,7 @@ function M.rebind_prefix(prefix)
     vim.keymap.set("n", lhs, function()
       M.call(entry)
     end, { desc = DESC .. entry.name, silent = true })
-    table.insert(lhs_list, lhs)
+    table.insert(lhs_list, bound_lhs("n", lhs))
   end
   local xlhs_list = {}
   for _, entry in ipairs(M.visual_keys) do
@@ -163,7 +174,7 @@ function M.rebind_prefix(prefix)
     vim.keymap.set("x", lhs, function()
       M.call_visual(entry)
     end, { desc = DESC .. entry.name .. " (선택 글)", silent = true })
-    table.insert(xlhs_list, lhs)
+    table.insert(xlhs_list, bound_lhs("x", lhs))
   end
   M._bound = { prefix = prefix, lhs = lhs_list, xlhs = xlhs_list }
   return prefix
@@ -302,24 +313,13 @@ local function create_command()
 end
 
 ---경로 PATH가 볼트 아래인가 (Emacs work-kb--vault-file-p: 볼트를 설정했으면 볼트, 아니면 코드 루트).
----코드 루트는 config.root()로 정한다 (정션 아래 설치에서도 실제 저장소). 대소문자 무시 (Windows).
----실패하면 거짓.
+---config.vault_dir·in_dir로 정한다 (대소문자 무시, 정션·비ASCII 대소문자는 실제 경로로). 실패하면 거짓.
 local function in_vault(path)
   local config = require("work-kb.config")
-  local ok, dir = pcall(function()
-    local cfg = config.get()
-    if type(cfg.vault) == "string" and cfg.vault ~= "" then
-      return config.normalize(cfg.vault)
-    end
-    return config.root()
+  local ok, rel = pcall(function()
+    return config.in_dir(path, config.vault_dir())
   end)
-  if not ok or type(dir) ~= "string" then
-    return false
-  end
-  dir = dir:lower()
-  local file = vim.fs.normalize(path):lower()
-  local prefix = dir:sub(-1) == "/" and dir or (dir .. "/")
-  return file:sub(1, #prefix) == prefix
+  return ok and rel ~= nil
 end
 
 local function server_cfg()
@@ -419,7 +419,8 @@ function M.setup(opts)
   vim.schedule(function()
     pcall(apply_ftplugin_to_open_buffers)
   end)
-  -- 설정이 바뀌었으면 떠 있는 서버를 내린다 (다음 요청이 새 설정으로 다시 띄운다).
+  -- 서버를 껐으면 떠 있는 서버를 내린다. 켠 채 다른 설정만 바뀌면 여기서는 내리지 않는다:
+  -- 다음 요청이 열쇠 비교로 바뀐 것을 알고 새 설정으로 다시 띄운다.
   local server = package.loaded["work-kb.server"]
   if server and not (cfg.server and cfg.server.enable) then
     pcall(server.stop)

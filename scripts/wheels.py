@@ -1,9 +1,9 @@
 """kb.py wheels: 오프라인 설치용 wheels/ 묶음을 내려받는다 (지시서 §2·§9.2, D02).
 
 하는 일:
-- 대상 Python 버전마다(기본 3.13, 3.14) 이 venv의 pip로
-  `pip download --only-binary=:all: --platform win_amd64 --implementation cp --python-version X --abi cpX
-  -r requirements.txt -d <dir>`를 실행한다. 버전이 달라도 한 폴더에 받는다(순수 Python wheel은 함께 쓴다).
+- 지원 Python 3.14(D-NV1)를 대상으로 이 venv의 pip로
+  `pip download --only-binary=:all: --platform win_amd64 --implementation cp --python-version 3.14 --abi cp314
+  -r requirements.txt -d <dir>`를 실행한다.
 - Python 3.15용으로 PyYAML 원본(sdist)을 `<dir>/sdist/`에 받는다(`--no-binary pyyaml`). 3.15에는 PyYAML
   wheel이 없기 때문이다(D01·D02). 이 원본으로 집에서 cp315 wheel을 빌드할 수 있다(docs/PACKAGING.md).
 - 결과 파일 목록과 `<dir>/MANIFEST.txt`(대상별 wheel, sha256)를 남긴다. 대상마다 requirements.txt의
@@ -27,7 +27,8 @@ from lib import core
 CODE_ROOT = Path(__file__).resolve().parents[1]  # 저장소 폴더 (볼트 루트와 무관)
 REQUIREMENTS = CODE_ROOT / "requirements.txt"
 DEFAULT_DIR = "wheels"
-DEFAULT_TARGETS = ("3.13", "3.14")
+DEFAULT_TARGETS = ("3.14",)
+SUPPORTED_TARGETS = ("3.14",)  # 지원 Python은 3.14 하나(D-NV1)
 PLATFORM = "win_amd64"
 SDIST_PACKAGE = "pyyaml"
 SDIST_DIR = "sdist"
@@ -43,17 +44,16 @@ def normalize(name: str) -> str:
 
 
 def parse_targets(text: str) -> list[str]:
-    """`3.13,3.14` → ["3.13", "3.14"]. 3.13 미만이나 형식이 틀리면 ConfigError."""
+    """`3.14` → ["3.14"]. 지원 버전(3.14)이 아니거나 형식이 틀리면 ConfigError."""
     targets: list[str] = []
     for part in text.split(","):
         item = part.strip()
         if not item:
             continue
-        match = _TARGET.match(item)
-        if match is None:
-            raise core.ConfigError(f"--targets: '{item}'은(는) 3.13 같은 Python 버전이 아닙니다")
-        if int(match.group(1)) < 13:
-            raise core.ConfigError(f"--targets: {item}은(는) 지원하지 않습니다 (3.13 이상)")
+        if _TARGET.match(item) is None:
+            raise core.ConfigError(f"--targets: '{item}'은(는) 3.14 같은 Python 버전이 아닙니다")
+        if item not in SUPPORTED_TARGETS:
+            raise core.ConfigError(f"--targets: {item}은(는) 지원하지 않습니다 (Python 3.14만 지원)")
         if item not in targets:
             targets.append(item)
     if not targets:
@@ -219,13 +219,19 @@ def _run(command: list[str]) -> int:
     return subprocess.run(command, cwd=str(CODE_ROOT)).returncode
 
 
+def _has_pip() -> bool:
+    """이 인터프리터에 pip가 있는가 (시험에서 가짜로 바꾼다)."""
+    return importlib.util.find_spec("pip") is not None
+
+
 def main(argv: list[str]) -> int:
+    core.refuse_if_agent("wheels")  # kb.py도 막지만 직접 실행도 막는다(D57)
     parser = core._Parser(
         prog="kb.py wheels",
         description="오프라인 설치용 wheel 묶음을 내려받는다 (이 venv의 pip 사용, 네트워크 필요)",
         allow_abbrev=False,
     )
-    parser.add_argument("--targets", default=",".join(DEFAULT_TARGETS), help="대상 Python 버전, 쉼표로 구분 (기본: 3.13,3.14)")
+    parser.add_argument("--targets", default=",".join(DEFAULT_TARGETS), help="대상 Python 버전 (기본: 3.14, 지원하는 것은 3.14뿐)")
     parser.add_argument("--dir", default=DEFAULT_DIR, help="받을 폴더. 상대 경로는 저장소 폴더 기준 (기본: wheels)")
     parser.add_argument("--no-sdist", action="store_true", help="Python 3.15용 PyYAML 원본(sdist)을 받지 않는다")
     parser.add_argument("--dry-run", action="store_true", help="실행할 pip 명령만 보여 주고 아무것도 받지 않는다")
@@ -249,7 +255,7 @@ def main(argv: list[str]) -> int:
         print(f"(--dry-run: 내려받지 않았습니다. 대상 {', '.join(cp_tag(t) for t in targets)}, 폴더 {dest})")
         return 0
 
-    if importlib.util.find_spec("pip") is None:
+    if not _has_pip():
         raise core.ConfigError(f"{python}: pip가 없습니다. `{python} -m ensurepip` 후 다시 실행하세요")
     dest.mkdir(parents=True, exist_ok=True)
     failures: list[str] = []
@@ -263,7 +269,7 @@ def main(argv: list[str]) -> int:
             {w.version for w in (parse_wheel(p.name) for p in dest.glob("*.whl")) if w and w.name == SDIST_PACKAGE},
             key=lambda v: [(0, int(x), "") if x.isdigit() else (1, 0, x) for x in v.split(".")],
         )
-        spec = f"{SDIST_PACKAGE}=={versions[-1]}" if versions else SDIST_PACKAGE  # cp313·cp314 wheel과 같은 판
+        spec = f"{SDIST_PACKAGE}=={versions[-1]}" if versions else SDIST_PACKAGE  # cp314 wheel과 같은 판
         code = _run(sdist_command(python, spec, dest / SDIST_DIR))
         if code != 0:
             failures.append(f"{SDIST_PACKAGE} 원본(sdist) 내려받기 실패 (pip 종료 {code})")
@@ -279,3 +285,7 @@ def main(argv: list[str]) -> int:
     if failures:
         raise core.KbError("; ".join(failures))
     return 0
+
+
+if __name__ == "__main__":
+    core.run_main(main)

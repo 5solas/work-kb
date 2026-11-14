@@ -1,5 +1,5 @@
 -- j: Jira 작업 메뉴 (Emacs work-kb-jira transient, .el:1053-1437).
--- 쓰기는 모두 `kb.py act <하위 명령>`(outbox 경유)로 보낸다. 상태 전환·새 일감·승격은
+-- 쓰기는 모두 `kb.py act <하위 명령>`(outbox 경유)로 보낸다. 자유 글 값은 `--옵션=값` 한 인수로, 자유 글 위치 인수\n-- 앞에는 `--`를 넣는다 (`-`로 시작하는 글을 argparse가 옵션으로 읽지 않게). 상태 전환·새 일감·승격은
 -- 사용자가 고르고 확인한 뒤에만 `--yes`로 보낸다.
 --
 -- 메뉴: 일감 v c t a w, 만들기 n p, 조회·동기화 q S f d. 각 동작은 이 모듈의 함수이기도 하다
@@ -103,17 +103,18 @@ function M._thing(a, b)
   return nil, nil
 end
 
----설정의 볼트(없으면 코드 루트) 폴더. 검사하지 않는다 (Emacs `(or work-kb-vault work-kb-root)`).
+---설정의 볼트(없으면 코드 루트의 실제 경로) 폴더 (Emacs `(or work-kb-vault work-kb-root)`). config.vault_dir.
 local function configured_dir()
-  local cfg = config().get()
-  local dir = cfg.vault
-  if type(dir) ~= "string" or dir == "" then
-    dir = cfg.root
-  end
-  if type(dir) ~= "string" or dir == "" then
+  return config().vault_dir()
+end
+
+---FILE이 볼트 아래면 볼트 기준 상대 경로 (config.in_dir: 대소문자 무시, 정션·비ASCII 대소문자는 실제 경로로).
+local function vault_rel(file)
+  local dir = configured_dir()
+  if type(file) ~= "string" or file == "" or not dir then
     return nil
   end
-  return config().normalize(dir)
+  return config().in_dir(file, dir)
 end
 
 local function buffer_file(bufnr)
@@ -138,15 +139,11 @@ function M.key_at_point()
   if key then
     return key
   end
-  local file = buffer_file(0)
-  local dir = configured_dir()
-  if file and dir then
-    local prefix = (dir .. "/jira/"):lower()
-    if file:lower():sub(1, #prefix) == prefix then
-      local base = vim.fn.fnamemodify(file, ":t:r")
-      if is_key(base) then
-        return base
-      end
+  local rel = vault_rel(buffer_file(0))
+  if rel and rel:sub(1, 5):lower() == "jira/" then
+    local base = vim.fn.fnamemodify(rel, ":t:r")
+    if is_key(base) then
+      return base
     end
   end
   return nil
@@ -167,16 +164,14 @@ end
 
 ---------------------------------------------------------------- daily 줄 참조
 
----FILE이 볼트 daily/ 아래 .md면 "daily/<이름>.md", 아니면 nil (대소문자 무시).
+---FILE이 볼트 daily/ 아래 .md면 "daily/<이름>.md", 아니면 nil (대소문자 무시, 정션도 실제 경로로).
 function M.daily_relative(file)
-  local dir = configured_dir()
-  if type(file) ~= "string" or file == "" or not dir or not file:lower():match("%.md$") then
+  if type(file) ~= "string" or not file:lower():match("%.md$") then
     return nil
   end
-  local full = vim.fs.normalize(file)
-  local daily = dir .. "/daily/"
-  if full:lower():sub(1, #daily) == daily:lower() then
-    return "daily/" .. full:sub(#daily + 1)
+  local rel = vault_rel(file)
+  if rel and rel:sub(1, 6):lower() == "daily/" and #rel > 6 then
+    return "daily/" .. rel:sub(7)
   end
   return nil
 end
@@ -456,7 +451,7 @@ function M.view()
 end
 
 ---c: 댓글. 기본 본문은 현재 줄. daily에서 본문을 그대로 두면 `--from-line daily/…:N`,
----고쳤거나 daily가 아니면 `--body`.
+---고쳤거나 daily가 아니면 `--body=본문`.
 function M.comment()
   local key = M.jira_key()
   local line = current_line_text()
@@ -469,7 +464,7 @@ function M.comment()
   if daily and body == line then
     args = act_args("comment", key, "--from-line", M.daily_line_ref())
   else
-    args = act_args("comment", key, "--body", body)
+    args = act_args("comment", key, "--body=" .. body)
   end
   return act_run(key .. " 댓글", args)
 end
@@ -519,7 +514,7 @@ function M.assign()
   if user == "" then
     ui().fail("담당자가 비었습니다")
   end
-  return act_run(string.format("%s 담당 %s", key, user), act_args("assign", key, user))
+  return act_run(string.format("%s 담당 %s", key, user), act_args("assign", "--", key, user))
 end
 
 ---워크로그 시간 꼴: XhYm · Xh · Ym (jira_act.parse_duration과 같다; 빈 글은 아님).
@@ -541,8 +536,7 @@ function M.worklog()
   local comment = trim(ask(string.format("%s 워크로그 설명 (선택): ", key)))
   local args = act_args("worklog", key, spent)
   if comment ~= "" then
-    table.insert(args, "--comment")
-    table.insert(args, comment)
+    table.insert(args, "--comment=" .. comment)
   end
   return act_run(string.format("%s 워크로그 %s", key, spent), args)
 end
@@ -558,10 +552,9 @@ function M.create()
     ui().fail("유형이 비었습니다")
   end
   if ui().confirm(string.format("%s에 %s 일감 '%s'을(를) 만들까요? ", project, issue_type, summary)) then
-    local args = act_args("create", project, "--summary", summary, "--type", issue_type)
+    local args = act_args("create", project, "--summary=" .. summary, "--type=" .. issue_type)
     if description ~= "" then
-      table.insert(args, "--description")
-      table.insert(args, description)
+      table.insert(args, "--description=" .. description)
     end
     table.insert(args, "--yes")
     return act_run(project .. " 새 일감", args)
@@ -572,6 +565,7 @@ end
 
 ---p: 현재 daily 줄을 새 일감으로 승격 (`act promote --from daily/…:N PROJECT --yes`).
 ---성공하면 kb.py가 그 줄 끝에 ` [[NEW-1]]`을 붙이므로 낡은 daily 버퍼를 다시 읽는다.
+---줄 참조는 묻기 전에 정한다 (확인한 줄 = 보내는 줄). 그사이 버퍼를 고쳐 다시 읽지 못하면 알린다.
 function M.promote()
   if not M.daily_relative(buffer_file(0)) then
     ui().fail("승격은 daily 파일의 줄에서만 됩니다")
@@ -581,17 +575,23 @@ function M.promote()
   if line == "" then
     ui().fail("빈 줄은 승격할 수 없습니다")
   end
+  local ref = M.daily_line_ref()
   local project = M.read_project()
   if ui().confirm(string.format("이 줄을 %s 일감으로 만들까요? %s ", project, line)) then
-    return act_run(
-      project .. " 승격",
-      act_args("promote", "--from", M.daily_line_ref(), project, "--yes"),
-      function(code)
-        if code == 0 then
-          M.revert_if_stale(bufnr)
-        end
+    return act_run(project .. " 승격", act_args("promote", "--from", ref, project, "--yes"), function(code)
+      if code ~= 0 then
+        return
       end
-    )
+      M.revert_if_stale(bufnr)
+      if vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].modified then
+        ui().notify(
+          string.format(
+            "work-kb: %s: 버퍼가 수정돼 있어 다시 읽지 못했습니다. 저장하기 전에 디스크의 승격 링크를 확인하세요",
+            fileio().buffer_label(bufnr)
+          )
+        )
+      end
+    end)
   end
   ui().notify("work-kb: 승격을 취소했습니다")
   return nil
@@ -607,7 +607,7 @@ function M.query(jql)
     ui().fail("JQL이 비었습니다")
   end
   local p = proc()
-  return p.run(p.kb_args("sync", "--jql", jql), {
+  return p.run(p.kb_args("sync", "--jql=" .. jql), {
     buffer = M.JQL_BUFFER,
     on_exit = function(code)
       show_results(M.JQL_BUFFER, "라이브 JQL", code)
@@ -641,10 +641,11 @@ function M.flush()
   return act_run("outbox 다시 보내기", act_args("flush"))
 end
 
----d: 완료 전환 제안 (`kb.py today --check-done`). 제안만 보이고 아무것도 바꾸지 않는다.
+---d: 완료 전환 제안 (`kb.py today --check-done --date <오늘>`). 제안만 보이고 아무것도 바꾸지 않는다.
+---날짜는 Lua가 정한다 (daily.path·ensure_today와 같은 날: Python 설정 시간대와 달라도 같은 파일).
 function M.check_done()
   local p = proc()
-  return p.run(p.kb_args("today", "--check-done"), {
+  return p.run(p.kb_args("today", "--check-done", "--date", require("work-kb.time").day()), {
     buffer = M.CHECK_DONE_BUFFER,
     on_exit = function(code)
       show_results(M.CHECK_DONE_BUFFER, "완료 전환 제안", code)

@@ -423,8 +423,6 @@ describe("open", function()
       { "[[설계 원칙]]", 2, topic },
       { "[[2026-11-04]]", 2, daily },
       { "[[깊은 문서]]", 2, deep }, -- 정해진 폴더에 없으면 raw 등을 재귀로
-      { "[[jira/KB-12]]", 2, jira }, -- o에서는 링크 그대로 (sync 없음)
-      { "[[KB-12.md]]", 2, jira },
     }) do
       scratch(c[1], c[2])
       open().open_at_point()
@@ -457,6 +455,81 @@ describe("open", function()
     H.ok(same_file(open().resolve_link("그림.png"), vault .. "/raw/assets/그림.png"))
     H.ok(same_file(open().resolve_link("중첩"), vault .. "/raw/a/중첩.md"))
     H.eq(open().resolve_link("없음"), nil)
+  end)
+
+  case("resolves page names that contain a dot", function()
+    local vault = H.with_vault({ python = H.python() })
+    H.write_bytes(vault .. "/wiki/topics/Node.js.md", "# Node.js\n")
+    H.write_bytes(vault .. "/inbox/20261105-0912-v1.2 배포 회의.md", "x\n")
+    H.write_bytes(vault .. "/raw/docs/설계 v2.0.md", "깊은 곳\n")
+    H.write_bytes(vault .. "/raw/assets/보고서.pdf", "pdf")
+    H.write_bytes(vault .. "/raw/assets/그림.png", "png")
+    H.eq(open().resolve_link("Node.js"), vault .. "/wiki/topics/Node.js.md")
+    H.eq(open().resolve_link("Node.js.md"), vault .. "/wiki/topics/Node.js.md")
+    H.eq(open().resolve_link("20261105-0912-v1.2 배포 회의"), vault .. "/inbox/20261105-0912-v1.2 배포 회의.md")
+    H.ok(same_file(open().resolve_link("설계 v2.0") or "", vault .. "/raw/docs/설계 v2.0.md"), "재귀 검색도 .md를 붙여 본다")
+    -- 확장자가 있는 파일 이름은 그대로 (이미지·첨부)
+    H.ok(same_file(open().resolve_link("보고서.pdf") or "", vault .. "/raw/assets/보고서.pdf"))
+    H.ok(same_file(open().resolve_link("그림.png") or "", vault .. "/raw/assets/그림.png"))
+    H.eq(open().resolve_link("그림"), nil, "이미지 이름에 .md만 붙여 찾는다")
+    -- o로 연다
+    H.ui_stub()
+    scratch("참고 [[Node.js]]", 9)
+    open().open_at_point()
+    H.ok(same_file(buf_file(vim.api.nvim_get_current_buf()), vault .. "/wiki/topics/Node.js.md"))
+  end)
+
+  case("reads @names like notes.find_people", function()
+    -- notes._PERSON_CHARS = [0-9A-Za-z_À-ɏ가-힣ㄱ-ㆎ一-鿿぀-ヿ] (Python 3.14 결과를 표로 고정)
+    local cases = {
+      { "@Nguyễn 회의", "Nguy" },
+      { "@Иван 회의", nil },
+      { "@김철수µ x", "김철수" },
+      { "@김×철수", "김×철수" },
+      { "@김철수 x", "김철수" },
+      { "@田中さん。", "田中さん" },
+      { "@ㄱㄴㆎ", "ㄱㄴㆎ" },
+      { "@Ñoño!", "Ñoño" },
+      { "@aɐ", "a" },
+      { "@김_1-2", "김_1" },
+      { "a@김철수", nil },
+      { "(@김철수)", "김철수" },
+      { "@ãº", "ã" },
+      { "@ʼ김", nil },
+      -- R-agy-01: Python find_people은 줄을 NFC로 바꾼 뒤 찾는다 (NFD 조합형 자모 @김철수 → 김철수)
+      { "@\u{1100}\u{1175}\u{11B7}\u{110E}\u{1165}\u{11AF}\u{1109}\u{116E} x", "김철수" },
+      { "(@\u{1100}\u{1175}\u{11B7}\u{110E}\u{1165}\u{11AF}\u{1109}\u{116E})", "김철수" },
+      { "@\u{1100}x", nil }, -- 홀로 남는 자모는 NFC에서도 그대로라 이름 글자가 아니다
+    }
+    for _, c in ipairs(cases) do
+      local col = c[1]:find("@", 1, true) -- @ 바로 다음 글자 위 (0부터 센 바이트 열)
+      local t = open().thing_at_point(c[1], col)
+      local got = t and t.kind == "person" and t.value or nil
+      H.eq(got, c[2], c[1])
+    end
+  end)
+
+  case("syncs jira/KEY and KEY.md links", function()
+    local vault = H.with_vault({ python = H.python() })
+    for _, text in ipairs({ "[[jira/KB-12]]", "[[KB-12.md]]", "[[JIRA/KB-12.MD|별칭]]" }) do
+      local file = vault .. "/jira/KB-12.md"
+      H.write_bytes(file, page(JIRA_STUB, "KB-12"))
+      H.ui_stub()
+      H.patch(open(), "_syncing", {})
+      local fake = H.fake_spawn(function()
+        rewrite_on_disk(file, page(JIRA_FULL, "KB-12"))
+        return "", 0
+      end)
+      scratch(text, 3)
+      local handle = open().open_at_point()
+      H.eq(type(handle), "table", text .. ": 동기화 핸들")
+      H.eq(proc().wait(handle, 5000), 0)
+      H.eq(argvs(fake), { { "sync", "--root", vault, "--key", "KB-12" } }, text)
+      local buf = vim.api.nvim_get_current_buf()
+      H.ok(same_file(buf_file(buf), file), text .. " → " .. buf_file(buf))
+      H.contains(buf_text(buf), "status_category: indeterminate")
+      cleanup()
+    end
   end)
 end)
 

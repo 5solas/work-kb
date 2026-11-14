@@ -2,22 +2,12 @@
 -- 커서 위치 읽기는 실제 open.lua, 파일 열기(open_key·open_at_point)만 기록.
 local H = require("helpers")
 
-local KEY = "[A-Z][A-Z0-9_]+%-[0-9]+"
-
 local function jira()
   return require("work-kb.jira")
 end
 
 local function proc()
   return require("work-kb.proc")
-end
-
-local function trim(s)
-  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
-local function key_char(b)
-  return b ~= nil and string.char(b):match("[A-Za-z0-9_%-]") ~= nil
 end
 
 ---open 모듈의 부분 가짜: 커서 위치 읽기(thing_at_point·link_key·key_on_line …)는 실제 open.lua를 쓰고,
@@ -415,8 +405,8 @@ describe("jira", function()
     jira().comment()
     rec.settle()
     H.eq(rec.args(), {
-      act(vault, "comment", "KB-12", "--body", "고친 댓글 😀"),
-      act(vault, "comment", "OPS-3", "--body", "OPS-3 배포 완료"),
+      act(vault, "comment", "KB-12", "--body=고친 댓글 😀"),
+      act(vault, "comment", "OPS-3", "--body=OPS-3 배포 완료"),
     })
     fresh()
   end)
@@ -558,8 +548,8 @@ describe("jira", function()
     end, "담당자가 비었습니다")
     rec.settle()
     H.eq(rec.args(), {
-      act(vault, "assign", "KB-12", "kim.cs"),
-      act(vault, "worklog", "KB-12", "1h30m", "--comment", "배포 준비 😀"),
+      act(vault, "assign", "--", "KB-12", "kim.cs"),
+      act(vault, "worklog", "KB-12", "1h30m", "--comment=배포 준비 😀"),
       act(vault, "worklog", "KB-12", "45m"),
       act(vault, "worklog", "KB-12", "2h"),
     })
@@ -615,9 +605,9 @@ describe("jira", function()
     local status = { args = { "status", "--root", vault, "--json" }, buffer = "*work-kb-status-json*" }
     H.eq(rec.calls, {
       status,
-      { args = act(vault, "create", "OPS", "--summary", "새 대시보드", "--type", "Bug", "--yes"), buffer = "*work-kb-jira*" },
+      { args = act(vault, "create", "OPS", "--summary=새 대시보드", "--type=Bug", "--yes"), buffer = "*work-kb-jira*" },
       status,
-      { args = act(vault, "create", "KB", "--summary", "요약", "--type", "Task", "--description", "설명 한 줄", "--yes"), buffer = "*work-kb-jira*" },
+      { args = act(vault, "create", "KB", "--summary=요약", "--type=Task", "--description=설명 한 줄", "--yes"), buffer = "*work-kb-jira*" },
       status,
     })
     -- 빈 요약·빈 유형
@@ -652,7 +642,7 @@ describe("jira", function()
     H.ui_stub({ { "select", "web" }, { "input", "요약" }, { "select", "Task" }, { "input", "" }, { "confirm", true } })
     jira().create()
     rec.settle()
-    H.eq(rec.calls[#rec.calls].args, act(vault, "create", "WEB", "--summary", "요약", "--type", "Task", "--yes"))
+    H.eq(rec.calls[#rec.calls].args, act(vault, "create", "WEB", "--summary=요약", "--type=Task", "--yes"))
     -- status가 실패해도 직접 입력
     H.fake_spawn(function(call)
       if call.argv[1] == "status" then
@@ -729,6 +719,98 @@ describe("jira", function()
     fresh()
   end)
 
+  it("promotes the line that was confirmed", function()
+    -- 프로젝트를 고르는 사이 커서가 움직여도 확인한 줄(12)을 보낸다
+    fresh()
+    local vault = H.with_vault({ python = H.python() })
+    stub_open()
+    local rec = record_runs()
+    local buf
+    H.fake_spawn(function(call)
+      if call.argv[1] == "status" then
+        return STATUS_JSON, 0
+      end
+      -- 승격이 도는 사이 사람이 버퍼를 고쳤다: 끝난 뒤 다시 읽지 못한다
+      vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "- 10:00 사람이 쓰는 중" })
+      return "jira_act: KB-100 만듦\n", 0
+    end)
+    buf = visit_daily(vault, "경비")
+    local real_read_project = jira().read_project
+    H.patch(jira(), "read_project", function()
+      local project = real_read_project()
+      vim.api.nvim_win_set_cursor(0, { 11, 0 })
+      return project
+    end)
+    local stub = H.ui_stub({ { "select", "KB" }, { "confirm", true } })
+    jira().promote()
+    rec.settle()
+    H.eq(rec.args()[2], act(vault, "promote", "--from", "daily/2026-11-05.md:12", "KB", "--yes"))
+    H.eq(prompt_list(stub)[2], "이 줄을 KB 일감으로 만들까요? - [ ] 09:30 경비 정산 ")
+    H.eq(stub.messages, {
+      "work-kb: KB 승격 완료 — jira_act: KB-100 만듦",
+      "work-kb: 2026-11-05.md: 버퍼가 수정돼 있어 다시 읽지 못했습니다. 저장하기 전에 디스크의 승격 링크를 확인하세요",
+    })
+    H.ok(vim.bo[buf].modified, "사람의 수정은 그대로")
+    fresh()
+  end)
+
+  it("check-done passes the Lua date", function()
+    -- 날짜는 Lua(time.day, 로컬 시간)가 정한다: Python의 설정 시간대와 달라도 같은 daily를 본다
+    fresh()
+    local vault = H.with_vault({ python = H.python() })
+    local rec = record_runs()
+    H.fake_spawn({ code = 0, output = "제안 없음\n" })
+    H.ui_stub()
+    jira().check_done()
+    rec.settle()
+    H.eq(rec.args(), { { "today", "--root", vault, "--check-done", "--date", "2026-11-05" } })
+  end)
+
+  it("daily_relative with junction root and non-ASCII case", function()
+    fresh()
+    local vault = H.make_vault()
+    H.write_bytes(vault .. "/daily/2026-11-05.md", "## 기록\n")
+    local link = H.tmp() .. "/정션 볼트"
+    local ok_link, link_err = vim.uv.fs_symlink((vault:gsub("/", "\\")), (link:gsub("/", "\\")), { junction = true })
+    if not ok_link then
+      H.not_run("정션을 만들지 못함: " .. tostring(link_err))
+    end
+    local nonascii = H.tmp() .. "/Ärger Notizen"
+    vim.fn.mkdir(nonascii .. "/daily", "p")
+    H.write_bytes(nonascii .. "/daily/2026-11-05.md", "## 기록\n")
+    local ok, err = pcall(function()
+      local j = jira()
+      -- 볼트 설정은 정션, 파일은 실제 경로 (C-15: 코드 루트를 정션으로 불러온 경우와 같은 어긋남)
+      H.configure({ vault = link })
+      H.eq(j.daily_relative(vault .. "/daily/2026-11-05.md"), "daily/2026-11-05.md")
+      H.eq(j.daily_relative(vault .. "/daily/새 날.md"), "daily/새 날.md", "아직 없는 파일도 (부모 폴더의 실제 경로)")
+      -- 볼트 설정은 실제 경로, 파일은 정션
+      H.configure({ vault = vault })
+      H.eq(j.daily_relative(link .. "/daily/2026-11-05.md"), "daily/2026-11-05.md")
+      H.eq(j.daily_relative(link .. "/inbox/x.md"), nil, "daily 밖")
+      -- 비ASCII 글자의 대소문자만 다른 경로 (NTFS는 같은 파일)
+      H.configure({ vault = nonascii })
+      H.eq(j.daily_relative(H.tmp() .. "/ÄRGER NOTIZEN/daily/2026-11-05.md"), "daily/2026-11-05.md")
+      H.eq(j.daily_relative(H.tmp() .. "/ärger notizen/DAILY/2026-11-05.md"), "daily/2026-11-05.md")
+      -- 볼트 밖
+      H.eq(j.daily_relative(H.make_vault("밖") .. "/daily/2026-11-05.md"), nil)
+      -- 키 찾기와 capture의 볼트 상대 경로도 같은 판정
+      H.configure({ vault = vault })
+      H.write_bytes(vault .. "/jira/OPS-7.md", "# OPS-7\n")
+      vim.cmd("edit " .. vim.fn.fnameescape(link .. "/jira/OPS-7.md"))
+      H.eq(j.key_at_point(), "OPS-7")
+      vim.cmd("bwipeout!")
+      H.eq(
+        require("work-kb.capture").embed_entry(link .. "/raw/assets/2026-11-05-0912-a.png", "", H.TIME),
+        "- 09:12 ![[raw/assets/2026-11-05-0912-a.png]]"
+      )
+    end)
+    vim.uv.fs_rmdir(link) -- 정션만 지운다 (대상 안으로 들어가지 않는다)
+    H.ok(H.exists(vault .. "/daily/2026-11-05.md"), "정션 대상은 그대로")
+    fresh()
+    H.ok(ok, tostring(err))
+  end)
+
   it("jira-query-sync-flush-check-done: 인수·출력 버퍼, q·d는 읽기 전용 결과 버퍼(<CR> → 열기)", function()
     fresh()
     local vault = H.with_vault({ python = H.python() })
@@ -737,7 +819,7 @@ describe("jira", function()
     local rec = record_runs()
     H.fake_spawn(function(call)
       local a = call.argv
-      if a[1] == "sync" and vim.tbl_contains(a, "--jql") then
+      if a[1] == "sync" and a[#a]:match("^%-%-jql=") then
         return "KB-12 캐시 동기화\n", 0
       elseif a[1] == "today" then
         return "KB-12 제안\n", 0
@@ -756,10 +838,10 @@ describe("jira", function()
     end, "JQL이 비었습니다")
     H.eq(prompt_list(stub), { "JQL: " })
     H.eq(rec.calls, {
-      { args = { "sync", "--root", vault, "--jql", jql }, buffer = "*work-kb-jql*" },
+      { args = { "sync", "--root", vault, "--jql=" .. jql }, buffer = "*work-kb-jql*" },
       { args = { "sync", "--root", vault }, buffer = "*work-kb-sync*" },
       { args = act(vault, "flush"), buffer = "*work-kb-jira*" },
-      { args = { "today", "--root", vault, "--check-done" }, buffer = "*work-kb-check-done*" },
+      { args = { "today", "--root", vault, "--check-done", "--date", "2026-11-05" }, buffer = "*work-kb-check-done*" },
     })
     H.eq(stub.messages, {
       "work-kb: 동기화 중…",
@@ -800,6 +882,61 @@ describe("jira", function()
       "work-kb: 완료 전환 제안 실패 (종료 3: 네트워크)",
     })
     H.ok(vim.tbl_contains(stub.shown, proc().get_buffer("*work-kb-sync*")))
+  end)
+
+  it("passes every free-text option value with =", function()
+    -- `-`로 시작하는 글도 argparse가 값으로 읽게: 자유 글 옵션은 `--옵션=값` 한 인수, 위치 인수 앞에는 `--`
+    fresh()
+    local vault = H.with_vault({ python = H.python() })
+    stub_open()
+    local rec = record_runs()
+    H.fake_spawn(function(call)
+      if call.argv[1] == "status" then
+        return STATUS_JSON, 0
+      end
+      return "", 0
+    end)
+    scratch("KB-12 작업", "작업")
+    H.ui_stub({
+      { "input", "-h 댓글" },
+      { "input", "-hong" },
+      { "input", "1h" },
+      { "input", "--리뷰" },
+      { "select", "KB" },
+      { "input", "-긴급 요약" },
+      { "select", "-Task" },
+      { "input", "->설명" },
+      { "confirm", true },
+      { "input", "-project = KB" },
+    })
+    local j = jira()
+    j.comment()
+    j.assign()
+    j.worklog()
+    j.create()
+    j.query()
+    rec.settle()
+    H.eq(rec.args(), {
+      act(vault, "comment", "KB-12", "--body=-h 댓글"),
+      act(vault, "assign", "--", "KB-12", "-hong"),
+      act(vault, "worklog", "KB-12", "1h", "--comment=--리뷰"),
+      { "status", "--root", vault, "--json" },
+      act(vault, "create", "KB", "--summary=-긴급 요약", "--type=-Task", "--description=->설명", "--yes"),
+      { "sync", "--root", vault, "--jql=-project = KB" },
+    })
+    -- 옵션 뒤에 자유 글이 따로 오는 인수가 없다
+    for _, args in ipairs(rec.args()) do
+      for i, a in ipairs(args) do
+        if a:match("^%-%-[a-z]") and not a:find("=", 1, true) then
+          local nxt = args[i + 1]
+          H.ok(
+            a == "--root" or a == "--yes" or a == "--json" or a == "--from-line" or a == "--from" or nxt == nil,
+            "값이 따로 오는 옵션: " .. a .. " " .. tostring(nxt)
+          )
+        end
+      end
+    end
+    fresh()
   end)
 
   it("jira-act-exit-messages: 0 완료, 3 outbox에 남김, 2 인증, 그 밖은 이유와 버퍼", function()

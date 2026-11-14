@@ -3,15 +3,18 @@
 --   준비: {"ready": true, "pid": <int>, "version": 1}
 --   요청: {"id": n, "argv": [...]} → {"id": n, "code": c, "out": "..."} 또는 {"id": n, "refused": true, ...}
 --   종료: {"op": "shutdown"}
--- 요청은 하나씩 차례로 보낸다 (앞 요청의 답이 와야 다음을 보낸다). 거부·시간 초과·서버 죽음은
--- 콜백에 nil로 알리고, proc가 한 번 실행으로 돌린다. 다시 띄우기는 1분에 한 번까지.
+-- 요청은 하나씩 차례로 보낸다 (앞 요청의 답이 와야 다음을 보낸다). 거부·서버 죽음은 콜백에 nil로
+-- 알리고, proc가 한 번 실행으로 돌린다. 다시 띄우기는 1분에 한 번까지.
+-- 요청 시간 초과(kb_lock 대기 60초 + 여유)는 서버를 죽이고 그 요청에 CB(nil, nil, "timeout")로 알린다:
+-- proc는 읽기 명령만 한 번 실행으로 다시 돌리고 쓰기 명령(today·link)은 실패로 끝낸다. 이때는 1분 제한 없이
+-- 다음 요청이 다시 띄운다.
 -- setup()은 이 모듈을 불러오지 않는다: VimEnter 뒤 vim.defer_fn에서, 또는 첫 요청 때 띄운다.
 
 local M = {}
 
 local PROTOCOL_VERSION = 1
 
-M.request_timeout_ms = 30000
+M.request_timeout_ms = 90000
 M.ready_timeout_ms = 15000
 M.restart_interval_ms = 60000
 
@@ -34,7 +37,7 @@ local S = {
   queue = {},
   inflight = nil,
   next_id = 0,
-  linebuf = "",
+  linebuf = {}, -- 아직 줄이 끝나지 않은 stdout 조각들
   stderr_tail = {},
   last_error = nil,
   ready_timer = nil,
@@ -100,8 +103,8 @@ local function stop_timer(t)
   end
 end
 
-local function call(cb, code, out)
-  local ok, err = pcall(cb, code, out)
+local function call(cb, code, out, reason)
+  local ok, err = pcall(cb, code, out, reason)
   if not ok then
     vim.notify("work-kb: 서버 응답 처리 오류: " .. tostring(err), vim.log.levels.WARN)
   end
@@ -189,19 +192,26 @@ local function on_line(line)
   end
 end
 
+---출력 조각을 줄로 나눈다. 줄이 끝나지 않은 조각은 표에 모으고 새 조각에서만 "\n"을 찾는다
+---(큰 응답 한 줄이 여러 조각으로 와도 이어 붙이기·찾기가 한 번씩만).
 local function on_stdout(data)
-  S.linebuf = S.linebuf .. data
+  local pos = 1
   while true do
-    local nl = S.linebuf:find("\n", 1, true)
+    local nl = data:find("\n", pos, true)
     if not nl then
-      break
+      if pos <= #data then
+        table.insert(S.linebuf, data:sub(pos))
+      end
+      return
     end
-    local line = S.linebuf:sub(1, nl - 1)
-    S.linebuf = S.linebuf:sub(nl + 1)
+    table.insert(S.linebuf, data:sub(pos, nl - 1))
+    local line = table.concat(S.linebuf)
+    S.linebuf = {}
+    pos = nl + 1
     on_line(line)
     if S.state ~= "starting" and S.state ~= "ready" then
-      S.linebuf = ""
-      break
+      S.linebuf = {}
+      return
     end
   end
 end
@@ -235,8 +245,16 @@ pump = function()
   item.timer:start(M.request_timeout_ms, 0, function()
     vim.schedule(function()
       if S.inflight == item then
-        -- 서버가 멈췄다: 죽이고 이 요청은 한 번 실행으로 돌린다.
+        -- 서버가 멈췄다 (보통 kb_lock을 오래 기다림): 죽인다. 큐에 남은(보내지 않은) 요청은 nil로
+        -- 한 번 실행에 넘기고, 이 요청은 "timeout"으로 알린다 (쓰기 명령은 이미 썼을 수 있다).
+        -- 서버 탓이 아니므로 다음 요청이 1분 제한 없이 다시 띄운다.
+        stop_timer(item.timer)
+        S.inflight = nil
         kill_server("요청 시간 초과")
+        S.last_start = nil
+        if not item.cancelled then
+          call(item.cb, nil, nil, "timeout")
+        end
       end
     end)
   end)
@@ -291,7 +309,7 @@ function M.start(opts)
     local key = M.key(root, python)
     local cmd = vim.list_extend(vim.list_extend({}, python), M._script_args(key.idle_sec))
     S.key = key
-    S.linebuf = ""
+    S.linebuf = {}
     S.stderr_tail = {}
     S.last_error = nil
     S.state = "starting"
@@ -317,11 +335,13 @@ function M.start(opts)
         if S.handle == handle then
           S.handle = nil
           S.last_exit = code
-          if code == 0 and S.state == "ready" and not S.inflight and #S.queue == 0 then
-            -- 정상 종료 (--idle-sec 동안 요청 없음, 또는 잠금을 남긴 요청 뒤 스스로 끝남):
-            -- 오류가 아니다. 다음 요청이 1분 제한 없이 다시 띄운다.
+          if code == 0 and S.state == "ready" then
+            -- 정상 종료 (--idle-sec 동안 요청 없음, 잠금을 남긴 요청 뒤, 코드가 바뀐 뒤 스스로 끝남):
+            -- 오류가 아니다. 끝나는 찰나에 보낸·기다리던 요청은 한 번 실행으로 돌리고,
+            -- 다음 요청이 1분 제한 없이 다시 띄운다.
             S.state = "stopped"
             S.last_start = nil
+            fail_pending()
           elseif S.state ~= "stopped" then
             kill_server(S.last_error or string.format("서버가 끝났습니다 (종료 %s)", tostring(code)))
           end
@@ -378,7 +398,7 @@ function M.ensure(key)
   end
 end
 
----ARGV를 서버로 보낸다. 답이 오면 CB(code, out), 거부·실패면 CB(nil).
+---ARGV를 서버로 보낸다. 답이 오면 CB(code, out), 거부·실패면 CB(nil), 요청 시간 초과면 CB(nil, nil, "timeout").
 ---준비되지 않았으면 바로 CB(nil)하고 nil. 아니면 M.cancel에 넘길 요청 표.
 function M.request(argv, cb)
   if S.state ~= "ready" or not S.handle then

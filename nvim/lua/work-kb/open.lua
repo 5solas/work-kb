@@ -95,20 +95,30 @@ local function char_at(line, i)
   return cp, len
 end
 
----Emacs [[:alnum:]_]: ASCII 영문·숫자·`_`, Latin-1의 글자, 그 위는 Neovim 글자 부류가
----공백(0)·문장 부호(1)·이모지(3)가 아닌 것 (한글 음절·자모, 한자, 가나, 라틴 확장 …).
-local function name_char(cp, s)
+---`@이름`의 글자: Python notes._PERSON_CHARS `[0-9A-Za-z_À-ɏ가-힣ㄱ-ㆎ一-鿿぀-ヿ]`와 같은 코드 포인트 범위
+---(link가 만드는 people 페이지 이름과 맞춘다).
+local PERSON_RANGES = {
+  { 0x30, 0x39 }, -- 0-9
+  { 0x41, 0x5A }, -- A-Z
+  { 0x5F, 0x5F }, -- _
+  { 0x61, 0x7A }, -- a-z
+  { 0xC0, 0x24F }, -- À-ɏ
+  { 0x3040, 0x30FF }, -- 히라가나·가타카나
+  { 0x3131, 0x318E }, -- 한글 호환 자모
+  { 0x4E00, 0x9FFF }, -- 한자
+  { 0xAC00, 0xD7A3 }, -- 한글 음절
+}
+
+local function name_char(cp)
   if cp == nil then
     return false
   end
-  if cp < 0x80 then
-    return (cp >= 48 and cp <= 57) or (cp >= 65 and cp <= 90) or (cp >= 97 and cp <= 122) or cp == 95
+  for _, r in ipairs(PERSON_RANGES) do
+    if cp >= r[1] and cp <= r[2] then
+      return true
+    end
   end
-  if cp < 0x100 then
-    return cp == 0xAA or cp == 0xB5 or cp == 0xBA or (cp >= 0xC0 and cp <= 0xFF and cp ~= 0xD7 and cp ~= 0xF7)
-  end
-  local class = vim.fn.charclass(s)
-  return class ~= 0 and class ~= 1 and class ~= 3
+  return false
 end
 
 local function link_at(line, col)
@@ -160,6 +170,26 @@ local function key_at(line, col)
   end
 end
 
+---`@` 뒤에서 훑는 글자: 이름 글자와 한글 조합형 자모(U+1100..U+11FF, NFD로 쓴 이름).
+local function scan_char(cp)
+  return name_char(cp) or (cp ~= nil and cp >= 0x1100 and cp <= 0x11FF)
+end
+
+---훑은 글을 Python notes.find_people처럼 NFC로 바꾼 뒤 앞쪽의 이름 글자만 남긴다
+---(줄 전체를 NFC로 바꾸고 찾는 것과 같다. 홀로 남는 자모는 이름 글자가 아니다).
+local function person_name(raw)
+  local s = require("work-kb.names").nfc(raw)
+  local j = 1
+  while true do
+    local cp, len = char_at(s, j)
+    if len == 0 or not name_char(cp) then
+      break
+    end
+    j = j + len
+  end
+  return s:sub(1, j - 1)
+end
+
 local function person_at(line, col)
   local init = 1
   while true do
@@ -170,14 +200,17 @@ local function person_at(line, col)
     local j = i + 1
     while true do
       local cp, len = char_at(line, j)
-      if len == 0 or not name_char(cp, line:sub(j, j + len - 1)) then
+      if len == 0 or not scan_char(cp) then
         break
       end
       j = j + len
     end
     if j > i + 1 then
       if i - 1 <= col and col <= j - 1 and not mail_char(i > 1 and line:byte(i - 1) or nil) then
-        return line:sub(i + 1, j - 1)
+        local name = person_name(line:sub(i + 1, j - 1))
+        if name ~= "" then
+          return name
+        end
       end
       init = j
     else
@@ -352,20 +385,36 @@ function M.visit(file)
   return vim.api.nvim_get_current_buf()
 end
 
+---위키링크 대상의 파일 이름 후보. `.md`로 끝나거나 이미지 확장자면 그대로 하나, 아니면 그대로와
+---`.md`를 붙인 것 (lint와 같은 순서). 점이 있는 페이지 이름(`[[Node.js]]`, `[[v1.2 회의]]`)도 찾는다.
+local function link_candidates(target)
+  local lower = ascii_lower(target)
+  if lower:sub(-3) == ".md" then
+    return { target }
+  end
+  local ext = lower:match("[^/\\]%.([^%./\\]+)$")
+  if ext and vim.tbl_contains(require("work-kb.capture").IMAGE_EXTENSIONS, ext) then
+    return { target }
+  end
+  return { target, target .. ".md" }
+end
+
 ---위키링크 대상의 파일 경로 (work-kb--resolve-link). 못 찾으면 nil.
 function M.resolve_link(target)
   local vault = config().vault()
-  local base_of_target = target:match("[^/\\]*$") or target
-  local dot = base_of_target:match("^.*()%.")
-  local has_ext = dot ~= nil and dot > 1
-  local name = has_ext and target or (target .. ".md")
+  local names = link_candidates(target)
   for _, dir in ipairs({ "", "daily/", "wiki/", "wiki/projects/", "wiki/people/", "wiki/topics/", "jira/", "inbox/" }) do
-    local path = vault .. "/" .. dir .. name
-    if is_regular(path) then
-      return path
+    for _, name in ipairs(names) do
+      local path = vault .. "/" .. dir .. name
+      if is_regular(path) then
+        return path
+      end
     end
   end
-  local base = ascii_lower(name:match("[^/\\]*$") or name)
+  local bases = {}
+  for i, name in ipairs(names) do
+    bases[i] = ascii_lower(name:match("[^/\\]*$") or name)
+  end
   -- directory-files-recursively: 하위 폴더의 결과가 먼저, 그다음 이 폴더의 파일 (이름순).
   local function search(dir)
     local handle = uv.fs_scandir(dir)
@@ -400,9 +449,11 @@ function M.resolve_link(target)
         end
       end
     end
-    for _, e in ipairs(entries) do
-      if e.kind ~= "directory" and e.kind ~= "linkdir" and ascii_lower(e.name) == base then
-        return dir .. "/" .. e.name
+    for _, base in ipairs(bases) do
+      for _, e in ipairs(entries) do
+        if e.kind ~= "directory" and e.kind ~= "linkdir" and ascii_lower(e.name) == base then
+          return dir .. "/" .. e.name
+        end
       end
     end
     return nil
@@ -517,6 +568,9 @@ function M.open_at_point()
   end
   if thing.kind == "key" then
     return M.open_key(thing.value)
+  elseif thing.kind == "link" and M.link_key(thing.value) then
+    -- [[jira/KB-12]]·[[KB-12.md]]도 키처럼 (없거나 stub이면 동기화한 뒤 연다)
+    return M.open_key(M.link_key(thing.value))
   elseif thing.kind == "person" then
     local file = config().vault() .. "/wiki/people/" .. require("work-kb.names").safe_name(thing.value) .. ".md"
     if not exists(file) then

@@ -12,7 +12,8 @@
   Steps (select with -Only, comma separated):
     env    the user environment variable WORK_KB_ROOT: if it still has the value install.ps1
            set, the previous value is restored (or the variable removed if there was none).
-           If someone changed it since, it is left alone.
+           If someone changed it since, it is left alone. If another clone's install.ps1 set it
+           (the manifest is shared), it is left alone and the record is kept for that clone.
     venv   only with -RemoveVenv: delete this repository's .venv if install.ps1 created it.
            Without -RemoveVenv the venv is kept.
   When nothing is left in the manifest it is deleted (and the work-kb folder, if empty).
@@ -45,6 +46,7 @@ try { [Console]::OutputEncoding = $script:Utf8NoBom } catch { }
 $AllSteps = @('env', 'venv')
 $EnvName = 'WORK_KB_ROOT'
 $Msg = @{
+    OtherClone = 'WORK_KB_ROOT\uB294 \uB2E4\uB978 \uD074\uB860({0})\uC774 \uC124\uC815\uD55C \uAC12\uC774\uB77C \uADF8\uB300\uB85C \uB461\uB2C8\uB2E4. \uADF8 \uD074\uB860\uC758 uninstall.ps1\uC774 \uB418\uB3CC\uB9BD\uB2C8\uB2E4.'
     Done = '\uD658\uACBD \uBCC0\uC218\uB97C \uBC14\uAFE8\uB2E4\uBA74 \uC0C8 \uD130\uBBF8\uB110\uC744 \uC5F4\uACE0 nvd --restart \uB85C \uB370\uBAAC\uC744 \uB2E4\uC2DC \uC2DC\uC791\uD558\uC138\uC694 (nvim-config\uB294 WORK_KB_ROOT\uAC00 \uC5C6\uC73C\uBA74 work-kb\uB97C \uBD88\uB7EC\uC624\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4).'
 }
 
@@ -138,7 +140,9 @@ function Read-Manifest {
         if ($obj.PSObject.Properties['env'] -and $obj.env) {
             foreach ($p in $obj.env.PSObject.Properties) {
                 $e = $p.Value
-                $m.env[$p.Name] = @{ value = [string]$e.value; hadPrevious = [bool]$e.hadPrevious; previous = $e.previous }
+                $repo = $null
+                if ($e.PSObject.Properties['repo'] -and $e.repo) { $repo = [string]$e.repo }
+                $m.env[$p.Name] = @{ value = [string]$e.value; hadPrevious = [bool]$e.hadPrevious; previous = $e.previous; repo = $repo }
             }
         }
         if ($obj.PSObject.Properties['venvs'] -and $obj.venvs) { $m.venvs = @($obj.venvs | ForEach-Object { [string]$_ }) }
@@ -165,6 +169,15 @@ function Step-env {
     $entry = $m.env[$EnvName]
     $cur = Get-UserEnv $EnvName
     $store = Get-EnvStoreLabel
+    # The manifest is shared by every clone (it lives in LOCALAPPDATA). Only the clone that set the value undoes it;
+    # the record stays for that clone's uninstall.ps1. (Old manifests have no repo: install.ps1 always set value = repo.)
+    $owner = [string]$entry.value
+    if ($entry.repo) { $owner = [string]$entry.repo }
+    if (-not (Test-SamePath $owner $RepoRoot)) {
+        Out-Line ('  ' + ([regex]::Unescape($Msg.OtherClone) -f $owner))
+        Report 'env' 'skipped' ($EnvName + ' was set by another clone (' + $owner + '); left alone')
+        return
+    }
     # same path = still ours (install.ps1 compares paths the same way: case and a trailing backslash do not matter)
     if (-not ($cur -and (Test-SamePath $cur ([string]$entry.value)))) {
         $shown = '(not set)'
