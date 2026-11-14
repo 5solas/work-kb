@@ -24,30 +24,15 @@ if not config then
   return
 end
 
-local function vault_dir()
-  local ok, dir = pcall(function()
-    local cfg = config.get()
-    if type(cfg.vault) == "string" and cfg.vault ~= "" then
-      return config.normalize(cfg.vault)
-    end
-    return config.root()
-  end)
-  if ok and type(dir) == "string" and dir ~= "" then
-    return dir
-  end
-  return nil
-end
-
+-- 볼트 판정은 config.vault_dir·in_dir (대소문자 무시, 정션·비ASCII 대소문자는 실제 경로로).
 local name = api.nvim_buf_get_name(buf)
-local dir = name ~= "" and vault_dir() or nil
-if not dir then
+if name == "" then
   return
 end
-local prefix = vim.fs.normalize(dir):lower()
-if prefix:sub(-1) ~= "/" then
-  prefix = prefix .. "/"
-end
-if vim.fs.normalize(name):lower():sub(1, #prefix) ~= prefix then
+local ok_in, rel = pcall(function()
+  return config.in_dir(name, config.vault_dir())
+end)
+if not ok_in or rel == nil then
   return
 end
 

@@ -203,4 +203,74 @@ function M.vault()
   return M.normalize(vault)
 end
 
+---볼트 판정에 쓰는 폴더: 설정의 vault(폴더 검사 없음), 없으면 root()(설정하지 않았으면 실제 경로).
+---정하지 못하면 nil (오류를 내지 않는다).
+---@return string|nil
+function M.vault_dir()
+  local ok, dir = pcall(function()
+    local vault = M.get().vault
+    if type(vault) == "string" and vault ~= "" then
+      return M.normalize(vault)
+    end
+    return M.root()
+  end)
+  if ok and type(dir) == "string" and dir ~= "" then
+    return dir
+  end
+  return nil
+end
+
+---PATH의 실제 경로 (정션·심볼릭 링크를 풀고 디스크의 대소문자로, 슬래시). 아직 없는 파일은 가장 가까운
+---있는 부모의 실제 경로 뒤에 나머지를 붙인다. 못 정하면 nil.
+local function real_path(path)
+  local tail = {}
+  local cur = path
+  for _ = 1, 64 do
+    local real = vim.uv.fs_realpath(cur)
+    if real then
+      local out = vim.fs.normalize(real)
+      for i = #tail, 1, -1 do
+        out = out .. "/" .. tail[i]
+      end
+      return out
+    end
+    local parent = vim.fs.dirname(cur)
+    if not parent or parent == cur then
+      return nil
+    end
+    table.insert(tail, vim.fs.basename(cur))
+    cur = parent
+  end
+  return nil
+end
+
+---PATH가 DIR 아래(DIR 자신 제외)면 DIR 기준 상대 경로(슬래시), 아니면 nil.
+---정규화한 경로를 대소문자 없이(ASCII) 견주고, 맞지 않으면 양쪽 실제 경로로 다시 견준다
+---(정션·심볼릭 링크를 거친 경로, 비ASCII 글자의 대소문자만 다른 경로: NTFS는 같은 파일).
+---@param path string
+---@param dir string
+---@return string|nil
+function M.in_dir(path, dir)
+  if type(path) ~= "string" or path == "" or type(dir) ~= "string" or dir == "" then
+    return nil
+  end
+  local function under(p, d)
+    d = d:gsub("/+$", "")
+    local prefix = d:lower() .. "/"
+    if #p > #prefix and p:lower():sub(1, #prefix) == prefix then
+      return p:sub(#prefix + 1)
+    end
+    return nil
+  end
+  local rel = under(vim.fs.normalize(M.normalize(path)), vim.fs.normalize(M.normalize(dir)))
+  if rel then
+    return rel
+  end
+  local real_file, real_dir = real_path(M.normalize(path)), real_path(M.normalize(dir))
+  if real_file and real_dir then
+    return under(real_file, real_dir)
+  end
+  return nil
+end
+
 return M

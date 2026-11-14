@@ -302,24 +302,13 @@ local function create_command()
 end
 
 ---경로 PATH가 볼트 아래인가 (Emacs work-kb--vault-file-p: 볼트를 설정했으면 볼트, 아니면 코드 루트).
----코드 루트는 config.root()로 정한다 (정션 아래 설치에서도 실제 저장소). 대소문자 무시 (Windows).
----실패하면 거짓.
+---config.vault_dir·in_dir로 정한다 (대소문자 무시, 정션·비ASCII 대소문자는 실제 경로로). 실패하면 거짓.
 local function in_vault(path)
   local config = require("work-kb.config")
-  local ok, dir = pcall(function()
-    local cfg = config.get()
-    if type(cfg.vault) == "string" and cfg.vault ~= "" then
-      return config.normalize(cfg.vault)
-    end
-    return config.root()
+  local ok, rel = pcall(function()
+    return config.in_dir(path, config.vault_dir())
   end)
-  if not ok or type(dir) ~= "string" then
-    return false
-  end
-  dir = dir:lower()
-  local file = vim.fs.normalize(path):lower()
-  local prefix = dir:sub(-1) == "/" and dir or (dir .. "/")
-  return file:sub(1, #prefix) == prefix
+  return ok and rel ~= nil
 end
 
 local function server_cfg()

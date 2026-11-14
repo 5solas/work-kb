@@ -21,7 +21,56 @@ local function setup(vault)
   require("work-kb").setup({ root = H.repo, vault = vault, prefix = false, server = { enable = false } })
 end
 
+local junction_n = 0
+
+---H.tmp() 아래에 TARGET을 가리키는 정션을 만든다 (Windows). 경로 (슬래시).
+local function make_junction(target)
+  junction_n = junction_n + 1
+  local link = string.format("%s/정션 %d", H.tmp(), junction_n)
+  local ok, err = vim.uv.fs_symlink((target:gsub("/", "\\")), (link:gsub("/", "\\")), { junction = true })
+  if not ok then
+    H.not_run("정션을 만들지 못함: " .. tostring(err))
+  end
+  return link
+end
+
+---정션만 지운다 (대상 폴더 안으로 들어가지 않는다: RemoveDirectory는 재분석 지점 자체를 지운다).
+local function remove_junction(link)
+  vim.uv.fs_rmdir(link)
+end
+
 describe("ftplugin", function()
+  it("applies through a junction", function()
+    local vault = H.make_vault()
+    local link = make_junction(vault)
+    local upper_base = H.tmp() .. "/Jörg Notes"
+    vim.fn.mkdir(upper_base .. "/daily", "p")
+    local ok, err = pcall(function()
+      H.write_bytes(vault .. "/daily/2026-11-05.md", "## 기록\n")
+      H.write_bytes(upper_base .. "/daily/2026-11-05.md", "## 기록\n")
+      local function check(file, label)
+        vim.cmd.edit(vim.fn.fnameescape(file))
+        H.eq(vim.b.work_kb_vault, true, label .. ": 볼트 ftplugin")
+        H.eq(vim.bo.shiftwidth, 2, label)
+        H.eq(vim.api.nvim_get_option_value("autoread", { scope = "local" }), true, label .. ": BufReadPost autoread")
+        vim.cmd("bwipeout!")
+      end
+      -- 설정은 실제 폴더, 연 경로는 정션
+      setup(vault)
+      check(link .. "/daily/2026-11-05.md", "정션 경로로 연 파일")
+      -- 설정은 정션, 연 경로는 실제 폴더
+      setup(link)
+      check(vault .. "/daily/2026-11-05.md", "볼트 설정이 정션")
+      -- 비ASCII 글자의 대소문자만 다른 경로 (NTFS는 같은 파일)
+      setup(upper_base)
+      check(H.tmp() .. "/JÖRG NOTES/daily/2026-11-05.md", "비ASCII 대소문자")
+    end)
+    cleanup()
+    remove_junction(link)
+    H.ok(H.exists(vault .. "/daily/2026-11-05.md"), "정션 대상은 그대로")
+    H.ok(ok, tostring(err))
+  end)
+
   it("볼트 안 .md만 2칸 들여쓰기·자동 줄바꿈 없음, 파일 형식을 바꾸면 되돌린다", function()
     local vault = H.make_vault()
     local ok, err = pcall(function()
