@@ -214,7 +214,7 @@ def key_pattern(project_keys: list[str] | tuple[str, ...]) -> re.Pattern[str] | 
     if not keys:
         return None
     alternation = "|".join(re.escape(k) for k in sorted(keys, key=len, reverse=True))
-    return re.compile(rf"(?<![A-Za-z0-9_\-])(?:{alternation})-\d+(?![A-Za-z0-9_])")
+    return re.compile(rf"(?<![A-Za-z0-9_\-])(?:{alternation})-[0-9]+(?![A-Za-z0-9_])")
 
 
 def _closes_link(after: str) -> bool:

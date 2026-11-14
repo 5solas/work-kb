@@ -39,7 +39,7 @@ CACHE = "links_cache"  # .state/links_cache.json
 COMPILE_LEDGER = "compile"  # .state/compile.json (compile이 쓰고 link는 태그 개수만 읽는다, D22)
 MAX_TEXT = 120
 MANAGED_DIRS = (("jira",), ("wiki", "projects"), ("wiki", "people"))
-STUB_KEY = re.compile(r"^([A-Z][A-Z0-9_]+)-(\d+)$")
+STUB_KEY = re.compile(r"^([A-Z][A-Z0-9_]+)-([0-9]+)$")
 
 _WIKILINK_SPAN = re.compile(r"!?\[\[(?:(?!\]\]).)*\]\]")
 _BULLET = re.compile(r"^(?:[-*+]|>|#{1,6})\s+")

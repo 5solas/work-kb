@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 import link
-from lib import config, core, frontmatter, managed
+from lib import config, core, frontmatter, managed, notes
 
 NOW = "2026-11-05T09:30:00"
 ROOT = Path(__file__).resolve().parents[1]
@@ -796,3 +796,12 @@ def test_no_normalize_inside_long_fence(vault, fake_now):
     assert path.read_text(encoding="utf-8") == text
     assert summary["normalized_lines"] == 0
     assert not (vault / "jira" / "KB-1.md").exists()
+
+
+def test_keys_need_ascii_digits():
+    once, _ = link.normalize_text("KB-١KB-1", ("KB",))
+    twice, _ = link.normalize_text(once, ("KB",))
+    assert once == twice
+    out, _ = link.normalize_text("KB-１２ 배포 확인", ("KB",))
+    assert out == "KB-１２ 배포 확인"
+    assert notes.find_keys(out, ("KB",)) == []
