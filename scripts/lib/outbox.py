@@ -327,7 +327,7 @@ def pid_alive(pid: Any) -> bool:
 
 def claim_fields() -> dict[str, Any]:
     # 실제 시계(KB_FAKE_NOW와 무관): 표시의 나이를 재는 데 쓴다
-    return {"claimed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "pid": os.getpid()}
+    return {"claimed_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"), "pid": os.getpid()}
 
 
 def claim_is_stale(record: Mapping[str, Any], stale_sec: float, now: dt.datetime | None = None) -> bool:
@@ -339,8 +339,8 @@ def claim_is_stale(record: Mapping[str, Any], stale_sec: float, now: dt.datetime
     except ValueError:
         return True
     if claimed.tzinfo is None:
-        claimed = claimed.replace(tzinfo=dt.timezone.utc)
-    now = now or dt.datetime.now(dt.timezone.utc)
+        claimed = claimed.replace(tzinfo=dt.UTC)
+    now = now or dt.datetime.now(dt.UTC)
     return (now - claimed).total_seconds() > stale_sec
 
 

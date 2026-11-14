@@ -426,7 +426,7 @@ def ensure_page(cfg: Config, kind: str, name: str | None = None, *, title: str |
 
 
 def _strip_outer_pipes(line: str) -> str:
-    inner = line[1:] if line.startswith("|") else line
+    inner = line.removeprefix("|")
     if inner.endswith("|"):
         slashes = len(inner) - 1 - len(inner[:-1].rstrip("\\"))
         if slashes % 2 == 0:

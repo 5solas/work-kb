@@ -8,9 +8,8 @@ import sys
 from pathlib import Path
 
 import pytest
-import yaml
-
 import status
+import yaml
 from lib import config, core
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -99,7 +98,7 @@ def sample(tmp_path):
         {"id": "2", "action": "comment", "key": "KB-7", "status": "pending"},
         {"id": "3", "action": "transition", "key": "OPS-3", "status": "failed"},
         {"id": "4", "action": "comment", "key": "KB-12", "status": "done"},
-        {"id": "5", "action": "worklog", "key": "KB-5", "status": "sending", "pid": os.getpid(), "claimed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")},
+        {"id": "5", "action": "worklog", "key": "KB-5", "status": "sending", "pid": os.getpid(), "claimed_at": dt.datetime.now(dt.UTC).isoformat(timespec="seconds")},
     ]
     lines = [json.dumps(item, ensure_ascii=False) for item in outbox] + ["{깨진 줄", ""]
     (root / "jira" / "outbox.jsonl").write_bytes("\n".join(lines).encode("utf-8"))
@@ -457,7 +456,7 @@ def test_outbox_counts(vault):
     _write_local(vault, {"environment": "home"})
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
-    now_iso = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    now_iso = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     records = [
         {"id": "01J00000000000000000000001", "status": "pending", "last_error": None},
         {"id": "01J00000000000000000000002", "status": "pending", "last_error": "uncertain"},

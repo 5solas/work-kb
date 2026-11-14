@@ -265,7 +265,7 @@ def test_page_template_plain_names_stay_unquoted():
 
 
 def test_unclosed_frontmatter_is_body():
-    src = "---\n## 기록\n- [ ] 개인 할 일\n- 10:00 KB-7 논의\n".encode("utf-8")
+    src = "---\n## 기록\n- [ ] 개인 할 일\n- 10:00 KB-7 논의\n".encode()
     lines = list(notes.iter_lines("daily/2026-11-14.md", src))
     assert lines[0].text == "---" and not lines[0].in_code
     assert any(line.text == "- [ ] 개인 할 일" and not line.in_code for line in lines)
