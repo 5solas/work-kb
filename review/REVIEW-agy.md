@@ -3,7 +3,7 @@
 ## 요약
 
 저장소 전체(`main` 기반 핵심 모듈 + `nvim` 브랜치 프런트엔드, `scripts/`·`nvim/`·`prompts/`·`install.ps1`·`uninstall.ps1`·`tests/`·`docs/`)를 `work-kb-build-brief-v3.md`와 `docs/DECISIONS.md` 기준으로 교차 점검했다.
-Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5 passed`)·병렬 `-n auto`·`chcp 949`·선택 마커(`perf`·`demo`·`packaging`)와 Neovim 모의 E2E·정적/속성 검증까지 전수 실행했다.
+Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5 passed`, 3.14 단일 대상으로 범위 밖)·병렬 `-n auto`·`chcp 949`·선택 마커(`perf`·`demo`·`packaging`)와 Neovim 모의 E2E·정적/속성 검증까지 전수 실행했다.
 기존 `nvim` 브랜치 11건(`A-01`~`A-11`)에 더해 `link.py` 주제(`wiki/topics/*.md`) 연결 누락(D22), `jira_act` `uncertain`→`failed` 전락(D52), `wheels.py` `KB_AGENT=1` 거부 누락, 상대 `ca_bundle`·FTS 잠금 예외 누수·`ingest`/`lint`/`config` 잠금·경계 결함 16건을 새로 확인했다.
 정확성 23건(높음 1, 중간 21, 낮음 1)과 개선 4건(낮음 4), 총 27건을 보고하며 21건은 `review/repro/` 최소 재현 스크립트로 실패를 직접 재현했다. (1단계-2 상호 검증에서 심각도 기준 및 코드 재확인에 따라 8건 심각도 정정 및 2건 설명 보완 반영)
 
@@ -16,7 +16,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 | Python 3.14 `perf` 마커 | `.venv\Scripts\python.exe -m pytest -q -p no:randomly -o addopts="-p no:cacheprovider" -m perf` | **1 passed, 2185 deselected** (`18.28s`, exit 0) | `test_link_perf.py` 예산 내 통과 |
 | Python 3.14 `demo` 마커 | `.venv\Scripts\python.exe -m pytest -q -p no:randomly -o addopts="-p no:cacheprovider" -m demo` | **5 passed, 2181 deselected** (`8.67s`, exit 0) | 모의 서버 3종 전체 흐름 통과 |
 | Python 3.14 `packaging` 마커 | `.venv\Scripts\python.exe -m pytest -q -p no:randomly -o addopts="-p no:cacheprovider" -m packaging` | **3 passed, 2183 deselected** (`26.43s`, exit 0) | 실제 wheel 내려받기·한글 경로 오프라인 venv 설치 통과 |
-| Python 3.13 전체 pytest | `.venv313\Scripts\python.exe -m pytest -q -p no:randomly` | **5 failed, 2165 passed, 2 skipped, 14 deselected** (`554.54s`, exit 1) → `pip` 시드 후 실패 5건 재실행 **5 passed** (`8.08s`) | 초기 5건 실패(`test_install_script.py` 3, `test_packaging.py` 2)는 `.venv313`에 `pip` 미포함 때문이었음 |
+| Python 3.13 전체 pytest (3.14 단일 대상으로 범위 밖) | `.venv313\Scripts\python.exe -m pytest -q -p no:randomly` | **5 failed, 2165 passed, 2 skipped, 14 deselected** (`554.54s`, exit 1) → `pip` 시드 후 실패 5건 재실행 **5 passed** (`8.08s`) | 초기 5건 실패(`test_install_script.py` 3, `test_packaging.py` 2)는 `.venv313`에 `pip` 미포함 때문이었음 |
 | `cp949` / `PYTHONUTF8=0` 인코딩 | `cmd /c "chcp 949 >nul && set PYTHONUTF8=0&& .venv\Scripts\python.exe -m pytest -q tests/test_cli_encoding.py tests/test_encoding_rule.py tests/test_kb_dispatch.py tests/test_serve.py"` | **144 passed** (`32.80s`, exit 0) | Windows `cp949` 콘솔에서 UTF-8 I/O 정상 동작 |
 | Neovim + 모의 서버 E2E | `.venv\Scripts\python.exe -X utf8 ...\scratch\nvim_e2e.py` | **exit 0** | `mock_jira`·`mock_llm` + Lua 17개 모듈·캡처·검색·`open_key`·`jira`·`ingest_compile` 연동 통과 |
 | CLI / `serve` 프로토콜 동적 점검 | `.venv\Scripts\python.exe ...\scratch\dyn_check.py` | **exit 0** | 잘못된 JSON/UTF-8 거부, 50KB 검색, 비허용 명령 후 정상 응답, `shutdown` 종료 확인 (`A-01` 동시 재현) |
@@ -106,7 +106,7 @@ Python 3.14(`2170 passed`)·3.13(`2165 passed, 5 failed` → `pip` 시드 후 `5
 - **파일:줄**: `install.ps1:384-385, 425-451`, `tests/test_install_script.py:510-514, 557-562`
 - **분류**: 정확성
 - **심각도**: 중간
-- **문제**: `install.ps1 -Offline`에서도 `uv venv --seed --python 3.14` / `3.13`을 `--offline`·`--no-python-downloads` 없이 호출해 완전 오프라인 환경에서 시드/파이썬 내려받기를 시도할 위험이 있다(실제 폐쇄망 환경 실패는 미실행으로 **추정**).
+- **문제**: `install.ps1 -Offline`에서도 `uv venv --seed --python 3.14` / `3.13` (3.14 단일 대상으로 범위 밖)을 `--offline`·`--no-python-downloads` 없이 호출해 완전 오프라인 환경에서 시드/파이썬 내려받기를 시도할 위험이 있다(실제 폐쇄망 환경 실패는 미실행으로 **추정**).
 - **근거·재현**:
   - 재현 스크립트(읽기 전용 AST 점검): `pwsh -NoProfile -File review/repro/A-07_install_offline_uv_venv.ps1`
   - 관찰 출력: `install.ps1:384: ... @('venv', '--seed', '--python', '3.14', $venv)` / `has_offline_or_no_python_downloads_in_install_ps1=False`
