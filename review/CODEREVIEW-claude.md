@@ -95,3 +95,22 @@
 | `scripts/lib/sidecar.py` | agy 소유, 내 코드는 쓰지 않는다. 문서(D-NV4)에 이름 규칙 기록 |
 | `status --json` `outbox.uncertain` 새 키 | Lua는 outbox 수를 읽지 않는다. 영향 없음 |
 | 오프라인 전환(P-58) | Neovim `t`는 전환 목록을 먼저 받으므로 오프라인 큐는 명령줄 전용. D-NV4에 적었다 |
+
+## 5. 재확인 (3단계-3)
+
+대상: agy 수정 `ae4e744..60434cd`, 기록 `review/RESPONSE-agy.md`(agy 워크트리, 읽기만 함).
+방법: 내 저장소에 임시 브랜치 `tmp/recheck-claude`(내 `b72f46d` + agy `60434cd` 병합, 충돌 없음)를 임시 워크트리로 만들어 그 위에서 확인했다. 끝나고 브랜치와 워크트리를 지웠다. 작업 브랜치에는 병합하지 않았다.
+
+| ID | agy 처리 | 판정 | 근거 |
+|---|---|---|---|
+| R-claude-01 | 수정(`ae4e744`) | **해소** | 새 시험 `tests/test_ingest_images.py::test_ledger_merges_concurrent_update_on_write_success`. 직접 변이: `scripts/ingest_images.py:823`의 `self._merge_ledger(image=(sha, entry), unskip=sha)`를 옛 `self.ledger["images"][sha] = entry; self._save_ledger()`로 바꾸면 `1 failed`, 되돌리면 `1 passed` |
+| R-claude-02 | 수정(`4184ac1`) | **해소** | 내 반례 `<think>r</think>{"t":"use </think> x"}` → 답 `{"t":"use </think> x"}`, `parse_json_object` OK, 생각 `r`. 추가로 본 경우도 맞다: 생각 블록 둘 뒤 JSON 안 `</think>` → OK, 생각 안에 `{…}`가 있어도 뒤 JSON만 답, 코드 울타리 JSON 안 `</think>` → OK, 대문자 태그·여는 태그 없는 닫는 태그 → OK, JSON이 아닌 답·닫히지 않은 `<think>`는 지금처럼 파싱 실패(재시도로 감) |
+| R-claude-03 | 수정(`317412e`) | **해소** | `IMPL-agy.md` 표의 P-53(빈 섹션 ConfigError)·P-55(IP 차단)·P-56(잠금)·P-64(FileBusy)·P-70(앵커·상대·이미지 글자화)·P-71(`/models` 429 재시도 끔)·P-73(HTML 주석) 설명이 코드와 맞다. 이미 올린 커밋 메시지(`336955d`, `a7f2780`)를 고치지 않은 것은 이력 재작성을 피하려는 것이라 받아들인다 |
+| R-claude-04 | 부분 수정(`f186c65`, 도움말) | **수용** | `kb.py init --help`: `--yes  확인 질문(y/n)을 기본값과 상관없이 예로 처리하고 진행`. 동작은 PLAN P-74 합의와 D-NV4대로이고, 예로 처리되는 질문은 다시 설정할지 묻는 것뿐이라 데이터 위험이 없다. 사소한 차이라 합의 원칙대로 받아들인다 |
+| R-claude-05 | 반박 | **수용** | PLAN P-70("href는 http·https·mailto만, 그 밖은 글자로")과 내가 기록한 D-NV4(`124fbca`)대로다. 링크 글은 남고 주소만 빠지므로 데이터 손실·요구사항 위반이 아니다. 반박을 받아들인다 |
+
+합친 상태 확인(`b72f46d` + `60434cd`): `pytest -q -n auto` 2284 passed, 4 skipped, 실패 0. `-m perf` 1 / `-m demo` 5 / `-m packaging` 3 passed. agy의 새 시험(`test_llm_client.py` hypothesis 포함, `test_init_full.py`, `test_ingest_images.py`)도 이 안에서 통과했다.
+
+### 최종 판정: **승인**
+
+차단·미해소 항목 없음. 중요 2건(R-claude-01, 02)은 해소, 사소 3건은 해소 1·수용 2.
