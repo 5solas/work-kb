@@ -411,3 +411,10 @@ def test_logger_redacts_secrets(tmp_path):
     text = (tmp_path / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
     assert "tok-abcdef" not in text
     assert "Bearer ***" in text
+
+
+def test_safe_name_reserved_respects_max_len():
+    name = "CON." + "0" * 76
+    once = core.safe_name(name)
+    assert len(once) <= 80
+    assert core.safe_name(once) == once

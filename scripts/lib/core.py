@@ -468,7 +468,7 @@ def safe_name(name: str, max_len: int = 80) -> str:
     if not text:
         return "_"
     if _is_reserved(text):
-        text = "_" + text
+        text = "_" + text[: max(0, max_len - 1)].rstrip(" .")
     return text
 
 
