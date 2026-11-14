@@ -19,8 +19,9 @@
            when the online install fails), check kb.py --help.
     env    set the user environment variable WORK_KB_ROOT = <this repository>
            ([Environment]::SetEnvironmentVariable(..., 'User'), i.e. HKCU\Environment).
-           The previous value is recorded in the manifest. An existing different value
-           is replaced only with -Yes (or a yes at the prompt).
+           The previous value and this clone are recorded in the manifest. An existing
+           different value (also one another clone set) is replaced only with -Yes (or a yes
+           at the prompt); only this clone's uninstall.ps1 undoes it.
     check  read-only: Neovim (>= 0.11) on PATH; a Neovim config that loads work-kb
            (<config>\lua\plugins\work-kb.lua; <config> = %LOCALAPPDATA%\<NVIM_APPNAME or nvim>,
            or %XDG_CONFIG_HOME%\<...>); nvd on PATH; WORK_KB_ROOT; leftovers of the old
@@ -331,7 +332,9 @@ function Read-Manifest {
         if ($obj.PSObject.Properties['env'] -and $obj.env) {
             foreach ($p in $obj.env.PSObject.Properties) {
                 $e = $p.Value
-                $m.env[$p.Name] = @{ value = [string]$e.value; hadPrevious = [bool]$e.hadPrevious; previous = $e.previous }
+                $repo = $null
+                if ($e.PSObject.Properties['repo'] -and $e.repo) { $repo = [string]$e.repo }
+                $m.env[$p.Name] = @{ value = [string]$e.value; hadPrevious = [bool]$e.hadPrevious; previous = $e.previous; repo = $repo }
             }
         }
         if ($obj.PSObject.Properties['venvs'] -and $obj.venvs) { $m.venvs = @($obj.venvs | ForEach-Object { [string]$_ }) }
@@ -470,8 +473,10 @@ function Step-env {
         Report 'env' 'ok' ($EnvName + ' = ' + $cur + ' in ' + $store + $note)
         return
     }
-    # The value we are about to replace is ours if the manifest says we set exactly that.
-    $ours = $entry -and $cur -and ($entry.value -ceq $cur)
+    # The value we are about to replace is ours if the manifest says we set exactly that and that folder is gone
+    # (this clone was moved). If the folder still exists, another clone set it: treat it like any other value,
+    # so its previous value is recorded here and that clone's uninstall.ps1 (which leaves it) cannot lose it.
+    $ours = $entry -and $cur -and ($entry.value -ceq $cur) -and -not (Test-Path -LiteralPath $cur -PathType Container)
     if ($cur -and -not $ours) {
         Out-Line ('  ' + (Get-Msg 'EnvOther' $cur))
         if (-not (Test-WhatIf) -and -not (Ask ('Replace user variable ' + $EnvName + ' = ' + $cur + ' with ' + $want + '?'))) {
@@ -485,7 +490,7 @@ function Step-env {
     if ($cur) { $was = $cur }
     $done = Invoke-Action 'env' ('set user environment variable ' + $EnvName + ' = ' + $want + ' in ' + $store + ' (was ' + $was + ')') {
         Set-UserEnv $EnvName $want
-        $m.env[$EnvName] = @{ value = $want; hadPrevious = $hadPrevious; previous = $previous }
+        $m.env[$EnvName] = @{ value = $want; hadPrevious = $hadPrevious; previous = $previous; repo = $RepoRoot }
         Write-Manifest $m
     }
     if (Test-WhatIf) { Report 'env' 'whatif' ($EnvName + ' = ' + $want); return }

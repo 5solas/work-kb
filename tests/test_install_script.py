@@ -324,7 +324,8 @@ def test_env_set_rerun_and_uninstall_removes(shell, env):
     assert code == 0 and _steps(out) == {"env": "changed"}, out
     assert env.user_vars() == {"WORK_KB_ROOT": str(env.repo)}
     manifest = json.loads(env.manifest.read_text(encoding="utf-8"))
-    assert manifest["env"]["WORK_KB_ROOT"] == {"value": str(env.repo), "hadPrevious": False, "previous": None}
+    assert manifest["env"]["WORK_KB_ROOT"] == {"value": str(env.repo), "hadPrevious": False, "previous": None,
+                                               "repo": str(env.repo)}
     assert not env.manifest.read_bytes().startswith(b"\xef\xbb\xbf")
     assert "WORK_KB_ROOT" in out and str(env.manifest) in out  # 요약에 놓은 것
 
@@ -352,7 +353,7 @@ def test_env_replaces_other_value_only_with_yes_and_uninstall_restores(shell, en
     assert code == 0 and _steps(out) == {"env": "changed"}, out
     assert env.user_vars() == {"WORK_KB_ROOT": str(env.repo), "UNRELATED": "x"}
     entry = json.loads(env.manifest.read_text(encoding="utf-8"))["env"]["WORK_KB_ROOT"]
-    assert entry == {"value": str(env.repo), "hadPrevious": True, "previous": other}
+    assert entry == {"value": str(env.repo), "hadPrevious": True, "previous": other, "repo": str(env.repo)}
 
     code, out = env.run(shell, "uninstall.ps1", "-WhatIf")
     assert code == 0 and _steps(out)["env"] == "whatif", out
@@ -365,20 +366,60 @@ def test_env_replaces_other_value_only_with_yes_and_uninstall_restores(shell, en
 
 
 def test_env_moved_clone_keeps_the_original_previous_value(env):
-    """같은 변수를 install.ps1이 두 번 바꾸면(저장소를 옮김) 처음 값을 기억한다."""
+    """같은 변수를 install.ps1이 두 번 바꾸면(저장소를 옮겨 옛 폴더가 없음) 처음 값을 기억한다."""
     env.set_user_vars({"WORK_KB_ROOT": r"C:\원래 값"})
     code, out = env.run("ps51", "install.ps1", "-Only", "env", "-Yes")
     assert code == 0, out
     moved = env.base / "moved repo"
-    shutil.copytree(env.repo, moved)
-    code, out = nvim_run_script(env, moved / "install.ps1", "-Only", "env")  # 우리 값이므로 묻지 않는다
+    env.repo.rename(moved)
+    code, out = nvim_run_script(env, moved / "install.ps1", "-Only", "env")  # 우리 값이고 옛 폴더가 없으므로 묻지 않는다
     assert code == 0 and _steps(out) == {"env": "changed"}, out
     assert env.user_vars()["WORK_KB_ROOT"] == str(moved)
     entry = json.loads(env.manifest.read_text(encoding="utf-8"))["env"]["WORK_KB_ROOT"]
-    assert entry["previous"] == r"C:\원래 값" and entry["hadPrevious"] is True
+    assert entry["previous"] == r"C:\원래 값" and entry["hadPrevious"] is True and entry["repo"] == str(moved)
     code, out = nvim_run_script(env, moved / "uninstall.ps1")
     assert code == 0, out
     assert env.user_vars() == {"WORK_KB_ROOT": r"C:\원래 값"}
+
+
+def _second_clone(env: Env) -> Path:
+    """같은 프로필(LOCALAPPDATA·사용자 환경 변수)을 쓰는 두 번째 클론."""
+    other = env.base / "clone B"
+    (other / "scripts").mkdir(parents=True)
+    for name in ("install.ps1", "uninstall.ps1", "requirements.txt", "scripts/kb.py"):
+        shutil.copy(env.repo / name, other / name)
+    return other
+
+
+def test_second_clone_install_records_previous(env):
+    """다른 클론(폴더가 있음)이 설정한 값은 우리 값이 아니다: -Yes로만 바꾸고, 그 값을 이전 값으로 기록한다."""
+    code, out = env.run("ps51", "install.ps1", "-Only", "env")
+    assert code == 0, out
+    other = _second_clone(env)
+    code, out = nvim_run_script(env, other / "install.ps1", "-Only", "env")  # -NonInteractive: 묻지만 답이 없음
+    assert code == 1 and _steps(out) == {"env": "failed"}, out
+    assert env.user_vars() == {"WORK_KB_ROOT": str(env.repo)}
+    code, out = nvim_run_script(env, other / "install.ps1", "-Only", "env", "-Yes")
+    assert code == 0 and _steps(out) == {"env": "changed"}, out
+    entry = json.loads(env.manifest.read_text(encoding="utf-8"))["env"]["WORK_KB_ROOT"]
+    assert entry == {"value": str(other), "hadPrevious": True, "previous": str(env.repo), "repo": str(other)}
+
+
+def test_uninstall_from_other_clone_keeps_variable(env):
+    """C-07: 클론 A의 uninstall이 클론 B가 설정한 WORK_KB_ROOT를 지우지 않는다. B의 uninstall은 A 값을 되돌린다."""
+    code, out = env.run("ps51", "install.ps1", "-Only", "env")
+    assert code == 0, out
+    other = _second_clone(env)
+    code, out = nvim_run_script(env, other / "install.ps1", "-Only", "env", "-Yes")
+    assert code == 0, out
+    code, out = env.run("ps51", "uninstall.ps1", "-Only", "env")
+    assert code == 0 and _steps(out) == {"env": "skipped"} and "another clone" in out, out
+    assert env.user_vars() == {"WORK_KB_ROOT": str(other)}
+    assert env.manifest.exists()  # B의 기록은 남는다
+    code, out = nvim_run_script(env, other / "uninstall.ps1", "-Only", "env")
+    assert code == 0 and _steps(out) == {"env": "changed"}, out
+    assert env.user_vars() == {"WORK_KB_ROOT": str(env.repo)}
+    assert not env.manifest.exists()
 
 
 def nvim_run_script(env: Env, script: Path, *args: str) -> tuple[int, str]:
