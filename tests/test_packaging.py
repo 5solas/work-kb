@@ -226,6 +226,17 @@ def test_wheels_refused_for_agent(run_kb):
     assert result.returncode == 7
 
 
+def test_wheels_main_refuses_agent(monkeypatch):
+    """kb.py를 거치지 않는 직접 실행도 KB_AGENT=1을 거부한다(D57). --dry-run이라도 마찬가지."""
+    direct = _run([sys.executable, "-X", "utf8", SCRIPTS / "wheels.py", "--dry-run"], env=_child_env(KB_AGENT="1"))
+    assert direct.returncode == 7, direct.stdout + direct.stderr
+    monkeypatch.setattr(wheels.subprocess, "run", lambda *a, **k: pytest.fail("거부 전에 pip를 실행했다"))
+    monkeypatch.setenv("KB_AGENT", "1")
+    with pytest.raises(core.PolicyRefused) as info:
+        wheels.main(["--dry-run"])
+    assert info.value.exit_code == 7
+
+
 def test_wheels_cli_dry_run(run_kb):
     result = run_kb("wheels", "--dry-run", "--targets", "3.14", "--no-sdist")
     assert result.returncode == 0, result.stderr

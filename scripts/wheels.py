@@ -219,7 +219,13 @@ def _run(command: list[str]) -> int:
     return subprocess.run(command, cwd=str(CODE_ROOT)).returncode
 
 
+def _has_pip() -> bool:
+    """이 인터프리터에 pip가 있는가 (시험에서 가짜로 바꾼다)."""
+    return importlib.util.find_spec("pip") is not None
+
+
 def main(argv: list[str]) -> int:
+    core.refuse_if_agent("wheels")  # kb.py도 막지만 직접 실행도 막는다(D57)
     parser = core._Parser(
         prog="kb.py wheels",
         description="오프라인 설치용 wheel 묶음을 내려받는다 (이 venv의 pip 사용, 네트워크 필요)",
@@ -249,7 +255,7 @@ def main(argv: list[str]) -> int:
         print(f"(--dry-run: 내려받지 않았습니다. 대상 {', '.join(cp_tag(t) for t in targets)}, 폴더 {dest})")
         return 0
 
-    if importlib.util.find_spec("pip") is None:
+    if not _has_pip():
         raise core.ConfigError(f"{python}: pip가 없습니다. `{python} -m ensurepip` 후 다시 실행하세요")
     dest.mkdir(parents=True, exist_ok=True)
     failures: list[str] = []
@@ -279,3 +285,7 @@ def main(argv: list[str]) -> int:
     if failures:
         raise core.KbError("; ".join(failures))
     return 0
+
+
+if __name__ == "__main__":
+    core.run_main(main)
