@@ -1391,7 +1391,7 @@ def main(argv: list[str]) -> int:
     core.refuse_if_agent("init")  # kb.py도 막지만 직접 실행도 막는다
     parser = core.make_parser("kb.py init", "연결 설정 마법사. 재실행하면 기존 값이 기본값입니다")
     parser.add_argument("--dev", action="store_true", help="집 개발용: 모의 Jira·Confluence와 예시 LLM 설정을 씀")
-    parser.add_argument("--yes", action="store_true", help="확인 질문 없이 진행")
+    parser.add_argument("--yes", action="store_true", help="확인 질문(y/n)을 기본값과 상관없이 예로 처리하고 진행")
     parser.add_argument("--section", choices=("jira", "confluence", "llm"), help="한 구역만 다시 설정")
     parser.add_argument("--non-interactive", action="store_true", help="묻지 않고 진행 (--from-env와 함께)")
     parser.add_argument("--from-env", action="store_true", help="KB_INIT_* 환경변수에서 값을 읽음 (--non-interactive와 함께)")

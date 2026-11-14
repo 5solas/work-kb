@@ -235,3 +235,10 @@ def test_yes_skips_confirmations(vault, mock_jira, monkeypatch):
     assert [p.split(" ")[0] for p, _ in script_cli.asked] == ["환경", "Jira", "동기화할"]
     assert step_calls == ["conf:True"]
 
+
+def test_yes_help_states_it_answers_yes_regardless_of_default(capsys):
+    with pytest.raises(SystemExit):
+        init.main(["--help"])
+    help_text = capsys.readouterr().out
+    assert "기본값과 상관없이" in help_text and "--yes" in help_text
+
