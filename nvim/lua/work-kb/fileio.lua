@@ -89,15 +89,26 @@ function M.write_bytes(path, data, expect)
     end
     local wait = 50
     for try = 1, RENAME_TRIES do
-      if expect ~= nil and M.read_bytes(path) ~= expect then
-        fail("파일이 읽은 뒤 바뀌었습니다. 다시 시도하세요", "쓰지 않음")
+      local busy_read = nil
+      if expect ~= nil then
+        local current, rerr0 = M.read_bytes(path)
+        if current == nil and uv.fs_stat(path) ~= nil then
+          -- 있는데 읽지 못함: 다른 프로그램이 공유 없이 잡고 있다. 사람 편집이 아니므로 기다렸다 다시 본다 (R-agy-04)
+          busy_read = rerr0 or "읽지 못함"
+        elseif current ~= expect then
+          fail("파일이 읽은 뒤 바뀌었습니다. 다시 시도하세요", "쓰지 않음")
+        end
       end
-      local renamed, rerr, code = uv.fs_rename(tmp, path)
-      if renamed then
-        return
-      end
-      if not BUSY[code] or try == RENAME_TRIES then
-        fail("파일을 바꾸지 못했습니다", rerr)
+      if busy_read == nil then
+        local renamed, rerr, code = uv.fs_rename(tmp, path)
+        if renamed then
+          return
+        end
+        if not BUSY[code] or try == RENAME_TRIES then
+          fail("파일을 바꾸지 못했습니다", rerr)
+        end
+      elseif try == RENAME_TRIES then
+        fail("다른 프로그램이 잡고 있어 파일을 읽지 못했습니다. 쓰지 않았습니다", busy_read)
       end
       uv.sleep(wait)
       wait = wait * 2

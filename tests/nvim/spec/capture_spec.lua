@@ -467,4 +467,37 @@ describe("capture", function()
       H.eq(vim.fn.glob(vault .. "/daily/.*.tmp", true, true), {})
     end)
   end)
+
+  it("atomic write: a busy re-read is retried, not taken as a human edit (R-agy-04)", function()
+    with_vault({}, function(vault)
+      local file = daily_file(vault)
+      H.write_bytes(file, DAILY_LF)
+      local fileio = require("work-kb.fileio")
+      local real = fileio.read_bytes
+      local busy = 2 -- 다른 프로그램이 공유 없이 잡고 있어 두 번은 읽지 못한다
+      fileio.read_bytes = function(p)
+        if busy > 0 then
+          busy = busy - 1
+          return nil, "EBUSY: resource busy or locked"
+        end
+        return real(p)
+      end
+      local ok, err = pcall(fileio.write_bytes, file, "새 바이트", DAILY_LF)
+      fileio.read_bytes = real
+      H.ok(ok, "잠깐 읽지 못한 것을 사람 편집으로 봄: " .. tostring(err))
+      H.eq(H.read_bytes(file), "새 바이트")
+      H.eq(vim.fn.glob(vault .. "/daily/.*.tmp", true, true), {})
+      -- 계속 읽지 못하면 "바뀌었다"가 아니라 "읽지 못했다"로 끝나고 파일은 그대로다
+      H.write_bytes(file, DAILY_LF)
+      fileio.read_bytes = function()
+        return nil, "EBUSY: resource busy or locked"
+      end
+      ok, err = pcall(fileio.write_bytes, file, "또 새 바이트", DAILY_LF)
+      fileio.read_bytes = real
+      H.ok(not ok, "읽지 못하는데 덮어씀")
+      H.contains(err, "읽지 못했습니다")
+      H.eq(H.read_bytes(file), DAILY_LF)
+      H.eq(vim.fn.glob(vault .. "/daily/.*.tmp", true, true), {})
+    end)
+  end)
 end)
