@@ -477,7 +477,8 @@ function Step-env {
     # The value we are about to replace is ours if the manifest says we set exactly that and that folder is gone
     # (this clone was moved). If the folder still exists, another clone set it: treat it like any other value,
     # so its previous value is recorded here and that clone's uninstall.ps1 (which leaves it) cannot lose it.
-    $ours = $entry -and $cur -and ($entry.value -ceq $cur) -and -not (Test-Path -LiteralPath $cur -PathType Container)
+    # Same path test as uninstall.ps1 (case and a trailing backslash do not matter on Windows).
+    $ours = $entry -and $cur -and (Test-SamePath $entry.value $cur) -and -not (Test-Path -LiteralPath $cur -PathType Container)
     if ($cur -and -not $ours) {
         Out-Line ('  ' + (Get-Msg 'EnvOther' $cur))
         if (-not (Test-WhatIf) -and -not (Ask ('Replace user variable ' + $EnvName + ' = ' + $cur + ' with ' + $want + '?'))) {

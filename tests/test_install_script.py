@@ -396,6 +396,25 @@ def test_env_moved_clone_keeps_the_original_previous_value(env):
     assert env.user_vars() == {"WORK_KB_ROOT": r"C:\원래 값"}
 
 
+@pytest.mark.parametrize("variant", ["upper", "trailing-backslash"])
+def test_env_moved_clone_matches_path_case_insensitively(env, variant):
+    """R-agy-03: 기록한 값과 지금 값이 대소문자·끝 역슬래시만 다르면 같은 경로다(uninstall.ps1의 Test-SamePath와 같게).
+
+    옮긴 클론이므로 묻지 않고 바꾸며 처음 이전 값을 이어받아야 한다.
+    """
+    env.set_user_vars({"WORK_KB_ROOT": r"C:\원래 값"})
+    code, out = env.run("ps51", "install.ps1", "-Only", "env", "-Yes")
+    assert code == 0, out
+    old = str(env.repo)
+    env.set_user_vars({"WORK_KB_ROOT": old.upper() if variant == "upper" else old + "\\"})
+    moved = env.base / "moved repo"
+    env.repo.rename(moved)
+    code, out = nvim_run_script(env, moved / "install.ps1", "-Only", "env")
+    assert code == 0 and _steps(out) == {"env": "changed"}, out
+    entry = json.loads(env.manifest.read_text(encoding="utf-8"))["env"]["WORK_KB_ROOT"]
+    assert entry["previous"] == r"C:\원래 값" and entry["hadPrevious"] is True, entry
+
+
 def _second_clone(env: Env) -> Path:
     """같은 프로필(LOCALAPPDATA·사용자 환경 변수)을 쓰는 두 번째 클론."""
     other = env.base / "clone B"
