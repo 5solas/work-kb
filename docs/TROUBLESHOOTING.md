@@ -19,15 +19,19 @@
 
 ### Jira 403 (`권한이 없습니다 (403, …)`, 종료 2 또는 `in_scope: false`)
 
-- 증상: `sync`·`act`가 `"권한이 없습니다 (403, …)"`(종료 2) 또는 `failed`로 끝나거나, `sync --full` 뒤 기존 일감 파일에 `in_scope: false`가 붙어 `일감.base`에서 보이지 않는다.
-- 원인: 해당 프로젝트·일감에 접근 권한이 없거나, 연속 로그인 실패 등으로 Jira가 웹 CAPTCHA 인증을 요구한다. `sync --full`에서 범위 밖 기존 일감이 403을 주면 토큰(`/myself`)이 정상일 때만 전체 동기화를 멈추지 않고 `in_scope: false`로 넘긴다(토큰이 무효면 종료 2).
-- 명령: 먼저 `python scripts/kb.py doctor`로 `Jira ✓`인지 확인한다. 토큰이 정상인데 403이면 브라우저로 Jira에 한 번 로그인해 CAPTCHA를 풀고 프로젝트·일감 권한을 확인한다. 개별 일감은 `python scripts/kb.py sync --key KEY`로 다시 확인할 수 있다.
+- 증상: `sync`가 `"권한이 없습니다 (403, …)"`(종료 2)로 멈춘다. `act` 쓰기가 `failed`가 된다. 또는 `sync --full` 뒤 기존 일감 파일에 `in_scope: false`가 붙어 `일감.base`에서 사라진다.
+- 원인: 그 프로젝트·일감에 권한이 없거나, 로그인 실패가 이어져 Jira가 웹 CAPTCHA를 요구한다. `sync --full`은 범위 밖 기존 일감의 403을 `in_scope: false`로 넘기고 계속한다. 단 토큰이 정상일 때만이다(무효면 종료 2).
+- 명령: `python scripts/kb.py doctor`로 `Jira`가 ✓인지 본다. ✓인데 403이면 브라우저로 Jira에 한 번 로그인해 CAPTCHA를 풀고 권한을 확인한다. 일감 하나는 `python scripts/kb.py sync --key KEY`로 다시 받는다.
 
 ### SSL 인증서 오류 (`SSLError`, `CERTIFICATE_VERIFY_FAILED`)
 
 - 증상: Jira·Confluence·LLM 호출이 인증서 오류(종료 3).
 - 원인: 사내 인증서 체인을 Python(`requests`)이 모른다.
-- 명령: 사내 루트 CA 파일(PEM) 경로를 `config.local.yaml`의 해당 연결 구역(jira, confluence, LLM 프로필)에 `ca_bundle:`으로 손으로 적는다(상대 경로는 설정 폴더 기준). `init`을 다시 실행해도 이 키는 유지된다. 프록시를 시스템 설정에서 쓰려면 같은 구역의 `trust_env`, 또는 `proxies`를 설정한다. 검증을 끄는 방법은 권하지 않는다. 다시 `python scripts/kb.py doctor`가 SSL·프록시·인증 오류를 따로 알려 준다.
+- 명령: 사내 루트 CA 파일(PEM) 경로를 `config.local.yaml`의 해당 구역(jira, confluence, LLM 프로필)에 `ca_bundle:`으로 손으로 적는다.
+  - 상대 경로는 설정 폴더 기준이다. `init`을 다시 해도 이 키는 남는다.
+  - 프록시는 같은 구역의 `trust_env`(시스템 설정 사용)나 `proxies`로 정한다.
+  - 검증을 끄는 방법은 권하지 않는다.
+  - 고친 뒤 `python scripts/kb.py doctor`. SSL·프록시·인증 오류를 따로 알려 준다.
 
 ### 쓰기 응답이 3xx (`failed`, "https 주소로 고치세요")
 
@@ -38,7 +42,10 @@
 ### 회사에서 LLM 주소가 공개 호스트 (`✗ 공개 호스트 차단`, 종료 5)
 
 - 증상: `doctor` ✗, `compile`·`ingest`가 종료 5로 거부.
-- 원인: `environment: company`인데 LLM 프로필 주소가 `public_hosts_blocklist`(공개 클라우드)에 걸리거나, 공개 IP 주소이거나, 호스트를 하나로 정할 수 없는 형식(공백·`\`·`@`·비ASCII 포함)이다. 집 설정이 남았거나 오타. (사설·루프백 IP는 차단 목록에 직접 넣지 않는 한 허용된다.)
+- 원인: `environment: company`인데 LLM 프로필 주소가 다음 중 하나다. 집 설정이 남았거나 오타다.
+  - `public_hosts_blocklist`(공개 클라우드)에 걸리는 호스트
+  - 공개 IP 주소 (사설·루프백 IP는 차단 목록에 직접 넣지 않는 한 허용)
+  - 호스트를 하나로 정할 수 없는 주소 (공백·`\`·`@`·ASCII 아닌 문자 포함)
 - 명령: 진행하지 말 것. `python scripts/kb.py init --section llm`으로 사내 서버 주소로 고친다. 집에서 쓰던 `config.local.yaml`은 복사하지 않는다(DEPLOY 1단계).
 
 ### `py -3`이 동작하지 않는다 / 잘못된 Python
@@ -49,15 +56,19 @@
 
 ### Python 3.14가 아닌 버전 / PyYAML 설치 실패 / 패키지 없음 (종료 4)
 
-- 증상: `kb.py`가 `"오류: Python 3.14가 필요합니다"` 또는 `"패키지가 없습니다"`(종료 4)로 멈추고, `doctor`에 `✗ Python`, `install.ps1`에 `.venv is Python …, not 3.14`가 나온다. 또는 3.15에서 PyYAML wheel이 없어 오프라인 설치가 실패한다.
-- 원인: 지원하는 Python은 3.14 하나다. 3.14 미만은 `kb.py`와 `doctor`가 거부하고, 3.15는 PyPI에 PyYAML wheel이 없어 `--no-index --find-links wheels`가 실패한다(`kb.py wheels`도 3.14만 지원).
-- 명령: 3.14로 `python -m venv .venv`(또는 `py -3.14 -m venv .venv`, 개발용 venv는 `uv venv --seed --python 3.14 .venv`) 후 `pip install -r requirements.txt`. 저장소 폴더에서 `install.ps1 -Only venv -Yes`도 된다(3.14가 아닌 `.venv`는 이름을 바꿔 두고 새로 만든다).
+- 증상: 다음 중 하나가 나온다.
+  - `kb.py`: `"오류: Python 3.14가 필요합니다"` 또는 `"오류: 패키지가 없습니다"`(종료 4)
+  - `doctor`: `✗ Python`
+  - `install.ps1`: `.venv is Python …, not 3.14`
+  - 3.15에서 오프라인 설치(`--no-index --find-links wheels`) 실패
+- 원인: 지원하는 Python은 3.14 하나다. 3.14 미만은 `kb.py`와 `doctor`가 거부한다. 3.15용 PyYAML wheel은 없다(`kb.py wheels`도 3.14만 받는다).
+- 명령: 3.14로 `py -3.14 -m venv .venv`(또는 3.14인 `python -m venv .venv`) 후 `pip install -r requirements.txt`. 저장소 폴더에서 `install.ps1 -Only venv -Yes`도 된다. 3.14가 아닌 `.venv`는 이름을 바꿔 두고 새로 만든다.
 
 ### venv에 `pip`가 없다 (`pip가 없습니다`, `ensurepip`)
 
-- 증상: `kb.py wheels`가 `"pip가 없습니다. ... -m ensurepip 후 다시 실행하세요"`(종료 4)로 실패하고, `install.ps1`이 `pip install failed`로 끝나며, 개발용 `packaging`·`install` 테스트가 실패하거나 건너뛴다.
-- 원인: `uv venv --python 3.14 .venv`처럼 `--seed` 없이 venv를 만들었거나 `--without-pip`로 만들어 venv 안에 `pip`가 없다.
-- 명령: `.venv\Scripts\python.exe -m ensurepip --upgrade`로 `pip`를 넣는다. 개발 환경은 `uv venv --seed --python 3.14 .venv`로 만든 뒤 `uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt`를 실행한다.
+- 증상: `kb.py wheels`가 `"… pip가 없습니다. … -m ensurepip 후 다시 실행하세요"`(종료 4)로 실패한다. `install.ps1`이 `pip install failed`로 끝난다.
+- 원인: venv를 pip 없이 만들었다(`--without-pip`, 또는 `uv venv`에 `--seed`를 빠뜨림).
+- 명령: `.venv\Scripts\python.exe -m ensurepip --upgrade`. 개발 환경은 `uv venv --seed --python 3.14 .venv` 후 `uv pip install --python .venv\Scripts\python.exe -r requirements-dev.txt`.
 
 ## 한글·인코딩
 
@@ -98,22 +109,26 @@
 ### `install.ps1` / `uninstall.ps1`에서 `WORK_KB_ROOT`가 다른 클론을 가리킨다
 
 - 증상: `install.ps1`이 `WORK_KB_ROOT is …; rerun with -Yes`로 멈추거나, `uninstall.ps1`이 `"WORK_KB_ROOT는 다른 클론(…)이 설정한 값이라 그대로 둡니다"`로 건너뛴다.
-- 원인: 매니페스트(`%LOCALAPPDATA%\work-kb\install-manifest.json`)는 클론끼리 공유하며, `WORK_KB_ROOT`를 설정한 클론만 그 값을 되돌릴 수 있다.
-- 명령: 현재 클론으로 바꾸려면 `install.ps1 -Only env -Yes` 실행 뒤 새 터미널에서 `nvd --restart`. 되돌릴 때는 처음 설정한 클론에서 `uninstall.ps1`을 실행한다.
+- 원인: 매니페스트(`%LOCALAPPDATA%\work-kb\install-manifest.json`)는 클론끼리 공유한다. `WORK_KB_ROOT`는 그 값을 정한 클론만 되돌린다.
+- 명령: 이 클론으로 바꾸려면 `install.ps1 -Only env -Yes` 후 새 터미널에서 `nvd --restart`. 되돌리려면 값을 정한 클론에서 `uninstall.ps1`.
 
 ### 상태를 한 번에 보고 싶다
 
-- 명령: Neovim에서 `:checkhealth work-kb`. 코드 루트, 볼트, 접두 키, Python, 상주 서버(`kb.py serve`) 상태가 나온다. Neovim 0.12 미만이면 오류로 표시된다(`install.ps1`의 점검과 `kb.py doctor`도 0.12를 최소 버전으로 본다). 상주 서버가 "놀고 있음"이면 정상이다. 다음 요청 때 뜬다.
+- 명령: Neovim에서 `:checkhealth work-kb`. 코드 루트, 볼트, 접두 키, Python, 상주 서버(`kb.py serve`) 상태가 나온다.
+- Neovim 0.12 미만이면 오류다(`install.ps1` 점검과 `kb.py doctor`도 같은 기준).
+- 상주 서버가 "놀고 있음"이면 정상이다. 다음 요청 때 뜬다.
 
 ### 명령이 "시간 초과"로 끝난다
 
-- 증상: `"work-kb: … 시간 초과. 다시 실행하지 않았습니다. *work-kb* 버퍼를 보세요"` 알림이 뜨고 버퍼에 `"90초 안에 답이 없어 서버를 멈췄습니다"`가 출력된다.
-- 원인: 상주 서버의 요청 하나가 90초를 넘었다(다른 명령이 잠금을 오래 잡는 등). 서버는 끝나고, 읽기 명령(`status`·`search`·`proposals list`·`act list`)은 한 번 실행으로 다시 돌리지만 쓰기 명령(`today`·`link`)은 두 번 쓰지 않도록 다시 실행하지 않는다. (`act transitions`는 서버를 막지 않도록 처음부터 한 번 실행으로 돈다.)
-- 명령: 잠시 뒤 같은 키를 다시 누른다. 시간 초과 뒤에는 1분 재시작 제한 없이 다음 요청 때 서버가 바로 새로 뜬다. 계속되면 아래 "잠금 중 (종료 6)"을 본다.
+- 증상: `"work-kb: … 시간 초과. 다시 실행하지 않았습니다. *work-kb* 버퍼를 보세요"` 알림. 버퍼에는 `"90초 안에 답이 없어 서버를 멈췄습니다"`.
+- 원인: 상주 서버의 요청 하나가 90초를 넘었다(다른 명령이 잠금을 오래 잡는 등). 서버는 멈춘다.
+  - 읽기 명령(`status`·`search`·`proposals list`·`act list`)은 한 번 실행으로 다시 돌린다.
+  - 쓰기 명령(`today`·`link`)은 두 번 쓰지 않도록 다시 돌리지 않는다. 위 알림은 이때 뜬다.
+- 명령: 잠시 뒤 같은 키를 다시 누른다. 서버는 다음 요청 때 바로 다시 뜬다. 계속되면 아래 "잠금 중 (종료 6)"을 본다.
 
 ### `nvd`가 "daemon is not responding"
 
-- 원인: 데몬이 질문(스왑 파일 등)에서 입력을 기다린다. 개발 중에는 gitsigns 플러그인이 `git`을 시작하는 순간 헤드리스 Neovim이 멈춘 적도 있다(원인 미확인).
+- 원인: 데몬이 질문(스왑 파일 등)에서 입력을 기다린다. gitsigns가 `git`을 띄울 때 헤드리스 Neovim이 멈춘 적도 있다(원인 미확인).
 - 명령: `nvd`로 창을 열어 질문에 답한다. 안 되면 `nvd --stop --force`(저장하지 않은 수정은 사라진다) 후 `nvd`. 자세한 설명은 nvim-config의 `docs\USER_GUIDE.md` 7절.
 
 ### Python을 찾지 못한다 (`Python을 찾지 못했습니다`)
@@ -131,14 +146,18 @@
 
 ### 원자적 쓰기 재시도 실패 / 동시 편집 보호 (`파일을 바꾸지 못했습니다`, `읽은 뒤 바뀌었습니다`)
 
-- 증상: Neovim 캡처가 `"파일을 바꾸지 못했습니다"`, `"다른 프로그램이 잡고 있어 파일을 읽지 못했습니다. 쓰지 않았습니다"`, `"파일이 읽은 뒤 바뀌었습니다. 다시 시도하세요"`로 실패한다. 또는 `kb.py`가 `"다른 프로그램이 파일을 잡고 있어 쓰지 못했습니다"`(종료 6)나 `"읽은 뒤에 파일이 바뀌어 쓰지 않았습니다"`(종료 1)로 끝난다.
-- 원인: 캡처와 `kb.py` 모두 임시 파일에 쓴 뒤 교체(원자적 쓰기)를 최대 8회 재시도한다. 다른 프로그램(백신·동기화·편집기)이 파일을 계속 잡고 있으면 재시도 뒤 실패하고, 읽은 뒤 교체 직전에 디스크 내용이 바뀌면 사람 편집을 덮지 않도록 쓰기를 중단한다.
-- 명령: 파일을 잡고 있는 프로그램이나 열린 편집기의 저장 상태를 확인한 뒤 잠시 뒤 다시 시도한다. (실패한 `.tmp` 임시 파일은 자동으로 지워진다.)
+- 증상:
+  - Neovim 캡처: `"파일을 바꾸지 못했습니다"`, `"다른 프로그램이 잡고 있어 파일을 읽지 못했습니다. 쓰지 않았습니다"`, `"파일이 읽은 뒤 바뀌었습니다. 다시 시도하세요"`
+  - `kb.py`: `"다른 프로그램이 파일을 잡고 있어 쓰지 못했습니다"`(종료 6), `"읽은 뒤에 파일이 바뀌어 쓰지 않았습니다"`(종료 1)
+- 원인: 캡처와 `kb.py`는 임시 파일에 쓴 뒤 바꿔 넣는다. 파일이 잡혀 있으면 몇 번 다시 시도한다.
+  - 백신·동기화·편집기가 파일을 계속 잡고 있으면 끝내 실패한다.
+  - 읽은 뒤 내용이 바뀌었으면 사람 편집을 덮지 않도록 쓰지 않는다.
+- 명령: 파일을 잡은 프로그램과 열린 편집기의 저장 상태를 확인하고 잠시 뒤 다시 한다. 남은 `.tmp` 임시 파일은 자동으로 지워진다.
 
 ### 캐시 잠김 (`jira/.cache.sqlite` 사용 중)
 
-- 증상: `sync`·`search`가 `"캐시를 다른 프로그램이 쓰고 있습니다"`(`database is locked`) 또는 종료 6.
-- 원인: 다른 `sync`가 쓰는 중이거나 DB 도구·동기화 프로그램이 sqlite 파일을 잡고 있다(`search`의 캐시 읽기 잠금도 종료 6으로 끝난다).
+- 증상: `sync`·`search`가 `"캐시를 다른 프로그램이 쓰고 있습니다"`(종료 6).
+- 원인: 다른 `sync`가 쓰는 중이거나, DB 도구·동기화 프로그램이 sqlite 파일을 잡고 있다.
 - 명령: 다른 작업이 끝난 뒤 `python scripts/kb.py sync`. 여전히 안 되면 `jira/.cache.sqlite*`는 캐시일 뿐이므로 `_trash/`로 옮기고 `python scripts/kb.py sync --full`로 다시 만든다(삭제하지 말고 옮긴다).
 
 ## outbox
@@ -150,8 +169,12 @@
 
 ### `uncertain` (결과를 모름)
 
-- 증상: `kb.py status`에 `"불확실 N개"`가 나오거나 `act list`에 `uncertain`이 보인다. 일반 flush는 건너뛴다.
-- 원인: 요청이 서버에 닿은 뒤 응답을 못 받았거나(타임아웃·끊김), 응답 형태가 이상했거나(HTML, id 없음), 전송 중 프로세스가 중단됐다(`sending`이 오래 남거나 시작한 프로세스가 죽음). 이미 올라갔을 수 있다. `--retry-uncertain`으로 다시 보낼 때 429·5xx·네트워크 오류가 나도 시도 횟수와 상관없이 `failed`가 되지 않고 `uncertain`으로 남는다.
+- 증상: `kb.py status`에 `불확실 N개`, `act list`에 `uncertain`. 일반 flush는 건너뛴다.
+- 원인: 요청이 서버에 닿았는데 결과를 모른다. 이미 올라갔을 수 있다.
+  - 응답을 못 받았다(타임아웃·끊김).
+  - 응답 형태가 이상했다(HTML, id 없음).
+  - 보내던 프로세스가 죽었거나 `sending`이 오래 남았다.
+- `--retry-uncertain`으로 다시 보내다 429·5xx·네트워크 오류가 나면 횟수와 상관없이 `uncertain`으로 남는다(`failed`가 되지 않는다).
 - 명령: **먼저 Jira에서 그 댓글·전환이 실제로 있는지 확인한다.** 없으면 `python scripts/kb.py act flush --retry-uncertain <id>`. 있으면 그대로 두고 `python scripts/kb.py sync --key KEY`로 캐시를 갱신한다.
 
 ### `failed`
@@ -161,8 +184,9 @@
 
 ### 전환 후보가 0개이거나 여러 개 / 오프라인 전환 (종료 4·3)
 
-- 원인: 이름에 맞는 전환 후보가 없거나 여럿이다(종료 4). 또는 오프라인이라 전환 목록을 조회하지 못했다(종료 3).
-- 명령: 온라인에서는 `python scripts/kb.py act transitions KEY`로 `이름 → 대상 (id)` 목록을 보고 이름 또는 id로 다시 지정한다. 오프라인 상태에서 전환 숫자 id를 알고 있으면 `python scripts/kb.py act transition KEY <id>`로 outbox에 대기(`pending`)로 넣을 수 있다(이름 전환은 목록 조회가 필요해 오프라인에서 실패한다).
+- 원인: 이름에 맞는 전환이 없거나 여럿이다(종료 4). 또는 오프라인이라 전환 목록을 받지 못했다(종료 3).
+- 명령: `python scripts/kb.py act transitions KEY`로 `이름 → 대상 (id)` 목록을 보고 이름이나 id로 다시 지정한다.
+- 오프라인: 숫자 id로 `python scripts/kb.py act transition KEY <id>`를 주면 outbox에 `pending`으로 넣는다(종료 3). 나중에 `act flush`로 나간다. 이름으로는 오프라인 전환이 안 된다.
 
 ## LLM 탐지
 
@@ -170,7 +194,11 @@
 
 - 증상: `doctor`/`init`이 "추론 켜기·끄기를 구분하지 못함"으로 알린다. 모든 작업이 서버 기본 상태로 돈다.
 - 원인: 서버가 지원하는 토글이 없거나 후보 방식이 모두 구분되지 않았다.
-- 명령: 먼저 `python scripts/kb.py doctor --redetect`로 한 번 더. 그래도 같으면 `config.local.yaml`의 해당 LLM 프로필 `detected.reasoning_toggle` 블록을 **손으로 고친다**. 서버 방식을 알면 `method`(`param`/`system_prefix`/`none`)와 켜기·끄기 값(`on_value`/`off_value`, 사전도 가능)을 직접 쓴다. 자동 탐지가 시험하지 않는 `max_reasoning_tokens`·`reasoning_budget_tokens`·`medium_effort` 방식도 이렇게 손으로만 넣는다. 저장 뒤 `python scripts/kb.py doctor`로 재검증한다. 구조는 `docs/LIVE.md`의 실제 기록(`method: param`, `param_name`, `on_value`, `off_value`)을 따른다.
+- 명령: 먼저 `python scripts/kb.py doctor --redetect`로 한 번 더. 그래도 같으면 `config.local.yaml`의 그 프로필 `detected.reasoning_toggle` 블록을 **손으로 고친다**.
+  - `method`(`param`/`system_prefix`/`none`)와 켜기·끄기 값(`on_value`/`off_value`, 사전도 가능)을 쓴다.
+  - 자동 탐지가 시험하지 않는 `max_reasoning_tokens`·`reasoning_budget_tokens`·`medium_effort` 방식도 이렇게 넣는다.
+  - 구조는 `docs/LIVE.md`의 실제 기록(`method: param`, `param_name`, `on_value`, `off_value`)을 따른다.
+  - 저장 뒤 `python scripts/kb.py doctor`로 다시 확인한다.
 
 ### `detected: pending` / 탐지 대기
 
@@ -191,8 +219,10 @@
 
 ### `inbox/` 이미지가 `raw/assets/`로 옮겨지지 않거나 사이드카가 `<이름.확장자>.md`로 생긴다
 
-- 원인: `daily/`·`inbox/`·`wiki/`의 마크다운 문서가 이미 그 `inbox/` 이미지를 링크하고 있으면 링크가 깨지지 않도록 옮기지 않는다. 또한 `inbox/<이름>.md`가 이미 사용자 노트이거나 다른 확장자 이미지의 사이드카이면 충돌을 피하려고 `inbox/<이름.확장자>.md`에 사이드카를 만든다.
-- 명령: 정상 동작이므로 그대로 둔다. 이미지와 사이드카를 함께 옮기려면 먼저 문서 안의 링크를 고친다.
+- 원인: 정상 동작이다.
+  - `daily/`·`inbox/`·`wiki/`의 문서가 그 이미지를 링크하고 있으면 링크가 깨지지 않도록 옮기지 않는다.
+  - `inbox/<이름>.md`가 사용자 노트이거나 다른 확장자 이미지의 사이드카면 `inbox/<이름.확장자>.md`에 만든다.
+- 명령: 그대로 둔다. 이미지를 `raw/assets/`로 옮기고 싶으면 먼저 문서 안의 링크를 고친다.
 
 ## 캐시 내용
 
@@ -211,8 +241,11 @@
 ### Bases가 표시되지 않는다
 
 - 증상: `.base` 파일이 빈 화면·오류, 또는 표가 보이지 않는다.
-- 원인: Obsidian이 Bases를 지원하지 않는 오래된 버전이거나 코어 플러그인이 꺼져 있다. 정렬(`sort`) 문법은 앱 버전에 따라 다를 수 있다(DECISIONS: 사용자 확인 대기).
-- 명령: Obsidian을 업데이트하고 설정 → 코어 플러그인에서 Bases 켜기. `.base` 파일은 코드가 만들지 않는다. 파일이 없으면(볼트를 저장소와 따로 둔 경우 등) 저장소의 `jira/_views/일감.base`와 `wiki/엔티티.base` 두 파일을 볼트의 같은 경로로 복사한다. 파일은 있는데 표가 비어 있으면 `python scripts/kb.py sync`·`python scripts/kb.py link`를 실행한다. 자세한 점검 목록은 `obsidian/setup.md`. 안 되면 Bases 없이도 `jira/_views/*.md` 표로 같은 정보를 볼 수 있다.
+- 원인: Obsidian이 Bases를 지원하지 않는 오래된 버전이거나 코어 플러그인이 꺼져 있다. 정렬(`sort`) 문법은 앱 버전에 따라 다를 수 있다.
+- 명령: Obsidian을 업데이트하고 설정 → 코어 플러그인에서 Bases를 켠다.
+  - 파일이 없으면(볼트를 따로 둔 경우 등) 저장소의 `jira/_views/일감.base`와 `wiki/엔티티.base`를 볼트의 같은 경로로 복사한다. 코드는 `.base`를 만들지 않는다.
+  - 파일은 있는데 표가 비면 `python scripts/kb.py sync`·`python scripts/kb.py link`를 실행한다.
+  - 점검 목록은 `obsidian/setup.md`. Bases 없이도 `jira/_views/*.md` 표로 같은 정보를 볼 수 있다.
 
 ## 스케줄
 
