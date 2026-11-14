@@ -45,8 +45,8 @@ def _err(text: str) -> None:
 
 def _preflight() -> None:
     """표준 라이브러리만으로 Python 버전과 의존성을 확인한다(D02). 실패하면 종료 4."""
-    if sys.version_info < (3, 13):
-        _err(f"오류: Python 3.13 이상이 필요합니다 (현재 {sys.version.split()[0]}).\n")
+    if sys.version_info < (3, 14):
+        _err(f"오류: Python 3.14가 필요합니다 (현재 {sys.version.split()[0]}).\n")
         sys.exit(4)
     missing = [pkg for mod, pkg in _REQUIRED if importlib.util.find_spec(mod) is None]
     if missing:
@@ -54,7 +54,7 @@ def _preflight() -> None:
         lines.append("  설치: python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt")
         lines.append("  오프라인: .venv\\Scripts\\pip install --no-index --find-links wheels -r requirements.txt")
         if sys.version_info >= (3, 15) and "pyyaml" in missing:
-            lines.append("  Python 3.15에는 PyYAML wheel이 아직 없습니다. Python 3.14(또는 3.13)로 venv를 만드세요.")
+            lines.append("  Python 3.15에는 PyYAML wheel이 아직 없습니다. Python 3.14로 venv를 만드세요.")
         _err("\n".join(lines) + "\n")
         sys.exit(4)
 

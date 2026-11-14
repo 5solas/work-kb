@@ -205,7 +205,8 @@ def test_preflight_python_315_adds_pyyaml_hint(monkeypatch, capsys):
     assert info.value.code == 4
     err = capsys.readouterr().err
     assert "pip install -r requirements.txt" in err
-    assert "Python 3.15에는 PyYAML wheel이 아직 없습니다" in err
+    assert "Python 3.15에는 PyYAML wheel이 아직 없습니다. Python 3.14로 venv를 만드세요." in err
+    assert "3.13" not in err
 
 
 def test_preflight_without_stderr_writes_log(monkeypatch, tmp_path):
@@ -316,4 +317,14 @@ def test_preflight_old_python_exit_4(monkeypatch, capsys):
     with pytest.raises(SystemExit) as info:
         kb._preflight()
     assert info.value.code == 4
-    assert "Python 3.13 이상" in capsys.readouterr().err
+    assert "Python 3.14가 필요합니다 (현재 " in capsys.readouterr().err
+
+
+def test_preflight_rejects_313(monkeypatch, capsys):
+    # 지원 Python은 3.14 하나다(D-NV1). 3.13은 의존성이 모두 있어도 거부한다.
+    monkeypatch.setattr(sys, "version_info", (3, 13, 5, "final", 0))
+    monkeypatch.setattr(sys, "version", "3.13.5 (main) [MSC v.1943 64 bit (AMD64)]")
+    with pytest.raises(SystemExit) as info:
+        kb._preflight()
+    assert info.value.code == 4
+    assert capsys.readouterr().err == "오류: Python 3.14가 필요합니다 (현재 3.13.5).\n"
