@@ -43,6 +43,9 @@ describe("names", function()
     for _, c in ipairs(cases) do
       H.eq(n.safe_name(c[1]), c[2], vim.inspect(c[1]))
     end
+    -- 예약 이름 판정은 Python str.upper(): 점 없는 ı는 I
+    H.eq(n.safe_name("conın$"), "_conın$")
+    H.eq(n.safe_name("auxı"), "auxı", "AUXI는 예약 이름이 아니다")
   end)
 
   it("80글자 제한은 바이트가 아니라 글자", function()

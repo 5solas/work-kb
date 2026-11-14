@@ -176,7 +176,8 @@ function M.safe_name(name, max_len)
     return "_"
   end
   local first = text:match("^[^%.]*"):gsub(" +$", "")
-  if RESERVED[ascii_upper(first)] then
+  -- Python str.upper()처럼 점 없는 ı(U+0131)도 I로 본다 (예약 이름 글자 중 ASCII로 대문자가 되는 유일한 글자).
+  if RESERVED[ascii_upper((first:gsub("\196\177", "I")))] then
     return "_" .. text
   end
   return text
