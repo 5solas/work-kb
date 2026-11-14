@@ -14,7 +14,7 @@ import yaml
 from lib import core, managed
 
 BOM = b"\xef\xbb\xbf"
-_FENCE = re.compile(rb"---[ \t]*\r?")
+_FENCE = re.compile(rb"---[ \t\r]*")
 _KEY = re.compile(
     rb"""(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|([^\s#'"\-\[\]{},:?!&*|>%@`][^\r\n]*?))[ \t]*:(?:[ \t]|$)"""
 )
@@ -50,6 +50,10 @@ class _FlowMap(dict):
     pass
 
 
+class _DoubleStr(str):
+    pass
+
+
 class _Dumper(yaml.SafeDumper):
     """SafeDumper와 같되, 값 안의 목록·사전은 한 줄 흐름 형식(`[a, b]`, `{x: y}`)으로 쓴다.
 
@@ -64,6 +68,9 @@ _Dumper.add_representer(
 _Dumper.add_representer(
     _FlowMap, lambda d, v: d.represent_mapping("tag:yaml.org,2002:map", v.items(), flow_style=True)
 )
+_Dumper.add_representer(
+    _DoubleStr, lambda d, v: d.represent_scalar("tag:yaml.org,2002:str", str(v), style='"')
+)
 
 
 def _plain(value: Any) -> Any:
@@ -74,6 +81,8 @@ def _plain(value: Any) -> Any:
         return _FlowList(_plain(v) for v in value)
     if isinstance(value, (set, frozenset)):
         return _FlowList(sorted(_plain(v) for v in value))
+    if isinstance(value, str) and any(sep in value for sep in "\x85\u2028\u2029"):
+        return _DoubleStr(value)
     return value
 
 

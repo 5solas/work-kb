@@ -231,3 +231,17 @@ def test_set_fields_multiline_value_round_trip():
 def test_set_fields_ignores_body_lines():
     new = frontmatter.set_fields(JIRA, {"status": "Done"})
     assert new.endswith("status: 본문은 front matter가 아니다\n".encode("utf-8"))
+
+
+def test_set_fields_crcrlf():
+    data = b"---\r\r\ntype: project\r\r\nupdated: 2026-11-01\r\r\n---\r\r\n# KB\r\r\n"
+    out = frontmatter.set_fields(data, {"updated": "2026-11-15"})
+    assert out.count(b"---") == 2
+    assert frontmatter.parse(out)["updated"] == "2026-11-15"
+
+
+@pytest.mark.parametrize("sep", ["\x85", "\u2028", "\u2029"])
+def test_nel_roundtrip(sep):
+    value = f"배포{sep}체크"
+    out = frontmatter.set_fields(b"---\ntitle: x\n---\n", {"title": value})
+    assert frontmatter.parse(out)["title"] == value
