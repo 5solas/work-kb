@@ -100,9 +100,13 @@ def test_find_keys_obsidian_absolute_path_links_are_bracketed(text):
     assert [(m.key, m.bracketed) for m in found] == [("KB-12", True)]
 
 
-@pytest.mark.parametrize("text", ["[[jira/KB-12-설계]]", "[[docs/KB-12]]", "[[jira/KB-12.mdx]]", "jira/KB-12"])
-def test_find_keys_other_paths_are_not_bracketed(text):
-    assert [m.bracketed for m in notes.find_keys(text, ["KB"])] == [False]
+@pytest.mark.parametrize("text", ["[[jira/KB-12-설계]]", "[[docs/KB-12]]", "[[jira/KB-12.mdx]]"])
+def test_find_keys_other_wikilink_paths_excluded(text):
+    assert notes.find_keys(text, ["KB"]) == []
+
+
+def test_find_keys_plain_path_is_not_bracketed():
+    assert [m.bracketed for m in notes.find_keys("jira/KB-12", ["KB"])] == [False]
 
 
 @pytest.mark.parametrize(
@@ -271,3 +275,9 @@ def test_find_people_nfd():
     nfc = "- 10:00 @김철수 와 회의"
     nfd = unicodedata.normalize("NFD", nfc)
     assert notes.find_people(nfd) == ["김철수"]
+
+
+def test_find_keys_keeps_bracketed_links_and_skips_embeds():
+    text = "- [[KB-12]] [[jira/KB-13]] ![[raw/assets/KB-12-whiteboard.png]] ![[KB-14]] [[KB-15-설계]] KB-16"
+    found = notes.find_keys(text, ["KB"])
+    assert [(m.key, m.bracketed) for m in found] == [("KB-12", True), ("KB-13", True), ("KB-16", False)]

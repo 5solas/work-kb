@@ -31,6 +31,7 @@ _LINE_BREAK = re.compile(r"(?<=\n)|(?<=\r)(?!\r*\n)")
 # Obsidian 절대 경로 링크 `[[jira/KEY-1]]`(D64)의 키 앞부분
 _JIRA_PATH_PREFIX = "[[jira/"
 WIKILINK_RE = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|[^\]]*)?\]\]")
+WIKILINK_SPAN_RE = re.compile(r"!?\[\[(?:(?!\]\]).)*\]\]")
 IMAGE_EMBED_RE = re.compile(r"!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]")
 
 VIEW_COLUMNS = ("키", "제목", "상태", "담당", "마감", "갱신")
@@ -222,8 +223,18 @@ def _closes_link(after: str) -> bool:
     return after.startswith(("]]", "|", "#"))
 
 
+def wikilink_spans(text: str) -> list[tuple[int, int]]:
+    if "[[" not in text:
+        return []
+    return [(m.start(), m.end()) for m in WIKILINK_SPAN_RE.finditer(text)]
+
+
+def inside_spans(spans: list[tuple[int, int]], start: int, end: int) -> bool:
+    return any(s <= start and end <= e for s, e in spans)
+
+
 def find_keys(text: str, project_keys: list[str] | tuple[str, ...]) -> list[KeyMatch]:
-    """프로젝트 키의 Jira 키를 찾는다. URL·인라인 코드 안은 제외.
+    """프로젝트 키의 Jira 키를 찾는다. URL·인라인 코드·임베드·비-키 위키링크 안은 제외.
 
     bracketed: `[[KEY-1]]`·`[[KEY-1|별칭]]`·`[[KEY-1#제목]]`, 그리고 Obsidian 절대 경로 링크
     `[[jira/KEY-1]]`·`[[jira/KEY-1.md]]`(뒤에 `|별칭`·`#제목` 가능, D64).
@@ -232,16 +243,22 @@ def find_keys(text: str, project_keys: list[str] | tuple[str, ...]) -> list[KeyM
     if pattern is None:
         return []
     masked = _masked(text)
+    spans = wikilink_spans(masked)
     found: list[KeyMatch] = []
     for match in pattern.finditer(masked):
         start, end = match.start(), match.end()
         after = masked[end:end + 5]
-        if masked[max(0, start - 2):start] == "[[":
+        if masked[max(0, start - 2):start] == "[[" and masked[max(0, start - 3):start] != "![[":
             bracketed = _closes_link(after)
-        elif masked[max(0, start - len(_JIRA_PATH_PREFIX)):start] == _JIRA_PATH_PREFIX:
+        elif (
+            masked[max(0, start - len(_JIRA_PATH_PREFIX)):start] == _JIRA_PATH_PREFIX
+            and masked[max(0, start - len(_JIRA_PATH_PREFIX) - 1):start] != "!" + _JIRA_PATH_PREFIX
+        ):
             bracketed = _closes_link(after[3:] if after.startswith(".md") else after)
         else:
             bracketed = False
+        if any(s <= start and end <= e and (masked[s] == "!" or not bracketed) for s, e in spans):
+            continue
         found.append(KeyMatch(start, end, match.group(0), bracketed))
     return found
 

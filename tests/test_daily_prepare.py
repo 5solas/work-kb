@@ -672,3 +672,14 @@ def test_nfd_record_heading(cfg, vault):
     assert notes.section_span(data, "기록") is not None
     out = daily_prepare.ensure_skeleton(data)
     assert unicodedata.normalize("NFC", out.decode("utf-8")).count("## 기록") == 1
+
+
+def test_carryover_task_with_keyed_embed(cfg, vault):
+    _write(
+        _daily(vault, "2026-11-14"),
+        "## 기록\n- [ ] 개인: ![[raw/assets/KB-12-whiteboard.png]] 정리\n- [ ] [[docs/KB-12]] 문서 검토\n",
+    )
+    daily_prepare.run(cfg, dt.date(2026, 11, 15))
+    carry = "\n".join(_region(_daily(vault, "2026-11-15").read_bytes(), "carryover"))
+    assert "KB-12-whiteboard.png" in carry
+    assert "docs/KB-12" in carry

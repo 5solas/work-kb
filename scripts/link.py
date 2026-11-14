@@ -41,7 +41,6 @@ MAX_TEXT = 120
 MANAGED_DIRS = (("jira",), ("wiki", "projects"), ("wiki", "people"))
 STUB_KEY = re.compile(r"^([A-Z][A-Z0-9_]+)-([0-9]+)$")
 
-_WIKILINK_SPAN = re.compile(r"!?\[\[(?:(?!\]\]).)*\]\]")
 _BULLET = re.compile(r"^(?:[-*+]|>|#{1,6})\s+")
 _CHECKBOX = re.compile(r"^\[[ xX>]\]\s+")
 _INBOX_STAMP = re.compile(r"^(\d{4})-?(\d{2})-?(\d{2})(?:-(\d{2})(\d{2}))?")
@@ -152,21 +151,18 @@ def _context(cfg: Config) -> _Ctx:
 
 
 def _wikilink_spans(text: str) -> list[tuple[int, int]]:
-    if "[[" not in text:
-        return []
-    return [(m.start(), m.end()) for m in _WIKILINK_SPAN.finditer(text)]
+    return notes.wikilink_spans(text)
 
 
 def _inside(spans: list[tuple[int, int]], start: int, end: int) -> bool:
-    return any(s <= start and end <= e for s, e in spans)
+    return notes.inside_spans(spans, start, end)
 
 
 def _line_keys(text: str, ctx: _Ctx) -> list[notes.KeyMatch]:
     """언급으로 칠 키. `[[KEY-1]]`이거나 다른 위키링크 내부가 아닌 맨 글자 키."""
     if not ctx.key_re.search(text):
         return []
-    spans = _wikilink_spans(text)
-    return [m for m in notes.find_keys(text, ctx.project_keys) if m.bracketed or not _inside(spans, m.start, m.end)]
+    return notes.find_keys(text, ctx.project_keys)
 
 
 def _normalizable(text: str, match: notes.KeyMatch, spans: list[tuple[int, int]]) -> bool:
