@@ -17,12 +17,14 @@ install.ps1은 이제 venv, 사용자 환경 변수 WORK_KB_ROOT, 읽기 전용 
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import sysconfig
 import time
 import uuid
 from pathlib import Path
@@ -55,7 +57,7 @@ with open(LOG, "a", encoding="utf-8") as f:
 if sys.argv[1] == "nvim" and sys.argv[2:] == ["--version"]:
     print("NVIM v" + os.environ.get("STUB_NVIM_VERSION", "0.12.6"))
     print("Build type: Release")
-# uv venv 흉내: 작업 트리 .venv의 런처(python.exe)를 복사해 Python 3.14 가상환경처럼 보이게 한다 (설치는 없음)
+# uv venv 흉내: 시험을 돌리는 인터프리터의 venv 런처를 복사해 Python 3.14 가상환경처럼 보이게 한다 (설치는 없음)
 if sys.argv[1] == "uv" and sys.argv[2:3] == ["venv"] and os.environ.get("STUB_PYTHON_LAUNCHER"):
     venv = sys.argv[-1]
     os.makedirs(os.path.join(venv, "Scripts"), exist_ok=True)
@@ -197,31 +199,43 @@ def _steps(out: str) -> dict[str, str]:
     return {m.group(1): m.group(2) for m in re.finditer(r"(?m)^STEP (\S+) (\S+)", out)}
 
 
-def _real_venv_launcher() -> tuple[Path, Path]:
-    src = ROOT / ".venv"
-    launcher, cfg = src / "Scripts" / "python.exe", src / "pyvenv.cfg"
-    if not (launcher.is_file() and cfg.is_file()):
-        pytest.skip("작업 트리에 .venv가 없음 (런처를 빌려 올 수 없음)")
-    return launcher, cfg
+def _venv_launcher() -> Path:
+    """시험을 돌리는 인터프리터(sys.base_prefix)의 venv 런처. `python -m venv`가 Scripts\\python.exe로 복사하는 파일."""
+    launcher = Path(sys.base_prefix) / "Lib" / "venv" / "scripts" / "nt" / "venvlauncher.exe"
+    if not launcher.is_file():
+        pytest.skip(f"{sys.base_prefix}에 venv 런처(Lib\\venv\\scripts\\nt\\venvlauncher.exe)가 없음")
+    return launcher
 
 
-def _fake_venv(env: Env, version: str, packages: bool = True) -> None:
-    """작업 트리 .venv의 런처(python.exe)와 pyvenv.cfg를 복사해 만든 가짜 .venv (설치하지 않는다).
+def _pyvenv_cfg(version: str) -> str:
+    return f"home = {sys.base_prefix}\ninclude-system-site-packages = false\nversion = {version}\n"
 
-    packages=True면 .pth 한 줄로 작업 트리 .venv의 site-packages를 보이게 한다: pip과 requirements.txt의
-    패키지가 "이미 설치된" 상태가 된다 (install.ps1의 의존성 확인이 통과한다). False면 빈 venv다.
+
+def _site_packages_with_pip() -> Path:
+    """시험을 돌리는 인터프리터의 site-packages. pip가 없으면 이유를 적고 건너뛴다."""
+    if importlib.util.find_spec("pip") is None:
+        pytest.skip(f"{sys.executable}에 pip가 없음: install.ps1의 의존성 확인(pip install --no-index)을 흉내 낼 수 "
+                    "없다. 개발 venv는 `uv venv --seed`로 만든다")
+    return Path(sysconfig.get_paths()["purelib"])
+
+
+def _fake_venv(env: Env, version: str, packages: bool = False) -> None:
+    """시험을 돌리는 인터프리터로 만든 가짜 .venv: venv 런처 + pyvenv.cfg (설치하지 않는다).
+
+    packages=True면 .pth 한 줄로 그 인터프리터의 site-packages를 보이게 한다: pip과 requirements.txt의
+    패키지가 "이미 설치된" 상태가 된다 (install.ps1의 의존성 확인이 통과한다). pip가 없으면 건너뛴다.
+    False면 빈 venv다 (pip 없이 돈다).
     """
-    launcher, cfg_path = _real_venv_launcher()
+    launcher = _venv_launcher()
+    site_src = _site_packages_with_pip() if packages else None
     dst = env.repo / ".venv" / "Scripts"
     dst.mkdir(parents=True)
     shutil.copy(launcher, dst / "python.exe")
-    cfg = cfg_path.read_text(encoding="utf-8")
-    cfg = re.sub(r"(?m)^(version(?:_info)?\s*=\s*)\S+", lambda m: m.group(1) + version, cfg)
-    (env.repo / ".venv" / "pyvenv.cfg").write_text(cfg, encoding="utf-8")
-    if packages:
+    (env.repo / ".venv" / "pyvenv.cfg").write_text(_pyvenv_cfg(version), encoding="utf-8")
+    if site_src is not None:
         site = env.repo / ".venv" / "Lib" / "site-packages"
         site.mkdir(parents=True)
-        (site / "borrowed.pth").write_text(str(ROOT / ".venv" / "Lib" / "site-packages") + "\n", encoding="utf-8")
+        (site / "borrowed.pth").write_text(str(site_src) + "\n", encoding="utf-8")
 
 
 @pytest.fixture
@@ -469,7 +483,7 @@ def test_full_install_with_nvim_config_present_never_touches_it(shell, env):
     neovide = env.roaming / "neovide"
     neovide.mkdir()
     (neovide / "config.toml").write_bytes(b"# nvim-config's own\n")
-    _fake_venv(env, "3.14.0")
+    _fake_venv(env, "3.14.0", packages=True)
     guarded = (env.config, neovide)
     before = env.snapshot(*guarded)
     code, out = env.run(shell, "install.ps1")
@@ -589,7 +603,7 @@ def test_offline_uv_has_no_download_flags(env):
 
 
 def test_venv_existing_good_is_kept(env):
-    _fake_venv(env, "3.14.0")
+    _fake_venv(env, "3.14.0", packages=True)
     code, out = env.run("ps51", "install.ps1", "-Only", "venv")
     assert code == 0, out
     assert _steps(out) == {"venv": "ok"} and "kb.py --help works, requirements satisfied" in out, out
@@ -599,7 +613,7 @@ def test_venv_existing_good_is_kept(env):
 
 def test_venv_existing_but_missing_packages_is_not_reported_ok(env):
     """kb.py --help는 표준 라이브러리만으로 돈다. 패키지가 빠진 venv를 'ok'로 넘기면 안 된다 (git pull 뒤 재실행)."""
-    _fake_venv(env, "3.14.0", packages=False)
+    _fake_venv(env, "3.14.0")
     wheels = env.base / "empty wheels"
     wheels.mkdir()
     code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Offline", "-WheelsDir", str(wheels))
@@ -631,7 +645,9 @@ def test_venv_wrong_version_without_yes_is_left_alone(env):
 
 def test_created_venv_is_recorded_and_removed_only_with_remove_venv(env):
     """uv 대역이 가짜 venv를 만든다. pip는 그 venv에 없으므로 설치는 실패하지만(네트워크 없음) 만든 사실은 기록된다."""
-    launcher, cfg = _real_venv_launcher()
+    launcher = _venv_launcher()
+    cfg = env.base / "template-pyvenv.cfg"
+    cfg.write_text(_pyvenv_cfg("3.14"), encoding="utf-8")
     wheels = env.base / "empty wheels"
     wheels.mkdir()
     code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Offline", "-WheelsDir", str(wheels),
