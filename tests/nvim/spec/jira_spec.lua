@@ -415,8 +415,8 @@ describe("jira", function()
     jira().comment()
     rec.settle()
     H.eq(rec.args(), {
-      act(vault, "comment", "KB-12", "--body", "고친 댓글 😀"),
-      act(vault, "comment", "OPS-3", "--body", "OPS-3 배포 완료"),
+      act(vault, "comment", "KB-12", "--body=고친 댓글 😀"),
+      act(vault, "comment", "OPS-3", "--body=OPS-3 배포 완료"),
     })
     fresh()
   end)
@@ -558,8 +558,8 @@ describe("jira", function()
     end, "담당자가 비었습니다")
     rec.settle()
     H.eq(rec.args(), {
-      act(vault, "assign", "KB-12", "kim.cs"),
-      act(vault, "worklog", "KB-12", "1h30m", "--comment", "배포 준비 😀"),
+      act(vault, "assign", "--", "KB-12", "kim.cs"),
+      act(vault, "worklog", "KB-12", "1h30m", "--comment=배포 준비 😀"),
       act(vault, "worklog", "KB-12", "45m"),
       act(vault, "worklog", "KB-12", "2h"),
     })
@@ -615,9 +615,9 @@ describe("jira", function()
     local status = { args = { "status", "--root", vault, "--json" }, buffer = "*work-kb-status-json*" }
     H.eq(rec.calls, {
       status,
-      { args = act(vault, "create", "OPS", "--summary", "새 대시보드", "--type", "Bug", "--yes"), buffer = "*work-kb-jira*" },
+      { args = act(vault, "create", "OPS", "--summary=새 대시보드", "--type=Bug", "--yes"), buffer = "*work-kb-jira*" },
       status,
-      { args = act(vault, "create", "KB", "--summary", "요약", "--type", "Task", "--description", "설명 한 줄", "--yes"), buffer = "*work-kb-jira*" },
+      { args = act(vault, "create", "KB", "--summary=요약", "--type=Task", "--description=설명 한 줄", "--yes"), buffer = "*work-kb-jira*" },
       status,
     })
     -- 빈 요약·빈 유형
@@ -652,7 +652,7 @@ describe("jira", function()
     H.ui_stub({ { "select", "web" }, { "input", "요약" }, { "select", "Task" }, { "input", "" }, { "confirm", true } })
     jira().create()
     rec.settle()
-    H.eq(rec.calls[#rec.calls].args, act(vault, "create", "WEB", "--summary", "요약", "--type", "Task", "--yes"))
+    H.eq(rec.calls[#rec.calls].args, act(vault, "create", "WEB", "--summary=요약", "--type=Task", "--yes"))
     -- status가 실패해도 직접 입력
     H.fake_spawn(function(call)
       if call.argv[1] == "status" then
@@ -737,7 +737,7 @@ describe("jira", function()
     local rec = record_runs()
     H.fake_spawn(function(call)
       local a = call.argv
-      if a[1] == "sync" and vim.tbl_contains(a, "--jql") then
+      if a[1] == "sync" and a[#a]:match("^%-%-jql=") then
         return "KB-12 캐시 동기화\n", 0
       elseif a[1] == "today" then
         return "KB-12 제안\n", 0
@@ -756,7 +756,7 @@ describe("jira", function()
     end, "JQL이 비었습니다")
     H.eq(prompt_list(stub), { "JQL: " })
     H.eq(rec.calls, {
-      { args = { "sync", "--root", vault, "--jql", jql }, buffer = "*work-kb-jql*" },
+      { args = { "sync", "--root", vault, "--jql=" .. jql }, buffer = "*work-kb-jql*" },
       { args = { "sync", "--root", vault }, buffer = "*work-kb-sync*" },
       { args = act(vault, "flush"), buffer = "*work-kb-jira*" },
       { args = { "today", "--root", vault, "--check-done" }, buffer = "*work-kb-check-done*" },
@@ -800,6 +800,61 @@ describe("jira", function()
       "work-kb: 완료 전환 제안 실패 (종료 3: 네트워크)",
     })
     H.ok(vim.tbl_contains(stub.shown, proc().get_buffer("*work-kb-sync*")))
+  end)
+
+  it("passes every free-text option value with =", function()
+    -- `-`로 시작하는 글도 argparse가 값으로 읽게: 자유 글 옵션은 `--옵션=값` 한 인수, 위치 인수 앞에는 `--`
+    fresh()
+    local vault = H.with_vault({ python = H.python() })
+    stub_open()
+    local rec = record_runs()
+    H.fake_spawn(function(call)
+      if call.argv[1] == "status" then
+        return STATUS_JSON, 0
+      end
+      return "", 0
+    end)
+    scratch("KB-12 작업", "작업")
+    H.ui_stub({
+      { "input", "-h 댓글" },
+      { "input", "-hong" },
+      { "input", "1h" },
+      { "input", "--리뷰" },
+      { "select", "KB" },
+      { "input", "-긴급 요약" },
+      { "select", "-Task" },
+      { "input", "->설명" },
+      { "confirm", true },
+      { "input", "-project = KB" },
+    })
+    local j = jira()
+    j.comment()
+    j.assign()
+    j.worklog()
+    j.create()
+    j.query()
+    rec.settle()
+    H.eq(rec.args(), {
+      act(vault, "comment", "KB-12", "--body=-h 댓글"),
+      act(vault, "assign", "--", "KB-12", "-hong"),
+      act(vault, "worklog", "KB-12", "1h", "--comment=--리뷰"),
+      { "status", "--root", vault, "--json" },
+      act(vault, "create", "KB", "--summary=-긴급 요약", "--type=-Task", "--description=->설명", "--yes"),
+      { "sync", "--root", vault, "--jql=-project = KB" },
+    })
+    -- 옵션 뒤에 자유 글이 따로 오는 인수가 없다
+    for _, args in ipairs(rec.args()) do
+      for i, a in ipairs(args) do
+        if a:match("^%-%-[a-z]") and not a:find("=", 1, true) then
+          local nxt = args[i + 1]
+          H.ok(
+            a == "--root" or a == "--yes" or a == "--json" or a == "--from-line" or a == "--from" or nxt == nil,
+            "값이 따로 오는 옵션: " .. a .. " " .. tostring(nxt)
+          )
+        end
+      end
+    end
+    fresh()
   end)
 
   it("jira-act-exit-messages: 0 완료, 3 outbox에 남김, 2 인증, 그 밖은 이유와 버퍼", function()
