@@ -25,6 +25,7 @@ JSON_KEYS = {
     "images",
     "images_gave_up",
     "compile_gave_up",
+    "jira",
     "llm",
     "lock",
     "problems",
@@ -400,3 +401,9 @@ def test_unprocessed_images_uses_sidecar_for(vault):
         "## 기록\n- ![[raw/assets/shot.png]]\n- ![[raw/assets/shot.jpg]]\n", encoding="utf-8"
     )
     assert status.unprocessed_images(config.load(vault)) == 2
+
+
+def test_json_has_project_keys(vault, capsys):
+    _write_local(vault, {"environment": "home", "jira": {"project_keys": ["KB", "OPS"]}})
+    info = json.loads(_json_out(vault, capsys))
+    assert info["jira"]["project_keys"] == ["KB", "OPS"]

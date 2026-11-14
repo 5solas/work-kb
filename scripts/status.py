@@ -310,7 +310,7 @@ def lock_holder(root: Path) -> str | None:
 
 def collect(cfg: Config) -> dict[str, Any]:
     """상태 사전. 키: environment, local_config, vault, agent, today, last_sync, confluence, outbox,
-    proposals, images, images_gave_up, compile_gave_up, llm, lock, problems."""
+    proposals, images, images_gave_up, compile_gave_up, jira, llm, lock, problems."""
     problems: list[str] = []
     day = core.now(cfg.tz).date()
     daily = notes.daily_path(cfg, day)
@@ -327,6 +327,7 @@ def collect(cfg: Config) -> dict[str, Any]:
         "images": unprocessed_images(cfg),
         "images_gave_up": images_gave_up(cfg, problems),
         "compile_gave_up": compile_gave_up(cfg, problems),
+        "jira": {"project_keys": list(cfg.project_keys)},
         "llm": llm_info(cfg, problems),
         "lock": lock_holder(cfg.root),
         "problems": problems,
