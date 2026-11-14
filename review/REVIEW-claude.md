@@ -14,17 +14,17 @@
 
 ## 검증 결과
 
-명령은 저장소 루트에서 실행했다. `.venv`=Python 3.14.10, `.venv313`=3.13.18 (`uv venv`로 생성, `requirements-dev.txt`+분석 도구 설치).
+명령은 저장소 루트에서 실행했다. `.venv`=Python 3.14.10, `.venv313`=3.13.18 (3.14 단일 대상으로 범위 밖) (`uv venv`로 생성, `requirements-dev.txt`+분석 도구 설치).
 
 | 수단 | 명령 | 결과 | 요약 |
 |---|---|---|---|
 | 기본 테스트 3.14 | `.venv\Scripts\python -m pytest -q -p no:randomly` | 5 failed, 2165 passed, 2 skipped (560초) | 실패 5개 모두 pip 없는 `.venv` 때문(C-55). pip 설치 뒤 5개 재실행 3회 모두 통과 |
-| 기본 테스트 3.13 | `.venv313\Scripts\python -m pytest -q -p no:randomly` | 5 failed, 2165 passed, 2 skipped (527초) | 같은 5개, 같은 원인 |
+| 기본 테스트 3.13 (3.14 단일 대상으로 범위 밖) | `.venv313\Scripts\python -m pytest -q -p no:randomly` | 5 failed, 2165 passed, 2 skipped (527초) | 같은 5개, 같은 원인 |
 | 병렬 | `pytest -q -n auto` (3.14) | 2170 passed, 2 skipped (91초) | 순서 의존·공유 상태 문제 없음 |
 | perf / demo / packaging | `pytest -q -m perf` / `-m demo` / `-m packaging` | 1 / 5 / 3 passed | 모두 통과 |
 | 커버리지 | `pytest -q --cov=scripts --cov-branch --cov-report=term-missing` | 2170 passed, 2 skipped (520초). 문장 87%, 분기 4810 중 605 놓침 | 아래 C-56 |
 | cp949·PYTHONUTF8=0 | `chcp 949 && set PYTHONUTF8=0 && pytest tests/test_cli_encoding.py test_kb_dispatch test_serve test_search test_status test_daily_prepare test_link test_nvim` | 176 passed (83초) | `test_nvim.py` 포함. cp949 콘솔에서도 UTF-8 출력·한글 경로 정상. 서브에이전트도 cp949 로캘에서 명령 6개 출력 확인 |
-| 안정성 | 실패 5개를 `.venv313`(pip 없음)·`.venv`(pip 있음)로 각 3회 | 3.13: 매번 같은 2개 실패(packaging), 3.14+pip: 매번 5 passed | 불안정(flaky) 아님, 결정적인 환경 의존 |
+| 안정성 | 실패 5개를 `.venv313`(pip 없음)·`.venv`(pip 있음)로 각 3회 | 3.13: 매번 같은 2개 실패(packaging) (3.14 단일 대상으로 범위 밖), 3.14+pip: 매번 5 passed | 불안정(flaky) 아님, 결정적인 환경 의존 |
 | ruff 기본 | `ruff check .` | 386건 | 사용자 전역 설정 규칙(I001·UP·FURB 등) 대부분. 실제 결함은 `wikimarkup.py:146` 죽은 변수 1건(C-57) |
 | ruff 확장 | `ruff check . --select E,F,W,B,S,SIM,PL,PTH,RUF,UP,ERA,BLE,TRY` | 약 10,700건 (S101 assert 4615, E501 4377, PLR2004 621 …) | B023 11건은 같은 반복 안에서 바로 쓰는 클로저라 오탐(`compile.py:1030` 등). S603/S607은 인수 목록 실행이라 안전. 실제 문제 없음 |
 | mypy | `mypy scripts --ignore-missing-imports --explicit-package-bases` | 70 errors / 8 files | 대부분 `dict | None` 좁히기 잡음(설정 조회 헬퍼 반환형). 실제 결함 없음 |
@@ -397,7 +397,7 @@
 
 **C-55 · `tests/test_install_script.py` (`_fake_venv`), `tests/test_packaging.py:192`, `scripts/wheels.py:253` · 개선 · 낮음**
 - 문제: 설치 시험 3개는 **작업 트리의 `.venv`** 런처와 site-packages를 빌려 쓰고, packaging 시험 2개는 `subprocess.run`만 가짜로 바꾸고 `sys.executable`의 pip 존재 검사는 실제로 한다. 그래서 pip 없는 venv(`uv venv` 기본값)나 `.venv` 없는 체크아웃에서 실패한다. 실패 출력은 "pip install failed"라 원인을 알기 어렵다.
-- 근거: 3.14·3.13 전체 실행 모두 같은 5개 실패. `.venv`에 pip를 넣은 뒤 5개 3회 연속 통과. 3.13(pip 없음)에서 packaging 2개는 3회 모두 실패.
+- 근거: 3.14·3.13 (3.14 단일 대상으로 범위 밖) 전체 실행 모두 같은 5개 실패. `.venv`에 pip를 넣은 뒤 5개 3회 연속 통과. 3.13(pip 없음)에서 packaging 2개는 3회 모두 실패 (3.14 단일 대상으로 범위 밖).
 - 제안: 가짜 venv는 pytest를 돌리는 인터프리터(`sys.base_prefix`)에서 만들고 pip 존재를 전제하면 `pytest.skip`으로 이유를 밝힌다. packaging 시험은 pip 검사 함수도 가짜로 바꾼다. README의 개발 환경 안내에 `uv venv --seed`를 적는다.
 - 수정 파일: `tests/test_install_script.py`, `tests/test_packaging.py`, `README.md`.
 
