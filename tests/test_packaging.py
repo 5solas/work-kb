@@ -49,11 +49,24 @@ def _run(command: list[str], *, cwd: Path | None = None, env: dict[str, str] | N
 
 
 def test_parse_targets():
-    assert wheels.parse_targets("3.13,3.14") == ["3.13", "3.14"]
+    assert wheels.parse_targets("3.14") == ["3.14"]
     assert wheels.parse_targets(" 3.14 , 3.14,") == ["3.14"]
     for bad in ("", "3.12", "314", "3.x", "2.7", "3.14.1"):
         with pytest.raises(core.ConfigError):
             wheels.parse_targets(bad)
+
+
+def test_default_targets_are_314_only():
+    """지원 Python은 3.14 하나다(D-NV1): 기본 대상과 도움말에 3.13이 없다."""
+    assert wheels.DEFAULT_TARGETS == ("3.14",)
+    assert "3.13" not in (wheels.__doc__ or "")
+
+
+def test_parse_targets_rejects_313():
+    for bad in ("3.13", "3.13,3.14", "3.15"):
+        with pytest.raises(core.ConfigError) as info:
+            wheels.parse_targets(bad)
+        assert "3.14" in str(info.value)
 
 
 def test_download_command_has_the_d02_flags(tmp_path):
@@ -123,7 +136,13 @@ CP314_SET = [
     "markdown-3.11.2-py3-none-any.whl",
     "keyring-25.7.0-py3-none-any.whl",
 ]
-CP313_SET = ["pyyaml-6.0.3-cp313-cp313-win_amd64.whl", "pillow-13.0.0-cp313-cp313-win_amd64.whl"]
+
+
+def _use_fake_pip(monkeypatch, pip: FakePip) -> FakePip:
+    """pip 실행과 pip 존재 검사를 둘 다 가짜로 바꾼다: 시험을 돌리는 인터프리터에 pip가 없어도 돈다."""
+    monkeypatch.setattr(wheels.subprocess, "run", pip)
+    monkeypatch.setattr(wheels, "_has_pip", lambda: True)
+    return pip
 
 
 class FakePip:
@@ -143,9 +162,8 @@ class FakePip:
             version = command[-4].split("==")[1] if "==" in command[-4] else "0"
             (dest / f"pyyaml-{version}.tar.gz").write_bytes(b"sdist")
             return subprocess.CompletedProcess(command, 0)
-        target = command[command.index("--python-version") + 1]
-        names = CP314_SET if target == "3.14" else CP313_SET + CP314_SET[2:]
-        for name in names:
+        assert command[command.index("--python-version") + 1] == "3.14"
+        for name in CP314_SET:
             if not name.startswith(self.skip):
                 (dest / name).write_bytes(name.encode("utf-8"))
         return subprocess.CompletedProcess(command, 0)
@@ -159,8 +177,8 @@ def test_dry_run_prints_commands_and_downloads_nothing(tmp_path, monkeypatch, ca
     dest = tmp_path / "한글 휠"
     assert wheels.main(["--dry-run", "--dir", str(dest)]) == 0
     out = capsys.readouterr().out
-    assert out.count("pip download") == 3  # 3.13, 3.14, sdist
-    assert "--abi cp313" in out and "--abi cp314" in out and "--no-binary pyyaml" in out
+    assert out.count("pip download") == 2  # 3.14, sdist
+    assert "--abi cp314" in out and "--no-binary pyyaml" in out and "cp313" not in out
     assert not dest.exists()
 
 
@@ -186,18 +204,16 @@ def test_wheels_cli_help_mentions_root(run_kb):
 
 
 def test_main_downloads_per_target_and_writes_manifest(tmp_path, monkeypatch, capsys):
-    pip = FakePip()
-    monkeypatch.setattr(wheels.subprocess, "run", pip)
+    pip = _use_fake_pip(monkeypatch, FakePip())
     dest = tmp_path / "한글 경로 (테스트)" / "wheels"
     assert wheels.main(["--dir", str(dest)]) == 0
-    assert [c[c.index("--abi") + 1] for c in pip.calls if "--abi" in c] == ["cp313", "cp314"]
+    assert [c[c.index("--abi") + 1] for c in pip.calls if "--abi" in c] == ["cp314"]
     assert all(c[0] == sys.executable for c in pip.calls)
     assert "pyyaml==6.0.3" in pip.calls[-1]  # sdist는 wheel과 같은 판
     manifest = (dest / "MANIFEST.txt").read_text(encoding="utf-8")
     sections = _sections(manifest)
     assert "pyyaml-6.0.3-cp314-cp314-win_amd64.whl" in sections["cp314"]
-    assert "pyyaml-6.0.3-cp314-cp314-win_amd64.whl" not in sections["cp313"]
-    assert "pyyaml-6.0.3-cp313-cp313-win_amd64.whl" in sections["cp313"]
+    assert "cp313" not in sections
     assert "sdist/pyyaml-6.0.3.tar.gz" in sections["sdist"]
     assert "누락" not in manifest
     assert re.search(r"^[0-9a-f]{64}  \d+  sdist/pyyaml-6\.0\.3\.tar\.gz$", manifest, re.M)
@@ -206,7 +222,7 @@ def test_main_downloads_per_target_and_writes_manifest(tmp_path, monkeypatch, ca
 
 
 def test_missing_package_or_sdist_failure_exits_1(tmp_path, monkeypatch):
-    monkeypatch.setattr(wheels.subprocess, "run", FakePip(skip=("keyring",), fail_sdist=True))
+    _use_fake_pip(monkeypatch, FakePip(skip=("keyring",), fail_sdist=True))
     dest = tmp_path / "w"
     with pytest.raises(core.KbError) as info:
         wheels.main(["--targets", "3.14", "--dir", str(dest)])

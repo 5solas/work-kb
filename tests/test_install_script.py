@@ -510,10 +510,19 @@ def test_check_old_nvim_and_config_without_spec(env):
     env.set_user_vars({"WORK_KB_ROOT": r"D:\elsewhere"})
     code, out = env.run("ps51", "install.ps1", "-Only", "check", extra_env={"STUB_NVIM_VERSION": "0.10.4"})
     assert code == 0 and _steps(out) == {"check": "warn"}, out
-    assert "nvim 0.10.4 < 0.11" in out
+    assert "nvim 0.10.4 < 0.12" in out
     assert "config does not load work-kb" in out and f'git -C "{env.config}" pull' in out
     assert "WORK_KB_ROOT not this repository" in out
     assert (env.config / "init.lua").read_bytes() == b"-- some other config\n"
+
+
+def test_nvim_011_is_old(env):
+    """Neovim 최소 버전은 0.12다(D-NV2, health.lua·doctor와 같음)."""
+    env.make_config()
+    env.set_user_vars({"WORK_KB_ROOT": str(env.repo)})
+    code, out = env.run("ps51", "install.ps1", "-Only", "check", extra_env={"STUB_NVIM_VERSION": "0.11.4"})
+    assert code == 0 and _steps(out) == {"check": "warn"}, out
+    assert "nvim 0.11.4 < 0.12" in out and "0.12" in out, out
 
 
 def test_check_reports_old_installer_leftovers_without_touching_them(env):
@@ -596,6 +605,19 @@ def test_venv_existing_but_missing_packages_is_not_reported_ok(env):
     code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Offline", "-WheelsDir", str(wheels))
     assert code == 1 and _steps(out) == {"venv": "failed"}, out
     assert "--no-index --find-links" in out, out  # 설치를 시도했다
+
+
+def test_venv_313_is_not_good(env):
+    """지원 Python은 3.14 하나다(D-NV1): 3.13 venv는 그대로 쓰지 않는다. 후보에도 3.13이 없다."""
+    _fake_venv(env, "3.13.5")
+    before = env.snapshot()
+    code, out = env.run("ps51", "install.ps1", "-Only", "venv")
+    assert code == 1 and _steps(out) == {"venv": "failed"}, out
+    assert ".venv is Python 3.13" in out and "3.14" in out, out
+    assert env.snapshot() == before and env.stub_calls() == []
+    code, out = env.run("ps51", "install.ps1", "-Only", "venv", "-Yes", "-WhatIf")
+    assert code == 0 and "--python 3.14" in out, out
+    assert not re.search(r"'3\.13'|'-3\.13'", INSTALL.read_text(encoding="ascii"))  # uv·py 후보에 3.13 없음
 
 
 def test_venv_wrong_version_without_yes_is_left_alone(env):

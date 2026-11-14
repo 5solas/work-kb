@@ -607,6 +607,73 @@ def test_timezone_fixed_table_fallback_is_flagged(monkeypatch):
     assert "고정 표에도 없어 OS 시간대를 씁니다" in item.text
 
 
+# ---------------------------------------------------------------- Python·편집기 (프로세스 안)
+
+
+def _python_ctx(monkeypatch, version: tuple) -> doctor.Context:
+    monkeypatch.setattr(doctor, "sys", types.SimpleNamespace(version_info=version, executable="C:/py/python.exe"))
+    ctx = doctor.Context(root_arg=None, report=doctor.Report())
+    doctor.check_python(ctx)
+    return ctx
+
+
+def test_python_313_fails(monkeypatch):
+    """지원 Python은 3.14 하나뿐이다(D-NV1). 3.13은 실패."""
+    (item,) = _python_ctx(monkeypatch, (3, 13, 5, "final", 0)).report.checks
+    assert item.state == "✗" and "3.13.5" in item.text and "Python 3.14" in item.text
+    (item,) = _python_ctx(monkeypatch, (3, 14, 2, "final", 0)).report.checks
+    assert item.state == "✓"
+    items = _python_ctx(monkeypatch, (3, 15, 0, "final", 0)).report.checks
+    assert [i.state for i in items] == ["✓", "-"]
+    assert "3.13" not in items[1].text and "3.14" in items[1].text
+
+
+def _editors(monkeypatch, version_out: str | None, *, which: dict[str, str] | None = None) -> dict[str, str]:
+    """가짜 shutil.which·subprocess.run으로 check_editors를 돌려 {이름: 글}을 돌려준다."""
+    found = which if which is not None else {"nvim": "C:/bin/nvim.exe"}
+    calls: list[list[str]] = []
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        if version_out is None:
+            raise subprocess.TimeoutExpired(command, 10)
+        return subprocess.CompletedProcess(command, 0, stdout=version_out, stderr="")
+
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: found.get(name))
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    ctx = doctor.Context(root_arg=None, report=doctor.Report())
+    doctor.check_editors(ctx)
+    if "nvim" in found:
+        assert calls == [[found["nvim"], "--version"]]
+    else:
+        assert calls == []
+    assert all(item.state == "-" for item in ctx.report.checks)  # 편집기는 정보만(실패로 치지 않는다)
+    return {item.name: item.text for item in ctx.report.checks}
+
+
+def test_editors_nvim_version_parsing(monkeypatch):
+    texts = _editors(monkeypatch, "NVIM v0.12.6\nBuild type: Release\nLuaJIT 2.1\n")
+    assert texts["Neovim"] == "C:/bin/nvim.exe, 0.12.6"
+    texts = _editors(monkeypatch, "NVIM v0.13.0-dev-123+gabc\n")
+    assert texts["Neovim"] == "C:/bin/nvim.exe, 0.13.0"
+    texts = _editors(monkeypatch, "garbage\n")  # 읽지 못하면 버전 없이 경로만
+    assert texts["Neovim"] == "C:/bin/nvim.exe"
+    texts = _editors(monkeypatch, None)  # 시간 초과도 깨지지 않는다
+    assert texts["Neovim"] == "C:/bin/nvim.exe"
+    texts = _editors(monkeypatch, "", which={})
+    assert "PATH에 없습니다" in texts["Neovim"] and "0.12 이상" in texts["Neovim"]
+    assert "찾지 못했습니다" in texts["Neovide"]
+
+
+def test_nvim_011_warns(monkeypatch):
+    """Neovim 최소 버전은 0.12다(D-NV2, health.lua·install.ps1과 같음)."""
+    texts = _editors(monkeypatch, "NVIM v0.11.4\n")
+    assert texts["Neovim"] == "C:/bin/nvim.exe, 0.11.4 → 0.12 이상이 필요합니다. Neovim을 올리세요"
+    texts = _editors(monkeypatch, "NVIM v0.12.0\n")
+    assert "필요합니다" not in texts["Neovim"]
+
+
 # ---------------------------------------------------------------- lib/net (프로세스 안)
 
 
