@@ -190,4 +190,28 @@ describe("misc", function()
     H.not_contains(text, "Failed to run healthcheck")
     vim.cmd("bwipeout!")
   end)
+
+  it("idle server is info, not warning", function()
+    H.with_vault({ python = H.python(), server = { enable = true } })
+    local state = "stopped"
+    H.patch(package.loaded, "work-kb.server", {
+      status = function()
+        return { state = state, pid = nil, last_error = state == "dead" and "시작 실패" or nil, stderr = "" }
+      end,
+    })
+    local function server_section()
+      vim.cmd("checkhealth work-kb")
+      local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+      vim.cmd("bwipeout!")
+      return text:match("상주 서버.*$") or ""
+    end
+    local idle = server_section()
+    H.contains(idle, "놀고 있음, 다음 요청 때 띄움")
+    H.not_contains(idle, "WARNING")
+    -- 죽은 서버는 그대로 경고
+    state = "dead"
+    local dead = server_section()
+    H.contains(dead, "WARNING")
+    H.contains(dead, "쓰지 못함 (dead): 시작 실패")
+  end)
 end)
