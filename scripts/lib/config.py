@@ -104,11 +104,16 @@ def _norm_host(entry: Any) -> str:
     if not isinstance(entry, str):
         return ""
     text = entry.strip()
+    try:
+        ip = ipaddress.ip_address(_strip_brackets(text))
+    except ValueError:
+        ip = None
+    if ip is not None:
+        return str(ip)
     if "/" in text or ":" in text:
         text = _hostname(text) or ""
     text = text.lower().strip(".")
-    if text.startswith("*."):
-        text = text[2:]
+    text = text.removeprefix("*.")
     return text.strip(".")
 
 
@@ -179,10 +184,25 @@ def is_public_host(url: str, blocklist: Iterable[str]) -> bool:
         ip = None
     if ip is not None:
         target_ip = getattr(ip, "ipv4_mapped", None) or ip
-        return target_ip.is_global
+        if target_ip.is_global:
+            return True
+    else:
+        target_ip = None
     for entry in blocklist:
         domain = _norm_host(entry)
-        if domain and (host == domain or host.endswith("." + domain)):
+        if not domain:
+            continue
+        if ip is not None:
+            try:
+                entry_ip = ipaddress.ip_address(domain)
+            except ValueError:
+                entry_ip = None
+            if entry_ip is not None:
+                entry_target = getattr(entry_ip, "ipv4_mapped", None) or entry_ip
+                if entry_ip == ip or entry_target == target_ip:
+                    return True
+                continue
+        if host == domain or host.endswith("." + domain):
             return True
     return False
 

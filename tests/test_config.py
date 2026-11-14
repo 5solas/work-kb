@@ -627,3 +627,11 @@ def test_save_local_takes_lock(vault, monkeypatch):
     with pytest.raises(core.LockBusy):
         config.save_local(vault, {"environment": "home"})
     assert calls
+
+
+def test_is_public_host_checks_blocklist_even_for_private_ip():
+    assert config.is_public_host("http://1.2.3.4/v1", []) is True
+    assert config.is_public_host("http://127.0.0.1:9287/v1", []) is False
+    assert config.is_public_host("http://127.0.0.1:9287/v1", ["127.0.0.1"]) is True
+    assert config.is_public_host("http://[::1]:9287/v1", ["::1"]) is True
+
