@@ -31,6 +31,7 @@ import datetime as dt
 import json
 import re
 import sys
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -148,7 +149,7 @@ def ensure_skeleton(data: bytes, rel: str = "daily/x.md") -> bytes:
             continue
         match = notes.HEADING2.match(line.text)
         if match:
-            headings.setdefault(match.group(1).strip(), line)
+            headings.setdefault(unicodedata.normalize("NFC", match.group(1).strip()), line)
 
     inserts: list[tuple[int, bytes]] = []
     for heading, region in _SECTIONS:

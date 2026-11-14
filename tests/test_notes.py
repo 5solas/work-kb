@@ -1,4 +1,5 @@
 import datetime as dt
+import unicodedata
 
 import pytest
 
@@ -264,3 +265,9 @@ def test_unclosed_frontmatter_is_body():
     lines = list(notes.iter_lines("daily/2026-11-14.md", src))
     assert lines[0].text == "---" and not lines[0].in_code
     assert any(line.text == "- [ ] 개인 할 일" and not line.in_code for line in lines)
+
+
+def test_find_people_nfd():
+    nfc = "- 10:00 @김철수 와 회의"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert notes.find_people(nfd) == ["김철수"]

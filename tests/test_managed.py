@@ -314,3 +314,12 @@ def test_strip_markers_bom_crlf_and_eof():
     assert managed.strip_markers(data) == BOM + b"A\r\nmid\r\nB\r\n"
     assert managed.strip_markers(data, drop_regions={"a", "b"}) == BOM + b"mid\r\n"
     assert managed.strip_markers(b"no markers") == b"no markers"
+
+
+def test_replace_idempotent_cr_only():
+    data = b"# t\r<!-- kb:x:start -->\r<!-- kb:x:end -->\r"
+    body = "\nitem"
+    once = managed.replace_region(data, "x", body)
+    twice = managed.replace_region(once, "x", body)
+    assert twice == once
+    assert managed.read_region(once, "x") == b"\ritem\r"

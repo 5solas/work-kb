@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -26,7 +27,7 @@ URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
 INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 # 줄 나누기: `\n`과 홀로 선 CR(뒤에 \r·\n이 없는 \r)만. str.splitlines는 \x0c·\x1c·  같은
 # 문자에서도 끊어서 사람이 붙여 넣은 줄을 둘로 쪼갠다(managed._marker_lines와 같은 규칙).
-_LINE_BREAK = re.compile(r"(?<=\n)|(?<=\r)(?![\r\n])")
+_LINE_BREAK = re.compile(r"(?<=\n)|(?<=\r)(?!\r*\n)")
 # Obsidian 절대 경로 링크 `[[jira/KEY-1]]`(D64)의 키 앞부분
 _JIRA_PATH_PREFIX = "[[jira/"
 WIKILINK_RE = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|[^\]]*)?\]\]")
@@ -165,7 +166,7 @@ def section_span(data: bytes, heading: str) -> tuple[int, int] | None:
             if start is not None:
                 end = note_line.offset
                 break
-            if match.group(1).strip() == heading.strip():
+            if unicodedata.normalize("NFC", match.group(1).strip()) == unicodedata.normalize("NFC", heading.strip()):
                 start = next_offset
                 last_nonblank_end = start
         elif start is not None and note_line.text.strip():
@@ -247,8 +248,9 @@ def find_keys(text: str, project_keys: list[str] | tuple[str, ...]) -> list[KeyM
 
 def find_people(text: str, prefix: str = "@") -> list[str]:
     """`@이름` 언급. 이메일(`a@b`)은 제외. 순서 유지, 중복 제거."""
+    normalized = unicodedata.normalize("NFC", text)
     pattern = re.compile(re.escape(prefix) + rf"({_PERSON_CHARS}+)")
-    masked = _masked(text)
+    masked = _masked(normalized)
     people: list[str] = []
     for match in pattern.finditer(masked):
         if match.start() > 0 and _EMAIL_LOCAL.search(masked[:match.start()]):

@@ -6,6 +6,7 @@ import datetime as dt
 import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ D05 = dt.date(2026, 11, 5)
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 LOCK_CHILD = r"""
 import sys
+import unicodedata
 sys.path.insert(0, sys.argv[1])
 from lib import core
 with core.kb_lock(sys.argv[2], "다른 작업"):
@@ -663,3 +665,10 @@ def test_carryover_after_fenced_heading(cfg, vault):
     daily_prepare.run(cfg, dt.date(2026, 11, 15))
     carry = _region(_daily(vault, "2026-11-15").read_bytes(), "carryover")
     assert any("할 일 B" in line for line in carry)
+
+
+def test_nfd_record_heading(cfg, vault):
+    data = unicodedata.normalize("NFD", "## 기록\n- [ ] 할 일\n").encode("utf-8")
+    assert notes.section_span(data, "기록") is not None
+    out = daily_prepare.ensure_skeleton(data)
+    assert unicodedata.normalize("NFC", out.decode("utf-8")).count("## 기록") == 1
