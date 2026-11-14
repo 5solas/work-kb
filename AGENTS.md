@@ -76,18 +76,18 @@ compile과 ingest는 daily, inbox, raw를 바이트 그대로 둔다. 그 밖의
 
 ## 작업 스키마
 
-B단계(compile·ingest)의 입력과 출력. 출력은 **JSON 객체 하나만**, 다른 글 없이. 모든 문장에는 출처(입력에서 받은 줄 id 또는 Jira 키)가 있어야 한다. 모르면 빈 값으로 둔다.
+B·C단계(compile·ingest·lint --llm)의 입력과 출력. 출력은 **JSON 객체 하나만**, 다른 글 없이. 모든 문장에는 출처(입력에서 받은 줄 id 또는 Jira 키)가 있어야 한다. 모르면 빈 값으로 둔다.
 
 | 작업 | 입력 | 출력 JSON |
 |---|---|---|
-| T1 tag | `## 기록` 줄들(id 포함) + 고정 태그 10개 | `{"tags": {"<id>": "결정"}}` (줄마다 태그 하나, 목록에 있는 것만) |
-| T2 decisions | 하루치 `## 기록`(사이드카 추출문 포함, 줄 id) + 관련 Jira 캐시 요약 | `{"decisions": [{"title": "", "content": "", "rationale": "", "related": ["KB-12", "@김철수"], "source_line": "<id>"}], "actions": [{"text": "", "related": [], "source_line": "<id>"}]}` |
-| T3 entity_summary | 현재 `summary` + 새 언급 줄(id) + (프로젝트) 미완료 일감 표 | `{"summary": "3~5문장", "sources": ["<id>", "KB-12"]}` |
-| T4 topic_proposal | 최근 2주 기록 전문(id) + 기존 topics | `{"proposals": [{"name": "", "why": "", "sample_sources": ["<id>"], "merge_with": "기존 주제 또는 null"}]}` |
-| T5 contradictions | 엔티티 summary + 관련 decisions | `{"conflicts": [{"a": "<출처>", "b": "<출처>", "why": ""}]}` |
-| T6 image_ingest | 이미지 1장 + 힌트(파일명, 같은 줄 텍스트) | `{"kind": "screenshot\|photo\|document", "text": "읽은 글 전체", "summary": "", "jira_keys": ["KB-12"], "people": ["김철수"]}` |
+| T1 tag | `## 기록` 줄들(id·날짜 포함) + 고정 태그 10개 | `{"tags": {"<id>": "결정"}}` (줄마다 태그 하나, 목록에 있는 것만) |
+| T2 decisions | 하루치 `## 기록`(사이드카 추출문 포함, 줄 id) + 관련 Jira 캐시 요약(참고용) | `{"decisions": [{"title": "", "content": "", "rationale": "", "related": ["KB-12", "@김철수"], "source_line": "<id>"}], "actions": [{"text": "", "related": [], "source_line": "<id>"}]}` |
+| T3 entity_summary | 현재 `summary`(있으면 `[S1]`) + 새 언급 줄(id) + (프로젝트) 미완료 일감 표 | `{"summary": "3~5문장", "sources": ["<id>", "KB-12"]}` |
+| T4 topic_proposal | 최근 2주 기록 전문(id·날짜) + 기존 topics(별칭 포함) | `{"proposals": [{"name": "", "why": "", "sample_sources": ["<id>"], "merge_with": "기존 주제 또는 null"}]}` |
+| T5 contradictions | 엔티티별 `summary`(`[S1]`) + 관련 `decisions`(`[D1]` 등, `(제안)`/`(확정)`) | `{"conflicts": [{"a": "<출처>", "b": "<출처>", "why": ""}]}` |
+| T6 image_ingest | 이미지 1장 + 힌트(파일명, 같은 줄 텍스트, 프로젝트 키) | `{"kind": "screenshot\|photo\|document", "text": "읽은 글 전체", "summary": "", "jira_keys": ["KB-12"], "people": ["김철수"]}` |
 
-규칙: `source_line`·`sources`는 입력에 있던 id만. `related`의 키는 설정된 프로젝트 키만. 사람은 입력에 `@이름`으로 있던 이름만. 결정은 '제안'으로 적히며 사람이 '확정'/'기각'으로 바꾼다.
+규칙: `source_line`·`sources`·`sample_sources`·`a`·`b`는 입력에 있던 id만(T3 `sources`는 입력의 Jira 키도 가능, T5 `a`·`b`는 서로 다른 id). `related`·`jira_keys`의 키는 설정된 프로젝트 키만. 사람은 입력·이미지에 나온 이름만(T2는 `@이름`, T6은 `@` 없이). 결정은 '제안'으로 적히며 사람이 '확정'/'기각'으로 바꾼다.
 
 ## 답변 규칙
 
@@ -98,7 +98,7 @@ B단계(compile·ingest)의 입력과 출력. 출력은 **JSON 객체 하나만*
 
 ## 명령
 
-세션을 시작할 때 `KB_AGENT=1`을 설정한다(PowerShell: `$env:KB_AGENT = "1"`). 명령은 저장소 루트에서 `python scripts/kb.py <명령>`으로 부른다. 전체 목록은 `python scripts/kb.py --help`, 옵션은 `python scripts/kb.py <명령> --help`.
+세션을 시작할 때 `KB_AGENT=1`을 설정한다(PowerShell: `$env:KB_AGENT = "1"`). Python 3.14 환경의 저장소 루트에서 `python scripts/kb.py <명령>`으로 부른다(`--root`가 하위 명령 앞에 와도 하위 명령 기준으로 허용 여부를 판정한다). 전체 목록은 `python scripts/kb.py --help`, 옵션은 `python scripts/kb.py <명령> --help`.
 
 에이전트가 쓸 수 있는 명령:
 
@@ -124,14 +124,15 @@ python scripts/kb.py serve
 | `status` | 마지막 동기화, 대기 outbox, 미처리 제안·이미지, 프로필별 탐지 기록, environment. 아무것도 쓰지 않는다. 연결은 확인하지 않는다(연결 점검은 `doctor`) |
 | `search "..."` | daily·inbox·wiki·jira에서 낱말 찾기(`--in`, `--limit`, `--json`) |
 | `today` | 오늘 daily 뼈대와 `today`·`carryover` 구역. `--check-done`은 완료 전환 제안만 출력(읽기) |
-| `link` | A단계. Jira 키·`@이름`을 엔티티 페이지 `mentions`에 엮는다(LLM 없음) |
+| `link` | A단계. Jira 키·`@이름`·주제(`wiki/topics/*.md`)를 엔티티 페이지 `mentions`에 엮는다(LLM 없음) |
 | `sync` | Jira 일감을 `jira/`로 받는다(Jira 읽기만) |
 | `compile` | B단계 편찬(LLM). LLM이 없으면 조용히 건너뛴다 |
 | `ingest` | B단계 이미지 읽기(비전 LLM) |
-| `lint` | C단계 점검 보고 `wiki/_lint.md` |
+| `lint` | C단계 점검 보고 `wiki/_lint.md` (`--llm`으로 T5 모순 후보 검사) |
 | `doctor` | 연결·환경 점검(`--redetect`는 거부) |
 | `act list`, `act transitions KEY` | outbox 보기, 가능한 전환 보기(읽기) |
 | `proposals list` | 주제 제안 보기 |
-| `serve` | 편집기(Neovim)가 띄워 두는 상주 서버. 빠른 명령(`status`·`search`·`today`·`link`·`proposals list`·`act list`)만 처리한다. `today`·`link`는 파일을 쓴다. 요청마다 위 거부 규칙을 똑같이 적용한다. 끝나지 않는 명령이므로 에이전트가 직접 띄울 일은 없다 |
+| `serve` | 편집기(Neovim)가 띄워 두는 상주 서버. 빠른 명령(`status`·`search`·`today`·`link`·`proposals list`·`act list`)만 처리한다. `today`·`link`는 파일을 쓴다. 요청 시간 제한은 90초이고 시간 초과 시 쓰기 명령은 다시 실행하지 않는다. `scripts/` 코드가 바뀌면 응답 뒤 종료 0한다. 요청마다 위 거부 규칙을 똑같이 적용한다. 끝나지 않는 명령이므로 에이전트가 직접 띄울 일은 없다 |
 
 `KB_AGENT=1`에서 거부되는 명령(사람만 실행한다): `init`, `act`의 쓰기(`comment`, `transition`, `assign`, `worklog`, `create`, `promote`, `flush`), `proposals accept`, `push`, `demo`, `schedule`, `wheels`, `doctor --redetect`.
+(`scripts/wheels.py` 직접 실행도 `KB_AGENT=1`을 거부한다. `act transitions`는 `serve`에서 제외되어 한 번 실행으로 돈다.)

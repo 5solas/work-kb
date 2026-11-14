@@ -3,7 +3,8 @@
 업무 메모·지식·Jira 일감을 **평범한 마크다운 폴더 하나**에서 다루는 도구 묶음이다.
 Obsidian은 열람 창, Neovim(Neovide)은 입력·명령 창, 폴더는 그대로 마크다운이다.
 
-- 설치·이식: `docs/DEPLOY.md` · 스케줄: `docs/SCHEDULING.md` · 문제 해결: `docs/TROUBLESHOOTING.md`
+- 사용법·설치(Neovim): `docs/USER-GUIDE.md` · 회사 PC 이식: `docs/DEPLOY.md` · 포장(`wheels/`): `docs/PACKAGING.md`
+- 스케줄: `docs/SCHEDULING.md` · 문제 해결: `docs/TROUBLESHOOTING.md`
 - 설계 결정과 사용자 확인 대기 목록: `docs/DECISIONS.md` · 실 모델 검증 기록: `docs/LIVE.md`
 - 에이전트 규칙: `AGENTS.md` (유일한 규칙 파일, `CLAUDE.md`는 이 파일을 읽으라는 한 줄)
 
@@ -26,9 +27,10 @@ work-kb/
 ├── config.local.yaml             환경 설정 (git 제외, kb.py init이 생성)
 ├── config.local.example.yaml     집·회사 두 예시
 ├── requirements.txt              requests, pyyaml, markdown, keyring, pillow
+├── requirements-dev.txt          pytest, hypothesis (개발·시험용)
 ├── wheels/                       오프라인 설치용 (선택, kb.py wheels)
 ├── daily/YYYY-MM-DD.md           사람이 씀
-├── inbox/                        제목 있는 긴 글, 클립, 드롭한 이미지
+├── inbox/                        제목 있는 긴 글, 클립, 드롭한 이미지·사이드카
 ├── raw/assets/                   이미지·첨부 (Obsidian 첨부 폴더)
 ├── jira/                         기계 소유 캐시 (KEY-123.md, _views/, outbox.jsonl, .cache.sqlite)
 ├── wiki/                         기계 소유 (index, projects/, people/, topics/, decisions.md, actions.md, _proposals.md, _lint.md)
@@ -66,13 +68,13 @@ date: 2026-11-05
 - 14:20 ![[raw/assets/2026-11-05-1420-whiteboard.png]] 회의 화이트보드
 ```
 
-- 캡처는 항상 `## 기록` 끝에 `- HH:MM ` 접두로 추가된다. 그 밖은 자유롭게 편집해도 된다.
-- Jira 키는 `[[KEY-123]]` 또는 맨 글자 `KEY-123`. `kb.py link`가 맨 글자를 위키링크로 정규화한다(daily를 기계가 고치는 유일한 예외, 멱등).
-- 사람은 `@이름` 접두로만 인식한다. 한국어 이름을 추정하지 않는다.
-- 이미지는 `![[raw/assets/...]]`. `kb.py ingest`가 사이드카(`같은이름.md`)에 추출 글을 쓴다. daily 본문은 바뀌지 않는다.
+- 캡처는 항상 `## 기록` 끝에 `- HH:MM ` 접두로 추가된다. 그 밖은 자유롭게 편집해도 된다. Neovim 캡처는 임시 파일 뒤 원자적으로 교체한다.
+- Jira 키는 `[[KEY-123]]`(숫자는 ASCII) 또는 맨 글자 `KEY-123`. `kb.py link`가 맨 글자를 위키링크로 정규화하고(daily를 기계가 고치는 유일한 예외, 멱등) `wiki/topics/*.md`의 `mentions`도 채운다.
+- 사람은 `@이름` 접두로만 인식한다(NFD 자모도 NFC로 맞춰 인식). 한국어 이름을 추정하지 않는다.
+- 이미지는 `![[raw/assets/...]]`. `kb.py ingest`가 사이드카에 추출 글을 쓴다. daily 본문은 바뀌지 않는다.
 - `## 오늘`의 `[x]`는 전환 **제안 목록**(`kb.py today --check-done`)에만 오른다. 자동 전환은 없다.
 - `## 기록`의 `- [ ]` 중 Jira 키 없는 줄은 개인 할 일로 다음 날 `## 이월`에 복사되고 원래 줄은 `- [>] (날짜로 이월)`이 된다.
-- 드롭한 이미지(`inbox/*.png|jpg|jpeg|webp`)는 `kb.py ingest`가 `raw/assets/`로 옮기고 사이드카를 남긴다.
+- 드롭한 이미지(`inbox/*.png|jpg|jpeg|webp`)는 `kb.py ingest`가 `raw/assets/`로 옮기고 사이드카를 남긴다. 단, `daily/`·`inbox/*.md`·`wiki/**/*.md`에서 이미 가리키는 이미지는 링크가 깨지지 않게 옮기지 않는다. 사이드카는 `inbox/<stem>.md`가 없거나 `source_image`가 이 이미지면 `inbox/<stem>.md`, 아니면 `inbox/<이름.확장자>.md`에 쓴다.
 
 ## 4. 명령 표
 
@@ -81,10 +83,10 @@ date: 2026-11-05
 
 | 명령 | 하는 일 | 주요 옵션 | 에이전트 |
 |---|---|---|---|
-| `kb.py init` | 연결 설정 마법사. 재실행하면 기존 값이 기본값 | `--dev` `--yes` `--section jira` `--non-interactive` `--from-env` `--redetect` | 거부 |
-| `kb.py doctor` | 연결·환경 점검 | `--json` `--redetect` | 허용 |
+| `kb.py init` | 연결 설정 마법사. 재실행하면 기존 값이 기본값(`--yes`는 확인 질문을 예로 처리) | `--dev` `--yes` `--section jira` `--non-interactive` `--from-env` `--redetect` | 거부 |
+| `kb.py doctor` | 연결·환경 점검 | `--json` `--redetect` | 허용(`--redetect` 거부) |
 | `kb.py today` | 오늘 daily 준비(오늘·이월 구역), 경로 출력 | `--date` `--no-carryover` `--print-path` `--check-done` `--json` | 허용 |
-| `kb.py link` | A단계: 키·`@이름`을 엔티티 페이지에 연결 (LLM 없음) | `--dry-run` `--stub` `--rebuild` `--json` | 허용 |
+| `kb.py link` | A단계: 키·`@이름`·주제를 엔티티 페이지에 연결 (LLM 없음) | `--dry-run` `--stub` `--rebuild` `--json` | 허용 |
 | `kb.py status` | 상태 요약 (네트워크 안 씀) | `--json` | 허용 |
 | `kb.py search` | daily·inbox·wiki·jira에서 낱말 검색 (공백은 AND) | `--json` `--limit` `--in wiki` | 허용 |
 | `kb.py sync` | Jira 일감을 캐시로 받기 (읽기 전용) | `--full` `--key` `--jql` `--cache` `--dry-run` | 허용 |
@@ -93,13 +95,15 @@ date: 2026-11-05
 | `kb.py ingest` | B단계: 이미지에서 글 추출 → 사이드카 (비전 LLM) | `--dry-run` `--force` | 허용 |
 | `kb.py proposals` | 주제 제안: `list` / `accept <번호\|all>` | | `list`만 |
 | `kb.py lint` | C단계: 점검 보고 `wiki/_lint.md` (항상 종료 0) | `--llm` `--json` | 허용 |
-| `kb.py push` | Confluence 개인 스페이스로 wiki 페이지 게시 | `--dry-run` `--only` | 거부 |
+| `kb.py push` | Confluence 개인 스페이스로 wiki 페이지 게시 (`http`·`https`·`mailto` 링크만 유지, 코드 밖 HTML 주석 제거) | `--dry-run` `--only` | 거부 |
 | `kb.py schedule` | 작업 스케줄러 XML과 `schtasks` 명령 생성(등록은 하지 않음) | `--print` `--xml-dir` `--company` | 거부 |
 | `kb.py wheels` | 오프라인 설치용 `wheels/` 내려받기 | `--targets` `--dir` | 거부 |
 | `kb.py demo` | 모의 서버 3개로 전체 흐름 시연 (임시 볼트) | `--keep` `--fixed-ports` | 거부 |
-| `kb.py serve` | 편집기용 상주 서버: 표준 입출력으로 JSON을 한 줄씩 주고받으며 빠른 명령(`status` `search` `today` `link` `proposals list` `act list`)만 같은 프로세스에서 실행. `today`·`link`는 파일을 쓴다. 그 밖의 명령은 거부하고 편집기가 한 번 실행으로 돌린다 | `--idle-sec` | 허용 |
+| `kb.py serve` | 편집기용 상주 서버: 표준 입출력으로 JSON을 한 줄씩 주고받으며 빠른 명령(`status` `search` `today` `link` `proposals list` `act list`)만 같은 프로세스에서 실행. `today`·`link`는 파일을 쓴다. 요청 시간 제한 90초, 시간 초과 시 쓰기 명령은 다시 실행하지 않고 실패한다. `scripts/` 코드가 바뀌면 응답 뒤 종료 0한다. 그 밖의 명령은 거부하고 편집기가 한 번 실행으로 돌린다 | `--idle-sec` | 허용 |
 
 `kb.py demo`는 `tests/`의 모의 서버를 쓴다. 회사 배포는 `tests/`를 제외하므로 **demo는 집 전용**이다.
+`kb.py act transitions`는 Jira 조회로 오래 걸릴 수 있어 `serve`에서 제외되어 한 번 실행으로 돈다.
+`kb.py sync`는 범위 밖 일감 재조회 중 403을 만나면 `/myself`로 토큰을 확인해 토큰이 정상이면 `in_scope: false`로 표시하고 나머지 동기화를 이어 간다(무효 토큰이면 종료 2).
 
 `kb.py act` 자주 쓰는 형태:
 
@@ -116,16 +120,17 @@ python scripts/kb.py act list --all
 ```
 
 `transition`·`create`·`promote`는 `--yes`가 없으면 확인을 묻는다. 워크로그 기간은 `1h30m`·`2h`·`45m` 형태만 된다.
+`act transition KEY <숫자 id>`는 오프라인 상태에서 전환 목록 조회가 네트워크 오류여도 확인 뒤 `{transition_id}`로 `pending` 큐에 넣고 종료 3으로 끝난다(이름 전환은 목록 필요로 실패). `act promote`는 대상 줄 끝에 설정된 `project_keys`의 `[[KEY-N]]`이 이미 있거나 진행 중·미연결 승격 기록이 있으면 중복 생성을 막는다.
 
 ### 종료 코드
 
 | 코드 | 의미 |
 |---|---|
 | 0 | 성공 (LLM 비활성으로 건너뛴 경우도 0) |
-| 1 | 일반 오류, 전송 실패(`failed`), 확인 거부·EOF |
+| 1 | 일반 오류, 전송 실패(`failed`), 확인 거부·EOF, 동시 편집 충돌(`ConcurrentEdit`) |
 | 2 | 인증 실패 (PAT 만료·거부) |
 | 3 | 네트워크 오류 (다운, 타임아웃, 결과 불확실 포함) |
-| 4 | 설정·사용법 오류 (설정 누락, project_keys 밖 프로젝트, 전환 후보 0개·여럿) |
+| 4 | 설정·사용법 오류 (Python 3.14 미만·패키지 누락, 설정 누락, project_keys 밖 프로젝트, 전환 후보 0개·여럿) |
 | 5 | 회사 환경에서 공개 LLM 호스트라 실행 거부 |
 | 6 | 다른 프로세스가 잠금·파일을 잡고 있음 (잠시 뒤 다시) |
 | 7 | 정책 거부 (`KB_AGENT=1` 세션에서 쓰기 계열 명령) |
@@ -133,8 +138,8 @@ python scripts/kb.py act list --all
 ## 5. 에이전트
 
 에이전트(Claude Code 등)는 `AGENTS.md`를 따르고, 세션에 `KB_AGENT=1`을 둔다. 볼트 안에서 도는 명령(`status` `search` `link` `today` 등)은 허용된다. 그중 `link`·`today` 등은 관리 구역과 허용된 daily 쓰기를 한다.
-Jira 쓰기·게시·설정 명령(`init` `act`의 쓰기 하위 명령 `proposals accept` `push` `schedule` `wheels` `demo` `doctor --redetect`)은 종료 7로 거부된다.
-에이전트는 `kb.py status`로 마지막 동기화, 대기 outbox, 미처리 제안·이미지, 프로필별 탐지 결과, environment를 먼저 본다.
+Jira 쓰기·게시·설정 명령(`init` `act`의 쓰기 하위 명령 `proposals accept` `push` `schedule` `wheels` `demo` `doctor --redetect`)은 종료 7로 거부된다(`--root`가 하위 명령 앞에 와도 하위 명령 기준으로 판정하며, `scripts/wheels.py` 직접 실행도 거부된다).
+에이전트는 `kb.py status`로 마지막 동기화, 대기 outbox(오래된 `sending`은 `uncertain`으로 표시), 미처리 제안·이미지, 프로필별 탐지 결과, environment를 먼저 본다.
 
 ## 6. Neovim
 
@@ -146,6 +151,12 @@ Neovim 쪽 일반 설정(Neovim, Neovide, 폰트, LSP, `nvd` 데몬)은 이 저�
 
 - 접두 키 전체: setup에 `prefix`를 준다. nvim-config에서는 `lua\plugins\work-kb.lua`의 `opts = { prefix = "<F8>" }`. `prefix = false`면 키를 붙이지 않는다.
 - 키 하나를 직접: `vim.keymap.set("n", "<F8>c", function() require("work-kb").call("capture") end)`. 이름은 `:WorkKb`와 같다.
+
+인수와 파일 쓰기·검색 동작:
+
+- 자유 문자열 옵션은 `--옵션=값` 형식으로, 자유 문자열 위치 인수 앞에는 `--`를 두어 `-`로 시작하는 입력이 옵션으로 해석되지 않게 한다.
+- 캡처는 임시 파일 생성·`fsync`·이름 바꾸기로 `daily`에 원자적으로 쓰며, 읽은 뒤 디스크 내용이 바뀌었으면 덮어쓰지 않는다.
+- 검색(`s`)은 `fzf-lua`(정규식, 대화형) → `rg`(구 그대로) → `kb.py search`(공백은 AND) 순으로 사용한다.
 
 ### 클립보드 요구 사항
 
@@ -173,8 +184,7 @@ LLM 설정은 `config.local.yaml`의 프로필(main, fallback 등)이다. 모두
 
 기본 `kb.py doctor`는 저장하지 않고 기록된 탐지를 프로필당 몇 번의 호출로 재검증한다. 실 모델에서 잡힌 방식의 예는 `docs/LIVE.md`.
 
-**회사 가드**: `config.local.yaml`의 `environment: company`에서 LLM 프로필 주소가 `public_hosts_blocklist`(deepinfra.com, openai.com 등 공개 클라우드 목록, `config.yaml`)에 걸리면
-`kb.py doctor`가 ✗로 막고 `kb.py compile`·`kb.py ingest`는 실행을 거부한다(종료 5). 회사 자료가 외부로 나가는 사고를 코드로 막는 장치다. 이 경우 진행하지 말고 프로필 주소를 사내 서버로 고친다(`kb.py init --section llm`).
+**회사 가드**: `config.local.yaml`의 `environment: company`에서 LLM 프로필 주소가 `public_hosts_blocklist`(deepinfra.com, openai.com 등 공개 클라우드 목록, `config.yaml`)에 걸리거나 공개 IP(`is_global`, IPv4-mapped 포함)이면 `kb.py doctor`가 ✗로 막고 `kb.py compile`·`kb.py ingest`는 실행을 거부한다(종료 5, `kb.py lint --llm`은 모순 검사를 거부하고 안내를 남긴다). 사설·루프백 IP는 차단 목록에 없을 때만 허용한다. 회사 자료가 외부로 나가는 사고를 코드로 막는 장치다. 이 경우 진행하지 말고 프로필 주소를 사내 서버로 고친다(`kb.py init --section llm`). 상대 경로 `ca_bundle`은 `config.local.yaml`이 있는 폴더 기준으로 해석된다.
 
 LLM이 꺼져 있거나(`llm.enabled` 거짓) 연결된 프로필이 없으면 B단계는 한 줄 로그만 남기고 종료 0이다.
 
@@ -185,10 +195,10 @@ Jira 쓰기는 `jira/outbox.jsonl`에 먼저 기록되고 즉시 전송을 시�
 | 상태 | 뜻 |
 |---|---|
 | `pending` | 아직 보내지 못함. 다음 `kb.py act flush`가 보낸다 |
-| `sending` | 보내는 중으로 점유됨. 중단되면 이 상태로 남고 오래되면 `uncertain`으로 표시된다 |
+| `sending` | 보내는 중으로 점유됨. 중단되면 이 상태로 남고 주인 프로세스가 죽었거나 `2 × write_timeout_sec`(기본 120초)가 지나면 `uncertain`으로 표시된다 |
 | `done` | 성공 (이후 `sync --key`로 캐시 갱신) |
 | `failed` | 5번 실패하거나 권한 없음·4xx 등 되풀이해도 소용없는 오류 |
-| `uncertain` | 전송 뒤 끊김·타임아웃·형태가 다른 2xx 응답 등 서버가 받았는지 모름. 자동 재전송 없음 |
+| `uncertain` | 전송 뒤 끊김·타임아웃·형태가 다른 2xx 응답 등 서버가 받았는지 모름. 자동 재전송 없으며 재시도 중 일시 오류(429·5xx·네트워크)가 나도 시도 횟수와 상관없이 `failed`가 되지 않는다 |
 
 flush 옵션:
 

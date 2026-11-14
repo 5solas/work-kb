@@ -20,11 +20,11 @@ Python 3.14와 Neovim 0.12 이상이 필요하다. 지원하는 Python은 3.14 �
 
 ## 개발
 
-시험용 가상환경은 pip가 들어 있게 만든다(설치 시험이 pip로 의존성 확인을 흉내 낸다).
+시험용 가상환경은 `--seed`로 `pip`가 들어 있게 만든다(`pip`가 없으면 `packaging`·`install` 테스트가 건너뛰거나 실패한다). `requirements-dev.txt`에는 `pytest`와 `hypothesis`가 들어 있다.
 
 ```powershell
 uv venv --seed --python 3.14 .venv
-.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+uv pip install -r requirements-dev.txt
 .venv\Scripts\python.exe -m pytest -q
 ```
 
@@ -33,4 +33,10 @@ uv venv --seed --python 3.14 .venv
 - [docs/USER-GUIDE.md](docs/USER-GUIDE.md): 취지, 목표, 파일·폴더 위치, 설치, 사용법(키 표), 검증 상태
 - [docs/README.md](docs/README.md): 명령 표, 폴더 구조, 종료 코드, outbox, LLM 설정
 - [docs/DEPLOY.md](docs/DEPLOY.md): 회사 PC로 옮기기
+- [docs/SCHEDULING.md](docs/SCHEDULING.md): Windows 작업 스케줄러 등록
+- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md): 증상별 문제 해결
+- [docs/PACKAGING.md](docs/PACKAGING.md): 오프라인 `wheels/` 묶음과 이식 복사본
+- [docs/DECISIONS.md](docs/DECISIONS.md): 설계 결정과 사용자 확인 대기 목록
+- [docs/LIVE.md](docs/LIVE.md): 실 모델 검증 기록
+- [AGENTS.md](AGENTS.md): 런타임 편집자 에이전트 규칙
 - [nvim-config](https://github.com/5solas/nvim-config): Neovim 쪽 설정과 `nvd` 사용법(`docs/USER_GUIDE.md`)
