@@ -1,13 +1,13 @@
 """계약 A를 말하는 가짜 `kb.py serve` (tests/nvim 서버 클라이언트 시험 전용).
 
-python -X utf8 tests/nvim/fake_serve.py [--idle-sec N] [--mode ok|bad-ready|no-ready|garbage]
+python -X utf8 tests/nvim/fake_serve.py [--idle-sec N] [--mode ok|bad-ready|no-ready|garbage] [--sleep-on 명령,...]
 
 - 시작하면 준비 줄 {"ready": true, "pid": <pid>, "version": 1}을 낸다 (mode에 따라 틀리게).
 - {"id": n, "op": "ping"} → {"id": n, "ok": true}, {"op": "shutdown"} → 종료 0.
 - {"id": n, "argv": [...]}: 계약의 빠른 명령만 받는다. 그 밖은 refused.
   argv에 시험용 표지가 있으면: --fake-refuse 거부, --fake-die 답 없이 종료 3,
   --fake-sleep 5초 뒤 답, --fake-delay-ms N N밀리초 뒤 답, --fake-hang 답 없이 영영 멈춤(stdin도 안 읽음),
-  --fake-code N 종료 코드 N.
+  --fake-code N 종료 코드 N. --sleep-on에 든 명령(argv[0])은 표지 없이도 5초 뒤 답 (인수를 못 고치는 호출부 시험).
   답의 out은 "served <argv JSON>\npid=<pid>\n" (--fake-seq면 끝에 "seq=<이 서버가 받은 argv 요청 번호>\n").
 - UTF-8이 아닌 줄·JSON이 아닌 줄은 serve.py처럼 {"id": null, "refused": true}.
 - stdin EOF 또는 --idle-sec 동안 요청이 없으면 종료 0.
@@ -22,7 +22,7 @@ import threading
 import time
 
 SERVED = {"status", "search", "today", "link"}
-SERVED_SUB = {"proposals": {"list"}, "act": {"list", "transitions"}}
+SERVED_SUB = {"proposals": {"list"}, "act": {"list"}}
 
 
 def send(obj: dict) -> None:
@@ -50,6 +50,7 @@ def main() -> int:
     args = sys.argv[1:]
     idle = float(option(args, "--idle-sec", "1800"))
     mode = option(args, "--mode", "ok")
+    sleep_on = set(filter(None, option(args, "--sleep-on", "").split(",")))
     if mode == "no-ready":
         time.sleep(30)
         return 0
@@ -103,7 +104,7 @@ def main() -> int:
         if "--fake-refuse" in argv or not served(argv):
             send({"id": rid, "refused": True, "reason": "not served"})
             continue
-        if "--fake-sleep" in argv:
+        if "--fake-sleep" in argv or argv[0] in sleep_on:
             time.sleep(5)
         delay = int(option(argv, "--fake-delay-ms", "0"))
         if delay:

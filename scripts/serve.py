@@ -44,7 +44,7 @@ SERVED: dict[str, frozenset[str] | None] = {
     "today": None,
     "link": None,
     "proposals": frozenset({"list"}),
-    "act": frozenset({"list", "transitions"}),
+    "act": frozenset({"list"}),  # transitions는 Jira를 불러 느릴 수 있어 한 번 실행으로 (서버를 막지 않게)
 }
 _HELP_WORDS = ("-h", "--help", "help")
 

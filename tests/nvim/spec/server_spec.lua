@@ -74,20 +74,20 @@ describe("server", function()
     H.eq(#fake.calls, 0, "한 번 실행을 띄우지 않음")
     H.eq(stub.messages, { "work-kb: 완료 — pid=" .. pid })
     -- 하위 명령도
-    handle = proc().run(proc().sub_args("act", "transitions", "KB-1"), { on_exit = function() end })
-    H.eq(handle.via, "server")
-    proc().wait(handle, 10000)
     handle = proc().run(proc().sub_args("proposals", "list"), { on_exit = function() end })
     H.eq(handle.via, "server")
     proc().wait(handle, 10000)
-    -- 느리거나 쓰는 명령은 서버로 보내지 않는다
+    -- 느리거나 쓰는 명령은 서버로 보내지 않는다 (act transitions는 Jira를 부르므로 한 번 실행, P-01)
     handle = proc().run(proc().kb_args("compile"), { on_exit = function() end })
     H.eq(handle.via, "process")
     H.eq(proc().wait(handle, 10000), 9)
     handle = proc().run(proc().sub_args("proposals", "accept", "1"), { on_exit = function() end })
     H.eq(handle.via, "process")
     proc().wait(handle, 10000)
-    H.eq(#fake.calls, 2)
+    handle = proc().run(proc().sub_args("act", "transitions", "KB-1"), { on_exit = function() end })
+    H.eq(handle.via, "process")
+    proc().wait(handle, 10000)
+    H.eq(#fake.calls, 3)
   end)
 
   it("거부되면 한 번 실행으로 돌린다 (출력·코드는 한 번 실행의 것)", function()
@@ -160,6 +160,94 @@ describe("server", function()
     H.eq(H.buffer_text(), "대체\n")
     H.eq(server().status().state, "dead")
     H.eq(server().status().last_error, "요청 시간 초과")
+    server().ensure()
+    H.eq(server().status().starts, 2, "시간 초과로 죽인 서버는 1분 제한 없이 다시 띄운다 (P-01)")
+  end)
+
+  it("write command waiting on kb_lock is not rerun after timeout", function()
+    -- C-01: 예약 작업(sync)이 kb_lock을 쥔 동안 서버의 link가 잠금을 기다리다 요청 시간 초과에 걸린다.
+    -- 서버는 죽이지만 link(파일을 쓰는 명령)는 한 번 실행으로 다시 돌리지 않고 시간 초과로 끝낸다.
+    local kb = H.read_bytes(H.repo .. "/scripts/kb.py") or ""
+    if not (H.exists(H.repo .. "/scripts/serve.py") and kb:find('"serve"', 1, true)) then
+      H.not_run("scripts/kb.py serve가 아직 없음")
+    end
+    local py = H.python()
+    local vault = H.with_vault({ python = py, server = { enable = true, idle_sec = 120 } })
+    H.copy_config(vault)
+    H.write_bytes(vault .. "/config.local.yaml", "environment: home\njira:\n  project_keys: [KB]\n")
+    H.write_bytes(vault .. "/daily/2026-11-05.md", "---\ndate: 2026-11-05\n---\n## 기록\n- 09:00 KB-1 메모\n")
+    H.patch(server(), "request_timeout_ms", 1500)
+    local fake = H.fake_spawn({ code = 0, output = "다시 실행됨\n" })
+    start_ready()
+    local held = false
+    local script = "import sys, time\nsys.path.insert(0, r'"
+      .. H.repo
+      .. "/scripts')\nfrom lib import core\nwith core.kb_lock(r'"
+      .. vault
+      .. "', 'sync'):\n    print('held', flush=True)\n    time.sleep(5)\n"
+    local holder = vim.system({ py, "-X", "utf8", "-c", script }, {
+      text = true,
+      stdout = function(_, data)
+        if data and data:find("held", 1, true) then
+          held = true
+        end
+      end,
+    })
+    H.ok(H.wait(function()
+      return held
+    end, 15000), "잠금을 쥐지 못함")
+    local got
+    local handle = proc().run(proc().kb_args("link"), {
+      on_exit = function(code, _, reason)
+        got = { code = code, reason = reason }
+      end,
+    })
+    H.eq(handle.via, "server")
+    H.ok(H.wait(function()
+      return handle.done
+    end, 15000), "link가 끝나지 않음")
+    holder:wait(15000)
+    H.eq(handle.code, nil, "시간 초과는 실패로 끝난다")
+    H.eq(got, { reason = "timeout" })
+    H.eq(#fake.calls, 0, "쓰기 명령은 한 번 실행으로 다시 돌리지 않는다")
+    H.contains(H.buffer_text(), "시간 초과")
+    H.eq(server().status().state, "dead")
+    H.eq(server().status().last_error, "요청 시간 초과")
+    server().ensure()
+    H.eq(server().status().starts, 2, "1분 제한 없이 다시 띄운다")
+  end)
+
+  it("write timeout is reported to the caller", function()
+    use_fake("ok", { request_timeout_ms = 300 })
+    H.patch(server(), "_script_args", function(idle)
+      return { "-X", "utf8", "tests/nvim/fake_serve.py", "--idle-sec", tostring(idle), "--sleep-on", "today,link" }
+    end)
+    local fake = H.fake_spawn({ code = 0, output = "다시 실행됨\n" })
+    start_ready()
+    local stub = H.ui_stub()
+    -- l: misc.link
+    local handle = require("work-kb.misc").link()
+    H.eq(handle.via, "server")
+    H.ok(H.wait(function()
+      return handle.done
+    end, 10000), "link가 끝나지 않음")
+    H.eq(handle.code, nil)
+    H.eq(#fake.calls, 0, "link를 다시 실행하지 않음")
+    H.contains(H.buffer_text(), "시간 초과")
+    H.eq(#stub.messages, 1, vim.inspect(stub.messages))
+    H.contains(stub.messages[1], "시간 초과")
+    -- daily.ensure_today: today가 시간 초과면 알리고, 뼈대를 만들어 계속한다
+    H.ok(H.wait(function()
+      server().ensure()
+      return server().available()
+    end, 20000), "다시 띄운 서버가 준비되지 않음")
+    stub.messages = {}
+    local daily = require("work-kb.daily")
+    local file = daily.ensure_today(true)
+    H.eq(#fake.calls, 0, "today를 다시 실행하지 않음")
+    H.eq(#stub.messages, 1, vim.inspect(stub.messages))
+    H.contains(stub.messages[1], "시간 초과")
+    H.eq(H.read_bytes(file), daily.skeleton("2026-11-05"))
   end)
 
   it("준비 줄이 틀리거나 JSON이 아니거나 오지 않으면 쓰지 않는다", function()
@@ -361,10 +449,10 @@ describe("server", function()
 
   it("빠른 명령 표", function()
     local p = proc()
-    for _, args in ipairs({ { "status" }, { "search", "x" }, { "today" }, { "link" }, { "proposals", "list" }, { "act", "list" }, { "act", "transitions", "KB-1" } }) do
+    for _, args in ipairs({ { "status" }, { "search", "x" }, { "today" }, { "link" }, { "proposals", "list" }, { "act", "list" } }) do
       H.eq(p.served(args), true, table.concat(args, " "))
     end
-    for _, args in ipairs({ { "compile" }, { "ingest" }, { "sync" }, { "proposals", "accept" }, { "act", "comment" }, { "--help" }, { "init" }, {} }) do
+    for _, args in ipairs({ { "compile" }, { "ingest" }, { "sync" }, { "proposals", "accept" }, { "act", "comment" }, { "act", "transitions", "KB-1" }, { "--help" }, { "init" }, {} }) do
       H.eq(p.served(args), false, table.concat(args, " "))
     end
   end)

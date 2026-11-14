@@ -3,15 +3,18 @@
 --   준비: {"ready": true, "pid": <int>, "version": 1}
 --   요청: {"id": n, "argv": [...]} → {"id": n, "code": c, "out": "..."} 또는 {"id": n, "refused": true, ...}
 --   종료: {"op": "shutdown"}
--- 요청은 하나씩 차례로 보낸다 (앞 요청의 답이 와야 다음을 보낸다). 거부·시간 초과·서버 죽음은
--- 콜백에 nil로 알리고, proc가 한 번 실행으로 돌린다. 다시 띄우기는 1분에 한 번까지.
+-- 요청은 하나씩 차례로 보낸다 (앞 요청의 답이 와야 다음을 보낸다). 거부·서버 죽음은 콜백에 nil로
+-- 알리고, proc가 한 번 실행으로 돌린다. 다시 띄우기는 1분에 한 번까지.
+-- 요청 시간 초과(kb_lock 대기 60초 + 여유)는 서버를 죽이고 그 요청에 CB(nil, nil, "timeout")로 알린다:
+-- proc는 읽기 명령만 한 번 실행으로 다시 돌리고 쓰기 명령(today·link)은 실패로 끝낸다. 이때는 1분 제한 없이
+-- 다음 요청이 다시 띄운다.
 -- setup()은 이 모듈을 불러오지 않는다: VimEnter 뒤 vim.defer_fn에서, 또는 첫 요청 때 띄운다.
 
 local M = {}
 
 local PROTOCOL_VERSION = 1
 
-M.request_timeout_ms = 30000
+M.request_timeout_ms = 90000
 M.ready_timeout_ms = 15000
 M.restart_interval_ms = 60000
 
@@ -100,8 +103,8 @@ local function stop_timer(t)
   end
 end
 
-local function call(cb, code, out)
-  local ok, err = pcall(cb, code, out)
+local function call(cb, code, out, reason)
+  local ok, err = pcall(cb, code, out, reason)
   if not ok then
     vim.notify("work-kb: 서버 응답 처리 오류: " .. tostring(err), vim.log.levels.WARN)
   end
@@ -235,8 +238,16 @@ pump = function()
   item.timer:start(M.request_timeout_ms, 0, function()
     vim.schedule(function()
       if S.inflight == item then
-        -- 서버가 멈췄다: 죽이고 이 요청은 한 번 실행으로 돌린다.
+        -- 서버가 멈췄다 (보통 kb_lock을 오래 기다림): 죽인다. 큐에 남은(보내지 않은) 요청은 nil로
+        -- 한 번 실행에 넘기고, 이 요청은 "timeout"으로 알린다 (쓰기 명령은 이미 썼을 수 있다).
+        -- 서버 탓이 아니므로 다음 요청이 1분 제한 없이 다시 띄운다.
+        stop_timer(item.timer)
+        S.inflight = nil
         kill_server("요청 시간 초과")
+        S.last_start = nil
+        if not item.cancelled then
+          call(item.cb, nil, nil, "timeout")
+        end
       end
     end)
   end)
@@ -378,7 +389,7 @@ function M.ensure(key)
   end
 end
 
----ARGV를 서버로 보낸다. 답이 오면 CB(code, out), 거부·실패면 CB(nil).
+---ARGV를 서버로 보낸다. 답이 오면 CB(code, out), 거부·실패면 CB(nil), 요청 시간 초과면 CB(nil, nil, "timeout").
 ---준비되지 않았으면 바로 CB(nil)하고 nil. 아니면 M.cancel에 넘길 요청 표.
 function M.request(argv, cb)
   if S.state ~= "ready" or not S.handle then

@@ -369,9 +369,19 @@ function M.last_line(buf)
   return last
 end
 
----기본 끝 보고 (work-kb--report).
-function M.report(bufnr, code)
-  if code == 0 then
+---"work-kb: CMD 시간 초과 …" 알림 문구 (서버 요청 시간 초과로 쓰기 명령을 멈췄을 때).
+function M.timeout_message(cmd, bufnr)
+  return string.format("work-kb: %s 시간 초과. 다시 실행하지 않았습니다. %s 버퍼를 보세요", tostring(cmd), M.buffer_name(bufnr))
+end
+
+---기본 끝 보고 (work-kb--report). REASON이 "timeout"이면 CMD의 시간 초과로 알린다.
+function M.report(bufnr, code, reason, cmd)
+  if reason == "timeout" then
+    if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+      ui().show(bufnr)
+    end
+    ui().notify(M.timeout_message(cmd or "명령", bufnr))
+  elseif code == 0 then
     local last = M.last_line(bufnr)
     ui().notify("work-kb: 완료" .. (last and (" — " .. last) or ""))
   else
@@ -565,12 +575,14 @@ end
 ---------------------------------------------------------------- 실행
 
 local SERVED = { status = true, search = true, today = true, link = true }
-local SERVED_SUB = { proposals = { list = true }, act = { list = true, transitions = true } }
+local SERVED_SUB = { proposals = { list = true }, act = { list = true } }
+-- 볼트 파일을 쓰는 서버 명령. 요청 시간 초과 때는 이미 썼을 수 있으므로 한 번 실행으로 다시 돌리지 않는다.
+local WRITES = { today = true, link = true }
 
----상주 서버로 보낼 수 있는 명령인가 (빠른 로컬 명령: 읽기 status, search, proposals list, act list,
----act transitions; 볼트를 고치는 today, link). today·link는 kb_lock 안에서 원자적으로 쓰고 다시 돌려도
----결과가 같으므로, 서버가 도중에 죽거나 시간 초과로 죽여도 한 번 실행으로 다시 돌린다 (잠금은
----운영체제가 프로세스와 함께 풀고, kb_lock은 60초까지 기다린다).
+---상주 서버로 보낼 수 있는 명령인가 (빠른 명령: 읽기 status, search, proposals list, act list;
+---볼트 파일을 쓰는 today, link). Jira를 부르는 act transitions는 서버를 막지 않게 한 번 실행으로.
+---거부되거나 서버가 죽으면 한 번 실행으로 다시 돌린다. 요청 시간 초과(server.request_timeout_ms)면
+---읽기 명령만 다시 돌리고, today·link는 "시간 초과" 실패(code nil)로 끝낸다.
 function M.served(args)
   local cmd = args[1]
   if SERVED[cmd] then
@@ -609,10 +621,11 @@ local function server_enabled()
 end
 
 ---kb.py를 비동기로 실행한다. 출력은 BUFFER(기본 *work-kb*; 실행 전에 비움, APPEND면 끝에 이음)에.
----HEADER가 있으면 출력 앞에 넣는다. 끝나면 ON_EXIT(code, bufnr), 없으면 기본 보고.
----돌려주는 표: { args, bufnr, done, code, via = "process"|"server" } (proc.wait로 기다린다).
+---HEADER가 있으면 출력 앞에 넣는다. 끝나면 ON_EXIT(code, bufnr, reason), 없으면 기본 보고.
+---REASON은 서버 요청 시간 초과로 쓰기 명령을 다시 돌리지 않고 끝냈을 때 "timeout" (code는 nil).
+---돌려주는 표: { args, bufnr, done, code, reason, via = "process"|"server" } (proc.wait로 기다린다).
 ---@param args string[]
----@param opts? {buffer?: string|integer, append?: boolean, header?: string, on_exit?: fun(code: integer|nil, bufnr: integer)}
+---@param opts? {buffer?: string|integer, append?: boolean, header?: string, on_exit?: fun(code: integer|nil, bufnr: integer, reason: string|nil)}
 function M.run(args, opts)
   opts = opts or {}
   if type(args) ~= "table" then
@@ -644,18 +657,19 @@ function M.run(args, opts)
   local handle = { args = args, bufnr = bufnr, done = false }
   local out = writer(bufnr)
 
-  local function finish(code)
+  local function finish(code, reason)
     if handle.done then
       return
     end
     out.flush()
     handle.done = true
     handle.code = code
+    handle.reason = reason
     local ok, err = pcall(function()
       if opts.on_exit then
-        opts.on_exit(code, bufnr)
+        opts.on_exit(code, bufnr, reason)
       else
-        M.report(bufnr, code)
+        M.report(bufnr, code, reason, args[1])
       end
     end)
     if not ok then
@@ -690,11 +704,21 @@ function M.run(args, opts)
     local key = server.key(root, python)
     if server.available(key) then
       handle.via = "server"
-      handle.server_item = server.request(args, function(code, text)
+      handle.server_item = server.request(args, function(code, text, reason)
         if handle.cancelled or handle.done then
           return
         end
-        if code == nil then
+        if code == nil and reason == "timeout" and WRITES[args[1]] then
+          -- 서버가 시간 안에 답하지 않았다 (보통 kb_lock 대기). 파일을 이미 썼을 수 있어 다시 돌리지 않는다.
+          out.write(
+            string.format(
+              "work-kb: %s 시간 초과 (%d초 안에 답이 없어 서버를 멈췄습니다). 다시 실행하지 않았습니다. 잠시 뒤 다시 하세요\n",
+              args[1],
+              math.floor(server.request_timeout_ms / 1000)
+            )
+          )
+          finish(nil, "timeout")
+        elseif code == nil then
           -- 거부·시간 초과·서버 죽음: 한 번 실행으로 (결과는 같다).
           local ok, err = pcall(oneshot)
           if not ok then
@@ -734,23 +758,25 @@ function M.cancel(handle)
   end
 end
 
----HANDLE이 끝날 때까지 기다린다. 종료 코드, 시간 초과면 멈추고 nil.
+---HANDLE이 끝날 때까지 기다린다. 종료 코드(와 handle.reason). 기다리기 시간 초과면 멈추고 nil, "timeout".
+---@return integer|nil code, string|nil reason
 function M.wait(handle, timeout_ms)
   timeout_ms = timeout_ms or M.default_timeout_ms
   vim.wait(timeout_ms, function()
     return handle.done
   end, 10)
   if handle.done and not handle.cancelled then
-    return handle.code
+    return handle.code, handle.reason
   end
   M.cancel(handle)
-  return nil
+  return nil, "timeout"
 end
 
----ARGS로 kb.py를 실행하고 끝날 때까지 기다린다 (보고 없음). 종료 코드, 시간 초과면 nil.
+---ARGS로 kb.py를 실행하고 끝날 때까지 기다린다 (보고 없음). 종료 코드, 실패면 nil.
+---시간 초과(기다리기, 또는 서버 요청 시간 초과로 쓰기 명령을 멈춤)면 둘째 값이 "timeout".
 ---@param args string[]
 ---@param timeout_ms? integer 기본 120000
----@return integer|nil
+---@return integer|nil code, string|nil reason
 function M.run_sync(args, timeout_ms)
   local handle = M.run(args, { on_exit = function() end })
   return M.wait(handle, timeout_ms)

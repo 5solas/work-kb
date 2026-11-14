@@ -342,16 +342,26 @@ def test_mixed_stdout_stderr_keeps_write_order(vault, tmp_path, fake_now, start_
     assert buffered_code == code and sorted(_norm(buffered).splitlines()) == sorted(_norm(out).splitlines())
 
 
-def test_act_transitions_parity_reads_only(vault, tmp_path, fake_now, start_server, mock_jira):
+def test_act_transitions_is_not_served(vault, tmp_path, fake_now, start_server, mock_jira):
+    """`act transitions`는 Jira를 부르므로 서버에서 돌리지 않는다: 느린 Jira가 한 줄 서버를 막지 않는다(A-06, P-01)."""
+    assert serve.SERVED["act"] == frozenset({"list"})
     fake_now(NOW)
     prepare(vault, jira_url=mock_jira.base_url)
     env = child_env(tmp_path, vault)
     server = start_server(env)
     for argv in (["act", "transitions", "KB-12", "--root", str(vault)],
-                 ["act", "transitions", "KB-12", "--json", "--root", str(vault)]):  # fmt: skip
-        code, out = server.run(argv)
-        assert (code, out) == oneshot(env, argv)
-        assert code == 0 and "In Review" in out
+                 ["act", "transitions", "KB-12", "--json", "--root", str(vault)],
+                 ["act", "--root", str(vault), "transitions", "KB-12"]):  # fmt: skip
+        response = server.request(argv)
+        assert response["refused"] is True and "transitions" in response["reason"], (argv, response)
+        assert "code" not in response
+    started = time.monotonic()
+    assert server.ping()
+    assert time.monotonic() - started < 5
+    assert mock_jira.log == []
+    # 클라이언트가 돌리는 한 번 실행은 그대로 읽기만 한다
+    code, out = oneshot(env, ["act", "transitions", "KB-12", "--root", str(vault)])
+    assert code == 0 and "In Review" in out
     assert mock_jira.log and all(entry["method"] == "GET" for entry in mock_jira.log)
     assert not outbox.path_for(vault).exists()
 
