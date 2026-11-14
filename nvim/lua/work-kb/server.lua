@@ -37,7 +37,7 @@ local S = {
   queue = {},
   inflight = nil,
   next_id = 0,
-  linebuf = "",
+  linebuf = {}, -- 아직 줄이 끝나지 않은 stdout 조각들
   stderr_tail = {},
   last_error = nil,
   ready_timer = nil,
@@ -192,19 +192,26 @@ local function on_line(line)
   end
 end
 
+---출력 조각을 줄로 나눈다. 줄이 끝나지 않은 조각은 표에 모으고 새 조각에서만 "\n"을 찾는다
+---(큰 응답 한 줄이 여러 조각으로 와도 이어 붙이기·찾기가 한 번씩만).
 local function on_stdout(data)
-  S.linebuf = S.linebuf .. data
+  local pos = 1
   while true do
-    local nl = S.linebuf:find("\n", 1, true)
+    local nl = data:find("\n", pos, true)
     if not nl then
-      break
+      if pos <= #data then
+        table.insert(S.linebuf, data:sub(pos))
+      end
+      return
     end
-    local line = S.linebuf:sub(1, nl - 1)
-    S.linebuf = S.linebuf:sub(nl + 1)
+    table.insert(S.linebuf, data:sub(pos, nl - 1))
+    local line = table.concat(S.linebuf)
+    S.linebuf = {}
+    pos = nl + 1
     on_line(line)
     if S.state ~= "starting" and S.state ~= "ready" then
-      S.linebuf = ""
-      break
+      S.linebuf = {}
+      return
     end
   end
 end
@@ -302,7 +309,7 @@ function M.start(opts)
     local key = M.key(root, python)
     local cmd = vim.list_extend(vim.list_extend({}, python), M._script_args(key.idle_sec))
     S.key = key
-    S.linebuf = ""
+    S.linebuf = {}
     S.stderr_tail = {}
     S.last_error = nil
     S.state = "starting"

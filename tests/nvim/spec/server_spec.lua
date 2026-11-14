@@ -440,6 +440,51 @@ describe("server", function()
     H.eq(server().status().starts, 2)
   end)
 
+  it("handles a 5 MB response line", function()
+    -- P-07 기능 시험: 큰 응답 한 줄이 여러 조각(글자 중간에서 잘림)으로 오고, 마지막 조각에 다음 응답까지
+    -- 붙어 와도 그대로 맞춘다. 성능 항목이라 수정 전에도 통과할 수 있다(걸린 시간은 기록만).
+    H.with_vault({ python = H.python(), server = { enable = true, idle_sec = 60 } })
+    local p = proc()
+    local servers = {}
+    H.patch(p, "_spawn", function(spec)
+      table.insert(servers, spec)
+      local function noop() end
+      return {
+        pid = 1,
+        write = noop,
+        close_stdin = noop,
+        kill = noop,
+        alive = function()
+          return true
+        end,
+      }
+    end)
+    H.ok(server().start())
+    servers[1].on_stdout('{"ready":true,"pid":1,"version":1}\n')
+    H.eq(server().status().state, "ready")
+    local got = {}
+    for _, argv in ipairs({ { "search", "큰" }, { "status" } }) do
+      server().request(argv, function(code, out)
+        table.insert(got, { code = code, out = out })
+      end)
+    end
+    local unit = "한글 줄 😀\n"
+    local big = string.rep(unit, math.ceil(5 * 1024 * 1024 / #unit))
+    local data = vim.json.encode({ id = 1, code = 0, out = big }) .. '\n{"id":2,"code":3,"out":"둘째"}\n'
+    H.ok(#data > 5 * 1024 * 1024)
+    local size = 65536 + 7
+    local started = vim.uv.hrtime()
+    for i = 1, #data, size do
+      servers[1].on_stdout(data:sub(i, i + size - 1))
+    end
+    print(string.format("server_spec: %d바이트 응답을 %d바이트 조각으로 %.0f ms", #data, size, (vim.uv.hrtime() - started) / 1e6))
+    H.eq(#got, 2)
+    H.eq(got[1].code, 0)
+    H.ok(got[1].out == big, "큰 응답의 out이 다름 (" .. #tostring(got[1].out) .. "바이트)")
+    H.eq(got[2], { code = 3, out = "둘째" })
+    H.eq(server().status().state, "ready")
+  end)
+
   it("죽인 서버의 실제 Python(준비 줄의 pid)이 남지 않는다: 시간 초과·stop(true) (agy 2)", function()
     -- WORK_KB_TEST_PYTHON은 pytest의 sys.executable (.venv/Scripts/python.exe: 실제 인터프리터를
     -- 자식으로 띄우는 venv 런처)이다. 런처의 pid와 준비 줄의 pid가 달라야 이 시험이 뜻이 있다.
