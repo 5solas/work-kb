@@ -1269,3 +1269,67 @@ def test_outbox_read_retries_while_another_holder_locks_the_file(vault, monkeypa
             outbox.records(vault)
     finally:
         thread.join(timeout=10)
+
+
+def test_numeric_transition_queued_when_offline(make_env, capsys):
+    env = make_env(down=True)
+    code, _out, _err = run(capsys, env.vault, "transition", "KB-12", "31", "--yes")
+    assert code == 3
+    rec = only(env.vault)
+    assert (rec["action"], rec["key"], rec["status"]) == ("transition", "KB-12", "pending")
+    assert rec["payload"] == {"transition_id": "31"}
+
+    code_name, _out, _err = run(capsys, env.vault, "transition", "KB-12", "진행중", "--yes")
+    assert code_name == 3
+    assert len(records(env.vault)) == 1
+
+
+def test_promote_refuses_line_with_other_project_key(env, capsys):
+    env.daily.write_text("---\ndate: 2026-11-05\n---\n## 기록\n- 09:00 OPS 일감 [[OPS-1]]\n", encoding="utf-8")
+    code, _out, err = run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:5", "KB", "--yes")
+    assert code == 4 and "이미 일감 키" in err
+    assert writes(env.jira) == [] and outbox_bytes(env.vault) is None
+
+
+def test_promote_refuses_done_unlinked(make_env, capsys):
+    env = make_env(down=True)
+    assert run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:{LINE_REVIEW}", "KB", "--yes")[0] == 3
+    edited = env.daily.read_bytes().replace("PR 리뷰 요청 옴".encode(), "PR 리뷰 끝냄".encode())
+    env.daily.write_bytes(edited)
+    env.jira.come_up()
+    assert run(capsys, env.vault, "flush")[0] == 0
+    assert only(env.vault)["result"] == {"key": "KB-16", "linked": False}
+    # 이제 원래 내용으로 되돌려도 이미 done(linked: False) 기록이 있으면 중복 승격하지 않는다
+    env.daily.write_text(DAILY_TEXT, encoding="utf-8")
+    code, _out, err = run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:{LINE_REVIEW}", "KB", "--yes")
+    assert code == 4 and ("KB-16" in err or "이미" in err)
+
+
+def test_flush_continues_after_link_failure(make_env, capsys, monkeypatch):
+    env = make_env(down=True)
+    assert run(capsys, env.vault, "promote", "--from", f"daily/{DAY}.md:{LINE_REVIEW}", "KB", "--yes")[0] == 3
+    assert run(capsys, env.vault, "comment", "KB-12", "--body", "두 번째 작업")[0] == 3
+    env.jira.come_up()
+
+    def boom(*_a, **_kw):
+        raise core.FileBusy("잠시 잠김")
+
+    monkeypatch.setattr(jira_act, "link_promoted", boom)
+    code, _out, err = run(capsys, env.vault, "flush")
+    assert code == 0, err
+    assert "붙이지 못했습니다" in err or "KB-16" in err
+    recs = records(env.vault)
+    assert [r["status"] for r in recs] == ["done", "done"]
+
+
+def test_uncertain_never_becomes_failed_on_429(make_env, capsys):
+    env = make_env()
+    rec = outbox.make_record(action="comment", key="KB-12", payload={"body": "불확실 재시도"}, ts=NOW)
+    rec["attempts"] = outbox.MAX_ATTEMPTS
+    rec["last_error"] = outbox.UNCERTAIN
+    outbox.append(env.vault, rec)
+    env.jira.modes["on_write"] = lambda _req: (429, {"errorMessages": ["rate limited"]}, {"Retry-After": "0"})
+    code, _out, _err = run(capsys, env.vault, "flush", "--retry-uncertain")
+    assert code == 3
+    after = only(env.vault)
+    assert after["status"] == "pending" and after["last_error"] == "uncertain"

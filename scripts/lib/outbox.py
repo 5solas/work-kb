@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import datetime as dt
 import errno
 import json
 import os
@@ -40,6 +41,7 @@ PENDING, SENDING, DONE, FAILED = "pending", "sending", "done", "failed"
 STATUSES = (PENDING, SENDING, DONE, FAILED)
 UNCERTAIN = "uncertain"
 MAX_ATTEMPTS = 5
+STALE_BASE_SEC = 60.0  # jira.write_timeout_sec 기본값. 보내는 중 표시는 이것의 두 배보다 오래되면 불확실
 FIELD_ORDER = ("id", "ts", "action", "key", "payload", "source", "status", "attempts", "last_error", "done_at")
 REMOVE: Any = object()
 """update·modify의 changes 값으로 주면 그 필드를 기록에서 뺀다."""
@@ -272,3 +274,81 @@ def counts(items: Iterable[Mapping[str, Any]]) -> dict[str, int]:
         if status in out:
             out[status] += 1
     return out
+
+
+# ---------------------------------------------------------------- 보내는 중 표시(claim) · 상태 판정
+
+
+def stale_after(cfg: Any) -> float:
+    """보내는 중 표시를 불확실로 볼 나이(초): `jira.write_timeout_sec`(기본 60)의 두 배."""
+    raw = cfg.get("jira.write_timeout_sec")
+    try:
+        base = float(raw) if raw not in (None, "") and not isinstance(raw, bool) else STALE_BASE_SEC
+    except (TypeError, ValueError):
+        base = STALE_BASE_SEC
+    return 2 * (base if base > 0 else STALE_BASE_SEC)
+
+
+def pid_alive(pid: Any) -> bool:
+    """그 pid의 프로세스가 살아 있는가. 모르면 살아 있다고 본다(권한 거부 등)."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return False
+    if pid == os.getpid():
+        return True
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # ACCESS_DENIED: 있지만 열 수 없음
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def claim_fields() -> dict[str, Any]:
+    # 실제 시계(KB_FAKE_NOW와 무관): 표시의 나이를 재는 데 쓴다
+    return {"claimed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "pid": os.getpid()}
+
+
+def claim_is_stale(record: Mapping[str, Any], stale_sec: float, now: dt.datetime | None = None) -> bool:
+    """보내는 중 표시의 주인이 죽었거나 표시가 stale_sec보다 오래됐는가."""
+    if not pid_alive(record.get("pid")):
+        return True
+    try:
+        claimed = dt.datetime.fromisoformat(str(record.get("claimed_at") or ""))
+    except ValueError:
+        return True
+    if claimed.tzinfo is None:
+        claimed = claimed.replace(tzinfo=dt.timezone.utc)
+    now = now or dt.datetime.now(dt.timezone.utc)
+    return (now - claimed).total_seconds() > stale_sec
+
+
+def state_of(record: Mapping[str, Any], stale_sec: float) -> str:
+    """보이는 상태: pending · sending(다른 실행이 보내는 중) · uncertain · failed · done."""
+    status = str(record.get("status") or "")
+    if status == SENDING:
+        return UNCERTAIN if claim_is_stale(record, stale_sec) else SENDING
+    if status == PENDING and record.get("last_error") == UNCERTAIN:
+        return UNCERTAIN
+    return status

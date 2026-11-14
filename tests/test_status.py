@@ -1,6 +1,10 @@
 """kb.py status: 파일만 읽는 상태 요약."""
+import datetime as dt
 import json
+import os
 import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -95,7 +99,7 @@ def sample(tmp_path):
         {"id": "2", "action": "comment", "key": "KB-7", "status": "pending"},
         {"id": "3", "action": "transition", "key": "OPS-3", "status": "failed"},
         {"id": "4", "action": "comment", "key": "KB-12", "status": "done"},
-        {"id": "5", "action": "worklog", "key": "KB-5", "status": "sending", "pid": 1, "claimed_at": "2026-11-05T08:00:00+09:00"},
+        {"id": "5", "action": "worklog", "key": "KB-5", "status": "sending", "pid": os.getpid(), "claimed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")},
     ]
     lines = [json.dumps(item, ensure_ascii=False) for item in outbox] + ["{깨진 줄", ""]
     (root / "jira" / "outbox.jsonl").write_bytes("\n".join(lines).encode("utf-8"))
@@ -407,3 +411,30 @@ def test_json_has_project_keys(vault, capsys):
     _write_local(vault, {"environment": "home", "jira": {"project_keys": ["KB", "OPS"]}})
     info = json.loads(_json_out(vault, capsys))
     assert info["jira"]["project_keys"] == ["KB", "OPS"]
+
+
+def test_stale_sending_shown_as_uncertain(vault, capsys):
+    _write_local(vault, {"environment": "home"})
+    dead = subprocess.Popen([sys.executable, "-c", "pass"])
+    dead.wait()
+    (vault / "jira").mkdir(exist_ok=True)
+    record = {
+        "id": "01J0000000AAAAAAAAAAAAAAAA",
+        "ts": "2026-11-05T16:05:00+09:00",
+        "action": "comment",
+        "key": "KB-12",
+        "payload": {"body": "보내다 끊김"},
+        "source": None,
+        "status": "sending",
+        "attempts": 1,
+        "last_error": None,
+        "done_at": None,
+        "claimed_at": "2026-11-05T07:05:00+00:00",
+        "pid": dead.pid,
+    }
+    (vault / "jira" / "outbox.jsonl").write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+    assert status.main(["--root", str(vault)]) == 0
+    out = capsys.readouterr().out
+    assert "불확실 1개" in out and "전송 중 0개" in out
+    info = json.loads(_json_out(vault, capsys))
+    assert info["outbox"]["sending"] == 0 and info["outbox"]["uncertain"] == 1
