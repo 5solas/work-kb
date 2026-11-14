@@ -42,6 +42,30 @@ def test_neovim_arg_forms_accept_dash_values(text, vault, run_kb):
     assert "daily/2026-11-05.md:2:" in p.stdout
 
 
+@pytest.mark.parametrize("text", DASHED)
+def test_sync_jql_equals_form_accepts_dash_values(text, vault, monkeypatch):
+    """R-agy-05: jira.lua M.query가 만드는 `sync --root V --jql=JQL`(jira_spec.lua "passes every free-text option
+    value with =")을 jira_sync의 argparse가 그대로 받는지 본다. 네트워크 없이: 파싱 뒤의 설정·Jira·실행을 바꿔 끼운다."""
+    import contextlib
+
+    import jira_sync
+
+    seen: list[str] = []
+    monkeypatch.setattr(jira_sync.config, "load", lambda root: object())
+    monkeypatch.setattr(jira_sync.JiraClient, "from_config", classmethod(lambda cls, cfg: contextlib.nullcontext(None)))
+
+    def fake_run_jql(cfg, client, jql, **kwargs):
+        seen.append(jql)
+        return 0
+
+    monkeypatch.setattr(jira_sync, "run_jql", fake_run_jql)
+    assert jira_sync.main(["--root", str(vault), f"--jql={text}"]) == 0
+    assert seen == [text]
+    # 값이 따로 오는 옛 꼴은 argparse가 거부하거나 도움말로 샌다
+    with pytest.raises((core.ConfigError, SystemExit)):
+        jira_sync.main(["--root", str(vault), "--jql", "-hong"])
+
+
 def test_old_separate_value_forms_are_what_broke(vault, run_kb):
     """수정 전 꼴(값이 따로 오는 인수, `--` 없는 위치 인수)은 argparse가 거부하거나 도움말로 샌다."""
     root = str(vault)
