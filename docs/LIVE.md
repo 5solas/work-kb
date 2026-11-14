@@ -9,13 +9,14 @@ $env:KB_REQUIRE_LIVE='1'   # 키가 없으면 skip 대신 fail
 .venv\Scripts\python.exe -m pytest -q -m live tests/test_live.py -s
 ```
 
+- 지원·검증 대상 Python은 **3.14 하나**다(`kb.py` 사전 점검과 `doctor`도 3.14를 요구한다). `.venv`는 Python 3.14로 만든다.
 - `pytest.ini`가 `live`를 기본 실행에서 뺀다. `-m live`로만 돈다.
 - `DEEPINFRA_API_KEY`가 환경에 있어야 한다. 없으면 skip(`KB_REQUIRE_LIVE=1`이면 fail).
 - 저장소의 `config.local.yaml`이나 임시 볼트의 환경이 `home`이 아니면 fail(회사에서는 돌리지 않는다).
 - 임시 볼트(한글 경로)에 `config.yaml`을 복사하고 `config.local.yaml`(home, KB·OPS, main=Nemotron, fallback=Gemma,
   키는 `env:DEEPINFRA_API_KEY` 참조만)을 `yaml.safe_dump`로 쓴다. 저장소의 볼트·설정은 건드리지 않는다.
 - 채팅 POST 상한은 세션 전체 20회다. `requests.Session.request`에서 실제 전송(429 재시도 포함)을 센다.
-  21번째는 보내기 전에 fail.
+  21번째는 보내기 전에 fail. (`llm_detect`는 탐지 중 429 자동 재시도를 끄고 10회 한도로 센다.)
 
 ## 무엇을 보나
 
@@ -29,7 +30,7 @@ $env:KB_REQUIRE_LIVE='1'   # 키가 없으면 skip 대신 fail
 
 자료는 모두 허구다(홍길동·김철수, 회사 이름 없음).
 
-## 요약 (첫 실행들에서, 2026-11-05, .venv·.venv313 각 1회, 5 passed)
+## 요약 (첫 실행, 2026-11-05, Python 3.14 .venv, 5 passed)
 
 아래 숫자는 이 파일 끝의 자동 기록(마지막 실행)과 맞춘 것이다. 실행마다 토큰 수는 조금씩 달라진다.
 
@@ -37,6 +38,7 @@ $env:KB_REQUIRE_LIVE='1'   # 키가 없으면 skip 대신 fail
   첫 후보에서 잡혔다. 근거는 생각 흔적(trace)이다: 기준선(90토큰)과 `medium`(89토큰)은 생각 있음, `none`은 생각 없음(3토큰).
 - **생각 필드**: DeepInfra는 생각을 `message.reasoning_content`로 준다. content 안 `<think>`는 없었다.
   `usage.completion_tokens_details.reasoning_tokens`도 온다(기준선 86, `medium` 85, 꺼짐 0).
+  (코드의 `llm_client.normalize_message`는 `<think>`/`</think>`·`<thinking>`/`</thinking>`(대소문자 무시)도 처리하며, `content` 전체가 이미 올바른 JSON이면 안의 리터럴 `</think>`를 자르지 않고 보존한다.)
 - **기준선**: 아무 토글 없이 보내면 생각 켜짐(`baseline_reasoning: true`).
 - **JSON 모드**: `response_format: json_object`가 된다(끄기 상태). T2에서 `reasoning_effort: medium` +
   `response_format`도 400 없이 content에 JSON을 줬다. D38 재시도는 일어나지 않았다.
@@ -46,6 +48,34 @@ $env:KB_REQUIRE_LIVE='1'   # 키가 없으면 skip 대신 fail
 - **대체 프로필**: 없는 모델 id는 **404** `model_not_found`(400 아님). run_task가 fallback(Gemma)으로 넘어가 ok.
   Gemma는 탐지 결과가 없어 `response_format` 없이 프롬프트 강제 JSON으로 보냈고, 생각 필드 없이 바로 JSON을 줬다.
 - **T1**: 3줄 한 묶음 1회, 출력 28토큰(상한 2560). **T2**: 결정 1건·할 일 1건, 출력 1294토큰 중 생각 1184.
+
+## 실환경 점검 (회사·실서버)
+
+`tests/test_live.py`는 `home` 환경의 DeepInfra 전용이다. 회사(`company`)나 실제 Jira·Confluence·사내 LLM 점검은 아래 절차와 명령으로 본다.
+
+### 1. company 모드 공개 호스트·IP 차단
+
+- `environment: company`(또는 누락·잘못된 값)에서는 `public_hosts_blocklist` 도메인뿐 아니라 **공인 IP 리터럴**(IPv4-mapped IPv6 포함, `ipaddress.is_global`)도 공개 호스트로 거부한다(종료 5).
+- 사설·루프백 IP는 허용되지만 차단 목록에 직접 넣은 IP는 거부된다. 호스트를 하나로 정할 수 없는 주소(`\`, `@`, 공백, 비ASCII)도 차단하며 3xx 리디렉션은 따라가지 않고 오류로 처리한다.
+- `python scripts/kb.py status`(네트워크 없음)와 `python scripts/kb.py doctor`로 `✓ 공개 호스트 차단`을 확인한다. 어느 프로필이든 공개 호스트면 종료 5로 멈추고 어떤 LLM에도 보내지 않는다.
+
+### 2. LLM 응답 정리(`</think>`)와 탐지 재시도
+
+- `normalize_message`는 전체 `content`가 이미 올바른 JSON이면 태그를 자르지 않는다. 그렇지 않으면 뒤쪽이 올바른 JSON(또는 코드 펜스 JSON)이 되는 첫 `</think>`·`</thinking>`(대소문자 무시)에서 자르고, 없으면 마지막 닫기 태그를 쓴다. 닫히지 않은 선두 여는 태그는 잘린 생각으로 분리한다.
+- `llm_detect`는 `/models`와 프로브에서 429 자동 재시도를 끈다. 기준선·후보·JSON·비전 호출이 429·408·5xx·연결 실패(판정 불가)로 끝나면 2초 뒤 1회만 다시 보내며, 그래도 실패하거나 예산(10회)을 넘기면 `DetectError`(종료 3)로 중단하고 아무것도 저장하지 않는다.
+- `python scripts/kb.py doctor`(저장 없이 재검증), `python scripts/kb.py doctor --redetect`(재탐지 저장), `python scripts/kb.py compile --dry-run`, `python scripts/kb.py ingest --dry-run`으로 응답과 diff를 확인한다.
+
+### 3. Jira 403과 out-of-scope 처리
+
+- `python scripts/kb.py sync --full`(전체 동기화)의 범위 밖 일감 재조회 중 개별 이슈가 403을 돌려주면 `/myself`를 한 번 확인한다. 토큰이 유효하면(200) 404와 같이 해당 `jira/<KEY>.md`에 `in_scope: false`를 달고 동기화를 계속한다. 토큰 자체가 거부되면 `AuthError`(종료 2)로 멈춘다.
+- 단, `python scripts/kb.py sync --key <KEY>`로 직접 지정한 키가 403이면 기존과 같이 종료 2다. `python scripts/kb.py act` 쓰기의 401/403은 `/myself` 200이면 `failed`(종료 1), 401이면 `pending`(종료 2)이다.
+- `python scripts/kb.py sync --jql "key = <실제키>" --dry-run`으로 먼저 확인한 뒤 `python scripts/kb.py sync --full`을 실행하고 `in_scope: false`·`moved_to` 표시를 본다.
+
+### 4. Confluence 링크·주석 처리
+
+- `confluence_push`는 Markdown 변환 결과에서 `http`·`https`·`mailto` 스킴의 `<a>` 링크만 남기고, `javascript:`·`data:`·상대 경로·`#앵커`는 일반 글자로 바꾼다. 모든 `<img>` 태그는 `src`와 상관없이 `alt` 글자로 바꾼다(위키링크 `[[…]]`는 사전 별도 변환).
+- HTML 주석(`<!-- … -->`)은 코드 블록과 인라인 코드 밖에서만 지운다. 코드 안 주석은 그대로 남는다.
+- `python scripts/kb.py push --dry-run`(네트워크·PAT 없이 계획 확인)으로 대상 파일을 본 뒤 `python scripts/kb.py push --only <경로> --dry-run`과 `python scripts/kb.py push --only <경로>`로 게시 결과를 확인한다.
 
 ## 관찰 (자동 기록)
 
