@@ -77,7 +77,7 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 .venv\Scripts\python.exe scripts\kb.py init
 ```
 
-- `environment`는 반드시 `company`. 그러면 LLM 주소에 공개 클라우드 호스트를 넣을 수 없다.
+- `environment`는 반드시 `company`. 그러면 LLM 주소에 공개 클라우드 호스트나 공개 IP를 넣을 수 없다.
 - Jira: base_url → PAT → 연결 확인 → 프로젝트 목록에서 `project_keys` 선택(번호 입력).
 - Confluence: base_url → PAT → 개인 스페이스 자동 탐지 → 부모 페이지(선택).
 - LLM: 주소 → 키(있으면) → 모델 선택 → 자동 탐지(json_mode·vision·추론 토글·컨텍스트). fallback 프로필도 같은 절차.
@@ -111,7 +111,7 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 .venv\Scripts\python.exe scripts\kb.py sync --full
 ```
 
-`--jql … --dry-run`은 받기만 하고 아무것도 쓰지 않는다. 결과가 기대와 맞으면 `sync --full`로 `project_keys × jql_mine` 범위를 받는다. 이어서 `kb.py status`로 동기화 시각을 확인한다.
+`--jql … --dry-run`은 받기만 하고 아무것도 쓰지 않는다. 결과가 기대와 맞으면 `sync --full`로 `project_keys × jql_mine` 범위를 받는다. 범위에서 빠진 기존 일감이 403을 주더라도 토큰(`/myself`)이 정상이면 멈추지 않고 `in_scope: false`로 표시한다. 이어서 `kb.py status`로 동기화 시각을 확인한다.
 
 ### 7. Neovim
 
@@ -124,10 +124,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
 nvd --restart
 ```
 
-- `install.ps1`은 `.venv`(2단계에서 이미 만들었으면 유지), 사용자 환경 변수 `WORK_KB_ROOT`, 읽기 전용 점검만 한다. pip가 막혀 있으면 `-Offline`을 준다(`wheels/` 사용). 먼저 `-WhatIf`로 할 일만 볼 수 있다.
+- `install.ps1`은 `.venv`(3.14면 유지, 아니면 `-Yes`로 이름을 바꿔 두고 새로 만듦), 사용자 환경 변수 `WORK_KB_ROOT`, 읽기 전용 점검만 한다. pip가 막혀 있으면 `-Offline`을 준다(내려받기 없이 `wheels/`와 로컬 Python만 사용). 다른 클론이 정한 `WORK_KB_ROOT`가 있으면 바꿀지 묻고, `uninstall.ps1`은 자기 클론이 정한 값만 되돌린다. 먼저 `-WhatIf`로 할 일만 볼 수 있다.
 - 환경 변수는 새 터미널부터 보이고 데몬의 환경은 시작할 때 고정되므로, **새 터미널**에서 `nvd --restart`를 한다(수정한 버퍼가 있으면 거부하니 먼저 저장).
 - Neovim에서 `:checkhealth work-kb`가 코드 루트·볼트·접두 키·Python·상주 서버를 점검한다.
-- 캡처 테스트는 `<leader>k` 다음 `c`로 한 줄, `C`(클립보드 이미지)나 `F`(파일)로 이미지 한 번씩.
+- 캡처 테스트는 `<leader>k` 다음 `c`(분할 버퍼에 입력 후 `C-c C-c` 저장)로 한 줄, `C`(클립보드 이미지)나 `F`(파일)로 이미지 한 번씩.
 - 접두 키 교체(한 줄, 두 방법): nvim-config의 `lua\plugins\work-kb.lua`에서 `opts = { prefix = "<F8>" }`, 또는 키 하나를 `vim.keymap.set("n", "<F8>c", function() require("work-kb").call("capture") end)`로 붙인다. 바꾼 뒤 `nvd --restart`. 자세한 것은 `docs/USER-GUIDE.md` 6.2절.
 
 ### 8. Obsidian
@@ -164,18 +164,18 @@ nvd --restart
 1. `kb.py doctor`: 위 5단계 기준.
 2. `kb.py sync --jql "key = <실제키>" --dry-run`: 일감이 기대대로 나오는지.
 3. `kb.py status`: environment가 `company`, 프로필 연결·탐지 결과가 보이는지.
-4. 접두 키 `c`로 캡처 한 줄 → `daily/오늘.md`의 `## 기록` 끝에 `- HH:MM …`이 생겼는지.
+4. 접두 키 `c`로 캡처 한 줄(입력 후 `C-c C-c`) → `daily/오늘.md`의 `## 기록` 끝에 `- HH:MM …`이 생겼는지.
 5. `kb.py link --dry-run` 후 `kb.py link`: 두 번째 실행은 바뀌는 파일이 0개여야 한다.
 6. 탐지 결과 확인: `docs/LIVE.md`의 예와 비교해 `json_mode`·`vision`·`reasoning_toggle`이 말이 되는지.
 
 ## 첫 2주에 확인할 것
 
 - **캡처 습관**: 하루 몇 줄이든 `접두 키 c`로 던지고 분류하지 않는다. 폴더·태그를 고르고 싶어지면 그건 설계 문제이니 적어 둔다.
-- **link**: `wiki/projects/`·`wiki/people/`의 `언급`이 맞는 곳에 쌓이는지. 키가 잘못 인식되면(`project_keys` 밖의 `ABC-123` 같은 낱말) 목록을 적는다.
+- **link**: `wiki/projects/`·`wiki/people/`(승인한 주제가 있다면 `wiki/topics/`도)의 `언급`이 맞는 곳에 쌓이는지. 키가 잘못 인식되면(`project_keys` 밖의 `ABC-123` 같은 낱말) 목록을 적는다.
 - **sync**: 15분 스케줄이 돌아 `kb.py status`의 마지막 동기화가 최근인지, 이슈 수가 Jira 화면과 맞는지, 이동된 일감(moved)이 따라가는지.
 - **로그**: `.state/logs/`에 오류가 쌓이지 않는지(`docs/SCHEDULING.md`).
-- **쓰기**: `kb.py act`로 작은 댓글 하나, 사용한다면 전환 하나. `kb.py act list`에 `pending`·`failed`·`uncertain`이 남지 않는지.
-- **ingest/compile 도입 후**: 처음에는 `--dry-run` diff를 눈으로 보고, `wiki/decisions.md`의 `제안` 항목 근거(출처 줄)가 맞는지, 이미지 사이드카가 쓸 만한지, `포기한 편찬 단위`가 늘지 않는지.
+- **쓰기**: `kb.py act`로 작은 댓글 하나, 사용한다면 전환 하나. `kb.py status`와 `kb.py act list`에 `pending`·`failed`·`uncertain`이 남지 않는지.
+- **ingest/compile 도입 후**: 처음에는 `--dry-run` diff를 눈으로 보고, `wiki/decisions.md`의 `제안` 항목 근거(출처 줄)가 맞는지, 이미지 사이드카가 쓸 만한지(`inbox/`에 같은 이름 노트나 다른 확장자 이미지가 있으면 `이름.확장자.md`로 생성), `포기한 편찬 단위`가 늘지 않는지.
 - **비용·시간**: compile이 걸리는 시간, 탐지된 추론 방식이 실제 서버 응답과 맞는지.
 - **Confluence**: `kb.py push --dry-run` 계획이 `push_globs`(wiki 페이지)만 포함하는지, 개인 스페이스에서 첫 페이지를 확인.
 - **적어 둘 것**: 막힌 점, 어색한 한국어 문구, 빠진 기능. 11단계 규칙대로 말로 적어 집에서 반영한다.
