@@ -20,7 +20,7 @@ BOM = b"\xef\xbb\xbf"
 DAILY_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
 TIME_PREFIX = re.compile(r"^- (?:\[[ xX>]\] )?(\d{2}:\d{2})(?:\s|$)")
 HEADING2 = re.compile(r"^## +(.+?)\s*$")
-FENCE = re.compile(r"^(```|~~~)")
+FENCE = re.compile(r"^(`{3,}|~{3,})(.*)$")
 URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
 # CommonMark 코드 스팬: 같은 길이의 백틱 줄로 열고 닫는다(``KB-5``, ```a `b` c```).
 INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
@@ -96,39 +96,47 @@ def _region_lookup(data: bytes) -> list[tuple[str, int, int]]:
         return []
 
 
+def _is_closing_fence(stripped: str, fence_char: str, fence_len: int) -> bool:
+    if not fence_char:
+        return False
+    tail = stripped.lstrip(fence_char)
+    return len(stripped) - len(tail) >= fence_len and not tail.strip(" \t")
+
+
 def iter_lines(rel: str, data: bytes) -> Iterator[NoteLine]:
     """줄마다 NoteLine을 낸다. 해독 실패는 호출자가 처리한다(UnicodeDecodeError)."""
     rel = rel.replace("\\", "/")
     day = day_of(rel)
     spans = _region_lookup(data)
     text = decode(data)
+    fm = frontmatter._locate(data)
+    front_end = fm[2] if fm is not None else 0
     offset = len(BOM) if data.startswith(BOM) else 0
     in_fence = False
-    in_front = False
-    fence_mark = ""
+    fence_char = ""
+    fence_len = 0
     for lineno, raw in enumerate(split_lines(text, keepends=True), start=1):
         line = raw.rstrip("\r\n")
         stripped = line.strip()
         region = next((name for name, start, end in spans if start <= offset < end), None)
         is_marker = managed._MARKER.fullmatch(line.encode("utf-8")) is not None
-        if lineno == 1 and stripped == "---":
-            in_front = True
+        if offset < front_end:
             in_code = True
-        elif in_front:
+        elif in_fence:
             in_code = True
-            if stripped == "---":
-                in_front = False
+            if _is_closing_fence(stripped, fence_char, fence_len):
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
         else:
             fence = FENCE.match(stripped)
-            if fence and (not in_fence or stripped.startswith(fence_mark)):
+            if fence and (fence.group(1)[0] != "`" or "`" not in fence.group(2)):
                 in_code = True
-                if in_fence:
-                    in_fence = False
-                else:
-                    in_fence = True
-                    fence_mark = fence.group(1)
+                in_fence = True
+                fence_char = fence.group(1)[0]
+                fence_len = len(fence.group(1))
             else:
-                in_code = in_fence or is_marker
+                in_code = is_marker
         time_match = TIME_PREFIX.match(line)
         yield NoteLine(
             rel=rel,
@@ -147,27 +155,25 @@ def iter_lines(rel: str, data: bytes) -> Iterator[NoteLine]:
 def section_span(data: bytes, heading: str) -> tuple[int, int] | None:
     """`## heading` 본문의 바이트 범위 (제목 줄 다음부터 다음 `## ` 전까지, 끝의 빈 줄 제외)."""
     text = decode(data)
-    offset = len(BOM) if data.startswith(BOM) else 0
     start: int | None = None
     end: int | None = None
     last_nonblank_end: int | None = None
-    for raw in split_lines(text, keepends=True):
-        line = raw.rstrip("\r\n")
-        match = HEADING2.match(line)
+    for raw, note_line in zip(split_lines(text, keepends=True), iter_lines("", data)):
+        next_offset = note_line.offset + len(raw.encode("utf-8"))
+        match = None if note_line.in_code else HEADING2.match(note_line.text)
         if match:
             if start is not None:
-                end = offset
+                end = note_line.offset
                 break
             if match.group(1).strip() == heading.strip():
-                start = offset + len(raw.encode("utf-8"))
+                start = next_offset
                 last_nonblank_end = start
-        elif start is not None and line.strip():
-            last_nonblank_end = offset + len(raw.encode("utf-8"))
-        offset += len(raw.encode("utf-8"))
+        elif start is not None and note_line.text.strip():
+            last_nonblank_end = next_offset
     if start is None:
         return None
     if end is None:
-        end = offset
+        end = len(data)
     if last_nonblank_end is not None and last_nonblank_end < end:
         end = last_nonblank_end
     return (start, end)

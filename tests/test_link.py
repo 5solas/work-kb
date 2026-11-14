@@ -785,3 +785,14 @@ def test_sample_vault_idempotent(tmp_path, fake_now):
     assert crlf.count(b"\r\n") == crlf.count(b"\n") > 0
     assert "- 13:10 [[KB-12]] 리뷰 코멘트 반영 (`KB-555` 인라인 코드는 무시)\r\n".encode("utf-8") in crlf
     assert "- [[2026-11-04]] 14:00 [[OPS-3|배포 체크리스트]] 별칭 링크로 정리" in _region(root / "jira" / "OPS-3.md")
+
+
+def test_no_normalize_inside_long_fence(vault, fake_now):
+    fake_now(NOW)
+    cfg = _setup(vault)
+    text = "## 기록\n- 09:00 예시 코드\n````markdown\n```\nKB-1 은 코드 예시 안의 키\n```\n````\n"
+    path = _write(vault, "daily/2026-11-15.md", text)
+    summary = link.run(cfg)
+    assert path.read_text(encoding="utf-8") == text
+    assert summary["normalized_lines"] == 0
+    assert not (vault / "jira" / "KB-1.md").exists()

@@ -257,3 +257,10 @@ def test_page_template_plain_names_stay_unquoted():
     assert body.startswith("---\ntype: topic\nname: 배포 준비\naliases: []\nupdated: 2026-11-05\n---\n# 배포 준비\n")
     _rel, body = notes.page_template("project", "KB", title="- 캐시: 정리", today="2026-11-05")
     assert frontmatter.parse(body.encode("utf-8"))["title"] == "- 캐시: 정리"
+
+
+def test_unclosed_frontmatter_is_body():
+    src = "---\n## 기록\n- [ ] 개인 할 일\n- 10:00 KB-7 논의\n".encode("utf-8")
+    lines = list(notes.iter_lines("daily/2026-11-14.md", src))
+    assert lines[0].text == "---" and not lines[0].in_code
+    assert any(line.text == "- [ ] 개인 할 일" and not line.in_code for line in lines)

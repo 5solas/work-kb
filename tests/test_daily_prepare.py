@@ -643,3 +643,23 @@ def test_cli_without_project_keys_exit_4(vault, run_kb):
 def test_agent_mode_allowed(cfg, vault, run_kb):
     proc = run_kb("today", "--date", "2026-11-05", env={"KB_AGENT": "1"})
     assert proc.returncode == 0, proc.stderr
+
+
+def test_skeleton_idempotent_with_leading_hr(cfg, vault):
+    path = _daily(vault, "2026-11-15")
+    _write(path, "---\n## 기록\n- 10:00 메모\n")
+    daily_prepare.run(cfg, dt.date(2026, 11, 15), carryover=False)
+    once = path.read_bytes()
+    daily_prepare.run(cfg, dt.date(2026, 11, 15), carryover=False)
+    assert path.read_bytes() == once
+    assert once.decode("utf-8").count("## 기록") == 1
+
+
+def test_carryover_after_fenced_heading(cfg, vault):
+    _write(
+        _daily(vault, "2026-11-14"),
+        "## 기록\n- [ ] 할 일 A\n```bash\n## 셸 주석처럼 보이는 줄\n```\n- [ ] 할 일 B\n",
+    )
+    daily_prepare.run(cfg, dt.date(2026, 11, 15))
+    carry = _region(_daily(vault, "2026-11-15").read_bytes(), "carryover")
+    assert any("할 일 B" in line for line in carry)
