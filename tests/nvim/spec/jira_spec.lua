@@ -2,22 +2,12 @@
 -- 커서 위치 읽기는 실제 open.lua, 파일 열기(open_key·open_at_point)만 기록.
 local H = require("helpers")
 
-local KEY = "[A-Z][A-Z0-9_]+%-[0-9]+"
-
 local function jira()
   return require("work-kb.jira")
 end
 
 local function proc()
   return require("work-kb.proc")
-end
-
-local function trim(s)
-  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
-end
-
-local function key_char(b)
-  return b ~= nil and string.char(b):match("[A-Za-z0-9_%-]") ~= nil
 end
 
 ---open 모듈의 부분 가짜: 커서 위치 읽기(thing_at_point·link_key·key_on_line …)는 실제 open.lua를 쓰고,
