@@ -618,6 +618,30 @@ def test_leaked_lock_ends_the_server(vault, tmp_path, start_server, wrapper):
         pass
 
 
+def test_exits_after_code_change(vault, tmp_path, fake_now, start_server):
+    """가져온 scripts/ 모듈 파일이 바뀌면 응답을 보낸 뒤 종료 0: 옛 코드로 계속 돌지 않는다(C-04, P-06).
+
+    저장소 파일의 mtime을 건드리지 않게 scripts/를 임시 폴더에 복사해 그 복사본으로 서버를 띄운다.
+    """
+    fake_now(NOW)
+    prepare(vault)
+    scripts = tmp_path / "scripts-copy"
+    shutil.copytree(SCRIPTS, scripts, ignore=shutil.ignore_patterns("__pycache__"))
+    env = child_env(tmp_path, vault)
+    v = str(vault)
+    for changed in ("status.py", "lib/core.py"):
+        server = start_server(env, script=scripts / "kb.py")
+        assert server.run(["status", "--root", v])[0] == 0
+        assert server.ping() and server.proc.poll() is None  # 바뀐 것이 없으면 계속 돈다
+        target = scripts / changed
+        stat = target.stat()
+        os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+        code, out = server.run(["status", "--root", v])  # 이번 응답은 보낸 뒤 끝난다
+        assert code == 0, out
+        assert server.proc.wait(timeout=15) == 0, changed
+        assert "코드가 바뀌어" in server.err(), server.err()
+
+
 def test_two_vaults_alternate_without_cross_talk(vault, tmp_path, fake_now, start_server):
     fake_now(NOW)
     other = tmp_path / "두 번째 볼트 (B)" / "work-kb"
