@@ -6,7 +6,7 @@
 - Jira가 진실의 원천이다. 쓰기는 작은 것만 큐를 거쳐 보내고, 자동 상태 전환은 없다.
 - LLM 없이도 동작한다. 없으면 위키 편찬 단계만 빠진다.
 - 이 브랜치(`nvim`)는 Neovim 플러그인(`nvim/`)을 담는다. Neovim 자체(폰트, LSP, `nvd` 데몬)는 별도 저장소 [nvim-config](https://github.com/5solas/nvim-config)(비공개)가 맡고, work-kb는 환경 변수 `WORK_KB_ROOT`로 그 위에 플러그인 하나로 붙는다.
-- `main` 브랜치는 같은 저장소의 Emacs 판이다. Python 쪽은 두 브랜치가 같다.
+- `main` 브랜치는 같은 저장소의 Emacs 판이다. Python 쪽은 두 브랜치가 거의 같다. nvim 판에는 `kb.py serve`(편집기용 상주 서버)와 `kb.py doctor`의 Neovim 점검이 더 있다.
 
 ## 빠른 설치 (새 Windows PC)
 
@@ -16,7 +16,17 @@
 4. 새 터미널을 열고 `nvd --restart`, 이어서 `.venv\Scripts\python.exe scripts\kb.py init`
 5. Neovim(`nvd`)에서 `:checkhealth work-kb`, 그다음 Space k c로 한 줄을 캡처한다.
 
-Python 3.13 또는 3.14와 Neovim 0.11 이상이 필요하다. 설치 위치와 전체 절차는 사용자 안내서에 있다.
+Python 3.14와 Neovim 0.12 이상이 필요하다. 지원하는 Python은 3.14 하나다. 설치 위치와 전체 절차는 사용자 안내서에 있다.
+
+## 개발
+
+시험용 가상환경은 pip가 들어 있게 만든다(설치 시험이 pip로 의존성 확인을 흉내 낸다).
+
+```powershell
+uv venv --seed --python 3.14 .venv
+.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.venv\Scripts\python.exe -m pytest -q
+```
 
 ## 문서
 

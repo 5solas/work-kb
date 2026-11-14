@@ -1,7 +1,7 @@
 # 회사 PC로 옮기기 (DEPLOY)
 
 집에서 만든 저장소 폴더를 회사 Windows PC로 복사하고 `kb.py init` 한 번으로 연결한다.
-각 단계의 인용문(`>`)이 체크리스트 원문이고, 그 아래가 보충이다.
+각 단계의 인용문(`>`)이 체크리스트(지시서 §9) 원문이고, 그 아래가 보충이다. 7단계는 Neovim에 맞게 고친 문구다(원문은 Emacs 판 절차, `docs/DECISIONS.md` 1장).
 
 > 이 문서의 주소 예시(`https://jira.example.invalid` 등)는 자리표시자다. 실제 주소는 `config.local.yaml`에만 들어간다.
 
@@ -9,9 +9,9 @@
 
 | 항목 | 내용 |
 |---|---|
-| Python | **3.13 또는 3.14** (64비트) 권장. 3.15는 PyPI에 PyYAML wheel이 없다. 인터넷이 되면 pip가 원본(sdist)에서 순수 Python으로 빌드하지만(느리고 libyaml 가속 없음), `--no-index --find-links wheels` 설치는 실패한다. 더 낮은 버전은 거부된다 |
+| Python | **3.14** (64비트). 지원하는 버전은 3.14 하나다. 더 낮은 버전은 `kb.py`가 거부한다(종료 4). 3.15는 PyPI에 PyYAML wheel이 없다. 인터넷이 되면 pip가 원본(sdist)에서 순수 Python으로 빌드하지만(느리고 libyaml 가속 없음), `--no-index --find-links wheels` 설치는 실패한다 |
 | pip | `python -m venv` + `pip`면 충분하다. 다른 도구는 필요 없다 |
-| Neovim / Obsidian | Neovim 0.11 이상(Neovide는 선택), Obsidian(Bases 지원 버전) |
+| Neovim / Obsidian | Neovim 0.12 이상(Neovide는 선택), Obsidian(Bases 지원 버전) |
 | 네트워크 | 사내 Jira·Confluence·LLM 서버에 닿으면 된다. pip가 막혀 있으면 `wheels/`로 설치 |
 | `kb.py demo` | `tests/`를 제외하므로 회사 PC에서는 **쓸 수 없다**(집 전용). 회사에서는 6단계의 dry-run으로 확인한다 |
 
@@ -25,22 +25,23 @@
 
 | 경로 | 이유 |
 |---|---|
-| `config.local.yaml` | 집 연결 값. 회사에서 `init`이 새로 만든다 |
+| `config.local.yaml`, `.env` | 집 연결 값. 회사에서 `init`이 새로 만든다 |
 | `.state/` | 원장·동기화 시각·로그 |
 | `_trash/` | 집에서 지운 것 |
 | `examples/` | 샘플 볼트 |
-| `daily/*.md`, `inbox/` 내용, `raw/assets/` 내용 | 집에서 만든 노트·이미지 (폴더와 `.gitkeep`은 남긴다) |
+| `daily/*.md`, `inbox/` 내용, `raw/` 안의 파일 전부(`raw/assets` 포함) | 집에서 만든 노트·원문·이미지 (폴더와 `.gitkeep`은 남긴다) |
 | `jira/*.md`, `jira/_views/*.md`, `jira/outbox.jsonl`, `jira/.cache.sqlite*` | 집 모의 서버 캐시와 큐 |
-| `wiki/index.md` `wiki/decisions.md` `wiki/actions.md` `wiki/_proposals.md` `wiki/_lint.md`, `wiki/projects/*.md` `wiki/people/*.md` `wiki/topics/*.md` | 집에서 생성된 페이지 |
-| `.venv*` (`.venv`, `.venv313`) | 가상환경은 경로가 박혀 있어 옮길 수 없다. 회사에서 새로 만든다 |
+| `wiki/` 아래 `*.md` 전부: `wiki/index.md` `wiki/decisions.md` `wiki/actions.md` `wiki/_proposals.md` `wiki/_lint.md`, `wiki/projects/*.md` `wiki/people/*.md` `wiki/topics/*.md` 등 | 집에서 생성된 페이지 (`wiki/엔티티.base`와 `.gitkeep`은 남긴다) |
+| `.venv*` (`.venv`, `.venv313` 등, 어느 폴더에서든) | 가상환경은 경로가 박혀 있어 옮길 수 없다. 회사에서 새로 만든다 |
 | `.git` | 이력은 옮기지 않는다 |
-| `.pytest_cache`, `__pycache__` | 캐시 |
+| `.pytest_cache`, `__pycache__` (어느 폴더에서든) | 캐시 |
 | `tests/` | 회사에서 테스트·demo를 돌리지 않는다. 모의 서버와 허구 fixture가 들어 있다 |
-| `.obsidian/` | 볼트별 설정 |
+| `.obsidian/` (어느 폴더에서든) | 볼트별 설정 |
+| 임시·백업 파일 `.*.tmp`, `*~`, `#*#`, `.#*` | 편집기·원자적 쓰기가 남긴 것 |
 
 남기는 것: `scripts/`, `nvim/`, `install.ps1`, `uninstall.ps1`, `obsidian/`, `prompts/`, `docs/`, `config.yaml`, `config.local.example.yaml`, `requirements*.txt`, `AGENTS.md`, `CLAUDE.md`, `.gitignore`, `.gitattributes`, **`wheels/`**(만들었다면), 빈 폴더 구조(`daily/` `inbox/` `raw/assets/` `jira/_views/` `wiki/…` 의 `.gitkeep`).
 
-집에서는 `python scripts/deploy_check.py <대상 폴더>`가 같은 제외 규칙으로 복사하고 제외 경로가 없는지 확인한다(있을 때).
+집에서는 `python scripts/deploy_check.py <대상 폴더>`가 이 표와 같은 제외 규칙으로 복사하고 제외 경로가 없는지 확인한다(`docs/PACKAGING.md` 3절).
 폴더 이름에 한글·공백이 있어도 된다(`D:\업무 도구\work-kb`처럼).
 
 ### 2. Python과 의존성
@@ -48,7 +49,7 @@
 > Python 최신 확인, `pip install -r requirements.txt`(불가 시 `--no-index --find-links wheels`). 환경변수 `PYTHONUTF8=1`.
 
 ```powershell
-python --version                      # 3.13.x 또는 3.14.x
+python --version                      # 3.14.x
 python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 # pip가 막혀 있을 때 (집에서 kb.py wheels로 만든 wheels/ 사용)
@@ -57,10 +58,10 @@ setx PYTHONUTF8 1                     # 새 터미널부터 적용
 ```
 
 - `python`이 없으면 `py -3.14 -m venv .venv`. `py -3`이 동작하지 않는 PC도 있으니 안 되면 `python`을 쓴다.
-- 3.15: PyPI에 PyYAML wheel이 없다. 인터넷이 되면 `pip`가 원본(sdist)에서 순수 Python wheel을 빌드해 설치한다(느리고 libyaml 가속 없음). `--no-index --find-links wheels`는 `wheels/`에 3.15용 wheel이 없어 실패한다. 3.14 또는 3.13으로 venv를 만드는 것을 권장한다.
+- 3.15: PyPI에 PyYAML wheel이 없다. 인터넷이 되면 `pip`가 원본(sdist)에서 순수 Python wheel을 빌드해 설치한다(느리고 libyaml 가속 없음). `--no-index --find-links wheels`는 `wheels/`에 3.15용 wheel이 없어 실패한다. 3.14로 venv를 만든다.
 - 스크립트는 `.venv\Scripts\python.exe scripts\kb.py …`로 실행한다. (스케줄과 Neovim 플러그인은 이 경로를 자동으로 쓴다.)
 - `PYTHONUTF8=1`이 없어도 `kb.py`와 Neovim·스케줄은 `-X utf8`을 직접 넘기지만, 터미널에서 직접 칠 때를 위해 설정해 둔다.
-- wheels 만들기(집): `python scripts/kb.py wheels --targets 3.13,3.14`. 결과는 `wheels/`와 `wheels/MANIFEST.txt`. 상세는 `docs/PACKAGING.md`.
+- wheels 만들기(집): `python scripts/kb.py wheels`(대상은 3.14). 결과는 `wheels/`와 `wheels/MANIFEST.txt`. 상세는 `docs/PACKAGING.md`.
 
 ### 3. PAT 만들기
 
@@ -127,6 +128,7 @@ nvd --restart
 - 환경 변수는 새 터미널부터 보이고 데몬의 환경은 시작할 때 고정되므로, **새 터미널**에서 `nvd --restart`를 한다(수정한 버퍼가 있으면 거부하니 먼저 저장).
 - Neovim에서 `:checkhealth work-kb`가 코드 루트·볼트·접두 키·Python·상주 서버를 점검한다.
 - 캡처 테스트는 `<leader>k` 다음 `c`로 한 줄, `C`(클립보드 이미지)나 `F`(파일)로 이미지 한 번씩.
+- 접두 키 교체(한 줄, 두 방법): nvim-config의 `lua\plugins\work-kb.lua`에서 `opts = { prefix = "<F8>" }`, 또는 키 하나를 `vim.keymap.set("n", "<F8>c", function() require("work-kb").call("capture") end)`로 붙인다. 바꾼 뒤 `nvd --restart`. 자세한 것은 `docs/USER-GUIDE.md` 6.2절.
 
 ### 8. Obsidian
 

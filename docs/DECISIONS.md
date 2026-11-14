@@ -1,21 +1,22 @@
 # 결정 기록
 
-> 이 파일은 구축 중 작업 문서입니다. 충돌 시 우선순위: 1장 → 2장 → 부록 A(원 설계) → 지시서. 1~3장은 한국어이고, 부록 A–C는 구축 중 작업 자료라 영어 원문 그대로 둡니다(구축 단계 부록에 한해 지시서 §3.10에서 의도적으로 벗어남).
+> 이 파일은 구축 중 작업 문서입니다. 충돌 시 우선순위: 6장(nvim 판, 가장 최근) → 1장 → 2장 → 부록 A(원 설계) → 지시서. 1~3장은 한국어이고, 부록 A–C는 구축 중 작업 자료라 영어 원문 그대로 둡니다(구축 단계 부록에 한해 지시서 §3.10에서 의도적으로 벗어남).
 
-## 0. 상태 요약과 사용자 확인 대기 (2026-11-05 기준)
+## 0. 상태 요약과 사용자 확인 대기 (2026-11-15 기준, nvim 판)
 
-Phase 0~6 구축 완료. 자동 관문은 전부 통과했고(§3의 Phase별 기록), 아래는 코드로 확인할 수 없어 **사용자가 직접 확인해야 하는 항목**이다(D31). 확인되면 이 목록에서 지운다.
+Phase 0~6 구축과 Neovim 포팅(6장) 완료. 자동 관문은 전부 통과했고(§3의 Phase별 기록, `docs/USER-GUIDE.md` 9절), 아래는 코드로 확인할 수 없어 **사용자가 직접 확인해야 하는 항목**이다(D31). 확인되면 이 목록에서 지운다. Emacs 판의 같은 목록은 `main` 브랜치에 있다.
 
 | Phase | 항목 | 방법 |
 |---|---|---|
-| 1 | Emacs 텍스트 캡처 | `C-c k c` → 입력 → `C-c C-c` → 오늘 daily `## 기록` 끝에 `- HH:MM …` 줄 |
-| 1 | 클립보드 이미지 캡처 | 화면 캡처 후 `C-c k C` → `raw/assets/…png`와 `![[…]]` 줄; 텍스트만 복사한 뒤 `C-c k C`는 안내만 |
-| 1 | 파일 이미지 캡처 | dired에서 `C-c k F` |
-| 1 | 접두 키 교체 | `(setq work-kb-prefix-key "C-c c")` 뒤 재로드 → `C-c c c` 동작 |
+| 1 | Neovim 텍스트 캡처 | Neovide 창(`nvd`)에서 `<leader>kc` → 분할 버퍼에 입력 → `C-c C-c` → 오늘 daily `## 기록` 끝에 `- HH:MM …` 줄. 한글 입력기(IME)로도 한 번 |
+| 1 | 클립보드 이미지 캡처 | 화면 캡처 후 `<leader>kC` → `raw/assets/…png`와 `![[…]]` 줄; 텍스트만 복사한 뒤 `<leader>kC`는 안내만 |
+| 1 | 파일 이미지 캡처 | `<leader>kF` → 이미지 파일 고르기 |
+| 1 | 접두 키 교체(§6.8, 한 줄) | 두 방법을 한 번씩: nvim-config `lua\plugins\work-kb.lua`의 `opts = { prefix = "<F8>" }` 뒤 `nvd --restart` → `<F8>c` 동작. 또는 `vim.keymap.set("n", "<F8>c", function() require("work-kb").call("capture") end)` 한 줄 → `<F8>c` 동작 |
 | 1 | 클립보드 테스트 | 일반 PowerShell: `$env:KB_REQUIRE_CLIPBOARD='1'; .venv\Scripts\python.exe -m pytest -q tests/test_clip_image.py` (빌드 셸에서는 클립보드를 열 수 없었음) |
 | 2 | Obsidian Bases | `jira/_views/일감.base`, `wiki/엔티티.base`를 열어 표·그룹·정렬 확인(`sort` 키 문법은 문서에 없어 미확인) |
 | 6 | 스케줄 등록 | `kb.py schedule --print`가 낸 `/Create` 하나 등록 → `/Run` → `/Query` → `/Delete` |
-| 6 | capture.ahk (선택) | AutoHotkey v2 설치 후 Ctrl+Alt+Shift+C/V |
+| 6 | capture.ahk (선택) | AutoHotkey v2 설치 후 Ctrl+Alt+Shift+C/V → `nvd` 데몬에 `:WorkKb capture`·`capture-clipboard-image` |
+| 6장 | 새 PC 설치 | nvim-config 설치 → `install.ps1` → 새 터미널에서 `nvd --restart` → `:checkhealth work-kb`(`docs/USER-GUIDE.md` 5.2절) |
 | 회사 | §9 전체 | 실제 Jira·Confluence·사내 LLM은 집에서 확인 불가. `doctor`와 `sync --jql … --dry-run`으로 첫 실행 확인 |
 
 ## 1. 지시서와 달라지는 점
@@ -24,11 +25,17 @@ Phase 0~6 구축 완료. 자동 관문은 전부 통과했고(§3의 Phase별 �
 
 | 지시서 | 변경 | 이유 |
 |---|---|---|
-| §2 최신 Python | `.venv`는 3.14, 3.13도 함께 테스트. 3.15는 미지원으로 안내 | PyYAML 6.0.3에 cp315 wheel이 없음(확인함). `wheels/` 경로가 깨짐 |
-| §6.8 `work-kb-python` 기본 `py -3` | 기본 nil. `.venv` → `python` → `py -3` 순으로 찾음 | `py -3`이 이 PC에서 실패(확인함) |
-| §6.8 utf-8 인수 전달 | 명령줄은 ASCII만, 실제 인수는 stdin JSON(`--argv-stdin`) | Emacs가 한글 인수를 깨뜨림 |
+| §2 최신 Python(3.13+) | 3.14 하나만 지원·검증(D-NV1, 6장). 3.13 게이트 없음. 3.15는 미지원으로 안내 | PyYAML 6.0.3에 cp315 wheel이 없음(확인함), `wheels/` 경로가 깨짐. 3.13만의 문제는 없었고 두 버전을 맞추는 비용만 있었음 |
+| §6.8 `work-kb-python` 기본 `py -3` | Neovim 플러그인 `python` 옵션은 기본 없음. `.venv` → `python` → `py -3` 순으로 찾음 | `py -3`이 이 PC에서 실패(확인함) |
+| §6.8 utf-8 인수 전달 | 명령줄은 ASCII만, 실제 인수는 stdin JSON(`--argv-stdin`). Neovim 판도 같은 방식 | 편집기가 한글 인수를 깨뜨림(Emacs에서 확인) |
 | §6.8 `clip_image.ps1` | `powershell.exe` 5.1 `-STA`로 실행 | pwsh 7에 `-Format` 없음(확인함) |
-| §6.8 AHK Win+Shift+C/V, `emacsclient -n -e` | Ctrl+Alt+Shift+C/V, `-n -c -e` | PowerToys가 Win+Shift+C를 점유, 데몬에 보이는 프레임 없음(에이전트 보고, 내 재확인 없음) |
+| §6.8 AHK Win+Shift+C/V, `emacsclient -n -e` | Ctrl+Alt+Shift+C/V. Neovim 판은 nvim-config 데몬(`nvd`)에 `:WorkKb`를 보냄(6장 8) | PowerToys가 Win+Shift+C를 점유(에이전트 보고, 내 재확인 없음) |
+| §4 `emacs/` 폴더, §6.8 Emacs 판 | `nvim/` 폴더의 Neovim 플러그인(`lua/work-kb/`, `plugin/`, `after/ftplugin/`, `capture.ahk`). 일반 설정은 nvim-config | nvim 브랜치는 Neovim 판(6장 1·4) |
+| §6.8 접두 키 한 줄 교체 | 기본 `<leader>k`. 한 줄로 교체: setup의 `prefix`, 또는 `vim.keymap.set(… require("work-kb").call("capture") …)` | 사용자의 선택(6장 3). 한 줄 교체 요구는 그대로 지킴(§0 확인 항목) |
+| §6.8 transient 메뉴(`j`) | 자체 Jira 메뉴(`jira.lua`): 메뉴를 띄우고 키 하나를 더 누름. 같은 키 v c t a w n p q S f d | Neovim에는 transient가 없음 |
+| §6.8 접두 인수 `C-u g`(편찬 미리 보기) | 별도 키 `G`(`ingest-dry-run`) | Neovim에는 접두 인수 관례가 없어 키를 따로 둠 |
+| §6.8 consult 검색 | fzf-lua(있으면, 대화형·정규식) → rg(구 그대로) → `kb.py search`(공백 AND) | Neovim 쪽 대응 도구. rg를 AND로 바꾸지 않고 문서를 맞춤(2026-11 개선 합의 K6) |
+| §9.7 Emacs 설치 절차 | DEPLOY 7단계: nvim-config 설치 확인, `install.ps1`, 새 터미널에서 `nvd --restart`, `:checkhealth work-kb`, 캡처 시험 | Neovim 판. DEPLOY의 나머지 10단계는 원문 그대로 |
 | §5.0 구역 통째 재작성 | 구역 방식 3가지: replace / append(`decisions`, `actions`) / merge(`today`, `carryover`) | 재실행 시 `[x]`와 '확정'이 지워짐 |
 | §6.5 think 처리 | `reasoning`, `reasoning_content`, 여는 태그 없는 `</think>`까지 처리 | vLLM 필드명 변경, Nemotron 템플릿이 `<think>`를 미리 채움 |
 | §6.11 탐지 | 200 응답은 증거로 치지 않음. 추론 흔적으로 판정하고 토큰 수는 보조 신호. 호출 10회 초과 시 중단 후 `method: none` | 서버가 모르는 파라미터를 조용히 무시함 |
@@ -49,7 +56,7 @@ Phase 0~6 구축 완료. 자동 관문은 전부 통과했고(§3의 Phase별 �
 **구축 시작**
 - D01: `UV_PYTHON_NO_REGISTRY=1`로 `uv venv --seed --managed-python`. 안 지정하면 낡은 레지스트리 항목 때문에 3.13 탐색이 오류로 끝남(확인함). 실패하면 `%APPDATA%`의 uv 3.13.0을 절대 경로로 사용.
 - D02: `kb.py` 맨 앞에 표준 라이브러리만 쓰는 사전 점검을 둠. Phase 6에서 cp315 PyYAML wheel 빌드를 시도하고 결과를 기록.
-- 코드 루트와 볼트 루트를 분리: `--root`/`KB_ROOT`, Emacs는 `work-kb-root` + `work-kb-vault`.
+- 코드 루트와 볼트 루트를 분리: `--root`/`KB_ROOT`, Neovim은 setup의 `root` + `vault`(요청마다 `--root`로 넘김. Emacs 판은 `work-kb-root` + `work-kb-vault`).
 - `is_public_host`를 Phase 0의 `lib/config.py`로 옮기고 Phase 0 doctor부터 사용. LLM 요청은 `allow_redirects=False`, 호스트 끝의 점 제거.
 - `kb_lock`은 프로세스 안에서 재진입 가능. `jira_act`는 네트워크 전송과 `sync_key` 전에 잠금 해제.
 - `run_kb`의 하위 프로세스는 `PYTHON_KEYRING_BACKEND`로 `tmp_path`의 파일 기반 가짜 저장소 사용. 실제 저장소가 선택되지 않음을 테스트로 보장.
@@ -80,6 +87,8 @@ Phase 0~6 구축 완료. 자동 관문은 전부 통과했고(§3의 Phase별 �
 - 나머지 저심각도 항목(coverage 결과)은 해당 Phase 작업자에게 그대로 전달.
 
 ## 3. 실측·탐지 기록
+
+Phase 0~6은 Emacs 판으로 만들었다. 아래 **Emacs** 항목은 그때의 기록이고 `main` 브랜치에 그대로 해당한다. nvim 판에서 대응하는 결정은 6장(대체된 기록 목록 포함)에 있다.
 
 ### Phase 0 관문 (2026-11-05)
 
@@ -274,15 +283,17 @@ Opus 3명 독립 검토(지시서·Confluence DC API / 유출 안전 / 거짓 �
 
 ### Phase 6 구축 결정과 배포 리허설 (2026-11-05)
 
-- **docs**: `tests/test_docs.py`가 README의 명령 표·종료 코드 표·Emacs 키 표를 코드(`kb.COMMANDS`, `core` 오류 클래스, `work-kb.el`)와 대조하고, 문서의 호스트는 `*.invalid`·`127.0.0.1`·`localhost`만 허용. DEPLOY는 §9의 11단계를 원문 인용(blockquote) + 확장. `ca_bundle`·`trust_env`·`proxies`(D09)와 `max_reasoning_tokens`·`reasoning_budget_tokens`·`medium_effort`(D37)는 손으로 넣는 키로 TROUBLESHOOTING에 기록.
+- **docs**: `tests/test_docs.py`가 README의 명령 표·종료 코드 표를 코드(`kb.COMMANDS`, `core` 오류 클래스)와, `docs/USER-GUIDE.md`의 Neovim 키 표를 플러그인(`nvim/lua/work-kb/init.lua`의 `M.keys`, `jira.lua` 메뉴)과 키·이름까지 대조하고, 문서의 호스트는 `*.invalid`·`127.0.0.1`·`localhost`만 허용(루트 `README.md`의 저장소 주소만 허용 목록). (nvim 판에서 고침: 원래 대조 대상은 Emacs 판의 키 정의였다.) DEPLOY는 §9의 11단계를 원문 인용(blockquote) + 확장. 7단계만 Neovim에 맞게 고친 문구다(1장 §9.7 행). `ca_bundle`·`trust_env`·`proxies`(D09)와 `max_reasoning_tokens`·`reasoning_budget_tokens`·`medium_effort`(D37)는 손으로 넣는 키로 TROUBLESHOOTING에 기록.
 - **schedule**: `kb.py schedule [--print|--xml-dir DIR] [--company]`가 작업 스케줄러 XML(UTF-16, 스키마 1.2, LeastPrivilege, InteractiveToken, `UserId` 없음, IgnoreNew, 배터리에서도 실행, 깨우지 않음)과 `schtasks /Create|/Query|/Run|/Change|/Delete` 명령을 **생성만** 한다. 작업 이름은 평면(`work-kb-sync` 15분, `-prepare` 08:30(`kb.py today`), `-link` 12:30/18:30, `-ingest` 12:31/18:31, `-compile` 12:32/18:32, `-lint` 금 17:00, `--llm` 없음). 실행 제한 30분(sync·prepare·link)/1시간(lint)/2시간(ingest·compile). 볼트가 저장소와 다르면 `--root "<볼트>"`를 넣는다(스케줄 작업은 `KB_ROOT`를 못 봄). company(또는 `--company`)면 ingest·compile은 Disabled로 생성(D59). 마법사 5단계 "스케줄"은 명령만 출력하고 EOF면 건너뜀(설정을 바꾸지 않으므로). 테스트는 COM `NewTask`+`XmlText`로 XML을 메모리에서 검증(등록 없음). `pythonw.exe` 아래에서는 stderr가 없으므로 `core.report_error`·`kb._err`가 `.state/logs/kb.log`에 적는다.
-- **wheels/deploy_check**: `kb.py wheels [--targets 3.13,3.14] [--dir] [--no-sdist] [--dry-run]`은 대상마다 D02의 `pip download`를 돌리고 PyYAML sdist(같은 버전)와 `MANIFEST.txt`(sha256·크기)를 만든다. `scripts/deploy_check.py DEST`는 DEPLOY 제외 목록대로 복사하고(추가 제외: `raw/` 전체, `.obsidian`, `.env`, 임시·백업 파일; `wheels/`·`.gitkeep`·`*.base`는 유지) 금지 경로 부재와 필수 파일 존재를 검사한다. **cp315 PyYAML**: 시스템 3.15.2로 `pyyaml-6.0.3-cp315-cp315-win_amd64.whl` 빌드는 되지만 `.pyd` 없는 순수 Python(libyaml 없음)이고 PyPI에는 없으므로 3.15 대상은 `kb.py wheels`가 실패한다 → 회사 PC는 3.13/3.14 권장(PACKAGING.md).
-- **repo-tree 테스트**: §4 경로·`kb.COMMANDS` 모듈 존재, fixture 규격(KB·OPS 15건, 한국어, wiki markup, PNG 3장), 추적 파일 전체의 비밀값 스캔, YAML 설정의 `*_ref`만 허용, URL 규칙, AGENTS.md 제목·명령 목록 대조, `.gitignore`와 DEPLOY 제외 목록 대조, `capture.ahk` 형식. `capture.ahk`는 v2, Ctrl+Alt+Shift+C/V, 기본 `emacsclientw.exe`, 이 PC에서 실행해 보지 못함(AHK 없음).
+- **wheels/deploy_check**: `kb.py wheels [--targets 3.13,3.14] [--dir] [--no-sdist] [--dry-run]`은 대상마다 D02의 `pip download`를 돌리고 PyYAML sdist(같은 버전)와 `MANIFEST.txt`(sha256·크기)를 만든다. `scripts/deploy_check.py DEST`는 DEPLOY 제외 목록대로 복사하고(추가 제외: `raw/` 전체, `.obsidian`, `.env`, 임시·백업 파일; `wheels/`·`.gitkeep`·`*.base`는 유지) 금지 경로 부재와 필수 파일 존재를 검사한다. **cp315 PyYAML**: 시스템 3.15.2로 `pyyaml-6.0.3-cp315-cp315-win_amd64.whl` 빌드는 되지만 `.pyd` 없는 순수 Python(libyaml 없음)이고 PyPI에는 없으므로 3.15 대상은 `kb.py wheels`가 실패한다 → 회사 PC는 3.13/3.14 권장(PACKAGING.md). (nvim 판: 3.14만, 대상도 3.14만. D-NV1)
+- **repo-tree 테스트**: §4 경로·`kb.COMMANDS` 모듈 존재, fixture 규격(KB·OPS 15건, 한국어, wiki markup, PNG 3장), 추적 파일 전체의 비밀값 스캔, YAML 설정의 `*_ref`만 허용, URL 규칙, AGENTS.md 제목·명령 목록 대조, `.gitignore`와 DEPLOY 제외 목록 대조, `capture.ahk` 형식. `capture.ahk`는 v2, Ctrl+Alt+Shift+C/V, nvim-config 데몬에 `nvd`·`nvd-rpc.lua`로 `:WorkKb`를 보냄(nvim 판에서 고침, 6장 8), 이 PC에서 실행해 보지 못함(AHK 없음). nvim 판에서 문서 목록에 `USER-GUIDE.md`·`PACKAGING.md`를 더했다.
 - **D34 배포 리허설 결과(2026-11-05)**: `kb.py wheels --targets 3.13,3.14` 성공(MANIFEST 생성) → `deploy_check.py "<temp>\한글 경로 (테스트)\work-kb"` 복사 "제외 대상 없음, 필수 파일 있음" → 복사본에 `uv venv` 3.14 → **프록시를 죽인 상태**에서 `pip install --no-index --find-links wheels -r requirements.txt` 성공 → `environment: company` + 공개 LLM 호스트 설정에서 `doctor` ✗(공개 LLM 호스트) **종료 5**, `compile`·`ingest` **종료 5**(호출 없음), `demo` 종료 7(회사 PC 거부), `status`·`--help`·`schedule --company` 정상, `tests/`·`examples/`·`.git`·`.state`·`_trash`·`jira/.cache.sqlite` 부재 확인.
 
 - **demo**: 모든 단계를 프로세스 안에서 각 모듈의 `run()`으로 실행, mock은 포트 0(`--fixed-ports`면 8081~8083). 가짜 keyring 서비스명 `work-kb-demo`. LLM 프로필은 main 하나(키 참조 없음, `trust_env: false`, 탐지 블록 미리 설정) → `DEEPINFRA_API_KEY`를 읽지 않음. mock LLM 답은 "모의"로 표시. `KB_FAKE_NOW=2026-11-05T18:30:00+09:00`(샘플 날짜에 맞춤, 사용자 값 우선). 사용자 `KB_*` 덮어쓰기 무시. 임시 볼트의 `config.yaml`은 저장소 것으로 교체. company 판정은 `config.local.yaml` 최상위 `environment:` 줄만 정규식으로 읽어 글자 그대로 company일 때만 거부(종료 7). `examples/sample-vault`나 `tests/` mock이 없으면 종료 4(D60대로 `tests/`를 빼고 복사한 회사 사본에서는 demo 불가 — 의도). `--keep DIR`은 저장소 밖의 새 폴더만. 실패 시 stub이 있으면 그대로 열고, 없으면 `link --stub` 후 연다. 같은 키의 동기화가 진행 중이면 다시 시작하지 않는다.
 
 ## 부록 A. 원 설계 (D01~D65, 모듈 계약, Phase 표)
+
+> nvim 판: 이 부록은 원 설계(Emacs 판) 그대로 둔다. Emacs에만 해당하는 항목과 Python 3.13 부분은 6장의 "nvim 판에서 대체된 기록"과 D-NV1이 대체한다. D08·D58·D62·D64 행은 그 자리에서 고쳤다.
 
 Repo root is `D:\work\work-kb`. Paths in sections 1 to 4 are repo-relative. Nothing was created or changed in this stage.
 
@@ -344,14 +355,14 @@ Principles are the §3 numbers.
 
 | ID | Decision | Basis |
 |---|---|---|
-| D01 | Build and test on `.venv` (CPython 3.14). Second gate on `.venv313` (3.13), so the §2 floor is tested. Create both with `uv venv --seed --python X`, so pip exists and matches the DEPLOY path. If the uv download fails, try 3.15.2 with the PyYAML sdist. If that also fails, stop and report. | [V] §2, §9 |
-| D02 | Company path: `python -m venv .venv`, then `pip install -r requirements.txt` (or `--no-index --find-links wheels`). `wheels/` holds cp313 and cp314 sets from `pip download --only-binary=:all: --platform win_amd64 --implementation cp --python-version X --abi cpX`. `doctor` flags 3.15 as "no PyYAML wheel". `kb.py` catches `ImportError` and prints the venv command. | [V] §9.2 |
+| D01 | Build and test on `.venv` (CPython 3.14). Second gate on `.venv313` (3.13), so the §2 floor is tested. Create both with `uv venv --seed --python X`, so pip exists and matches the DEPLOY path. If the uv download fails, try 3.15.2 with the PyYAML sdist. If that also fails, stop and report. **Superseded in part by D-NV1 (chapter 6): 3.14 only, no 3.13 gate.** | [V] §2, §9 |
+| D02 | Company path: `python -m venv .venv`, then `pip install -r requirements.txt` (or `--no-index --find-links wheels`). `wheels/` holds cp313 and cp314 sets from `pip download --only-binary=:all: --platform win_amd64 --implementation cp --python-version X --abi cpX`. `doctor` flags 3.15 as "no PyYAML wheel". `kb.py` catches `ImportError` and prints the venv command. **Superseded in part by D-NV1 (chapter 6): cp314 set only.** | [V] §9.2 |
 | D03 | `work-kb-python` defaults to nil and deviates from §6.8. Resolve in order: `<root>/.venv/Scripts/python.exe`, then `python` (reject paths containing `WindowsApps`), then `py -3` if it runs. Always pass `-X utf8`. | [V] `py -3` fails; [R] Store alias |
 | D04 | No `tzdata`, since §2 limits dependencies. `core.resolve_tz`: `ZoneInfo(name)`, then a fixed table `{Asia/Seoul: +09:00}`, then OS local. `doctor` shows `-` if OS offset differs from config. | [V] §5.7 |
 | D05 | Encoding enforcement has two parts: an AST test over `scripts/` and `tests/` that flags missing `encoding=`, and CLI tests run on 3.14 with Korean content. Entry point: `reconfigure` guarded for `None` (pythonw). `doctor` reports `sys.flags.utf8_mode` as `-`, not the env var. | [V] §2, §10; [R] pythonw |
 | D06 | Import only as `from lib import secrets as kb_secrets`. Never put `scripts/lib` on `sys.path`. | [I] §4 |
 | D07 | `kb_root` resolves against the config folder. Root order: argument, `KB_ROOT`, `parents[2]` of `config.py`. `prompts/` and `AGENTS.md` resolve from code. | [I] §5.7 |
-| D08 | Additions to the §4 tree: `scripts/lib/{core,net,notes}.py`, `scripts/{status,search,demo}.py`, `tests/{conftest,fake_keyring,mock_all}.py`, `tests/emacs/test-work-kb.el`, `pytest.ini`, `requirements-dev.txt`, `.gitattributes`, `wiki/엔티티.base`. | §4, §6.9, §6.10 |
+| D08 | Additions to the §4 tree: `scripts/lib/{core,net,notes}.py`, `scripts/{status,search,demo}.py`, `tests/{conftest,fake_keyring,mock_all}.py`, the editor test suite (nvim branch: `tests/nvim/spec/*_spec.lua`, `tests/test_nvim.py`; the original named the ERT file of the `main` branch), `pytest.ini`, `requirements-dev.txt`, `.gitattributes`, `wiki/엔티티.base`. | §4, §6.9, §6.10 |
 | D09 | Dev dependency is pytest only. No `truststore`. Per-connection `ca_bundle` and `trust_env` keys in `config.local.yaml` cover company TLS and proxy. `doctor` separates SSL, proxy and auth failures. | [I] §5.7 |
 
 **Emacs and clipboard**
@@ -426,13 +437,13 @@ Principles are the §3 numbers.
 | D55 | Confluence personal space order is reversed: `/user/current` (stop if anonymous), then `/rest/api/space?spaceKey=~<username>`, then list `type=personal` and require a numbered choice. Empty parent means space homepage. | [R] §6.11 |
 | D56 | Push removes `mentions` regions and all markers, and publishes only `상태: 확정` entries of `decisions.md`. Output is XML-checked in the mock. Forbidden folders are refused in code (exit 7). Always `expand=version`. | §6.7 intent |
 | D57 | `KB_AGENT=1` refuses external writes and config: `act` writes, `flush`, `push`, `init`, `proposals accept`, `doctor --redetect`. Checked in the scripts too, so direct runs are covered. Tool-run `sync`, `link`, `compile`, `ingest`, `lint` stay allowed. Agents never hand-edit. | §5.6 vs §6.10 |
-| D58 | Tasks are created from generated XML (`schtasks /Create /TN work-kb\<name> /XML`): InteractiveToken, WorkingDirectory, StartWhenAvailable, IgnoreNew, `.venv\Scripts\pythonw.exe -X utf8`. Never `/NP` or SYSTEM. Logs in `.state/logs/`. Names: sync, prepare, link, compile, lint. Link 12:30/18:30, compile 12:32/18:32 so failures stay separate. Compile runs T4 when 7+ days have passed. | [V] options; [R] CredWrite |
+| D58 | Tasks are created from generated XML (`schtasks /Create /TN work-kb-<name> /XML`): InteractiveToken, WorkingDirectory, StartWhenAvailable, IgnoreNew, `.venv\Scripts\pythonw.exe -X utf8`. Never `/NP` or SYSTEM. Logs in `.state/logs/`. Six tasks with flat names `work-kb-<name>` (no `work-kb\` task folder, see §2 D58): sync, prepare, link, ingest, compile, lint. Link 12:30/18:30, ingest 12:31/18:31, compile 12:32/18:32 so failures stay separate. (Corrected in the nvim branch: the original listed five names under a task folder.) Compile runs T4 when 7+ days have passed. | [V] options; [R] CredWrite |
 | D59 | "Confluence from the start" means connected and `enabled: true`. Pushing stays manual. `work-kb\compile` is created disabled at company, enable command in SCHEDULING.md, which resolves §9.9 vs §9.10. | §9, §11 |
 | D60 | DEPLOY step 1 adds exclusions: `.venv*`, `.git`, `jira/*.md`, `jira/_views/*.md`, `jira/outbox.jsonl`, generated `wiki/` pages, `inbox/`, `raw/assets/`. | §9.1 |
 | D61 | Keyring: strict ref parsing, `len(utf-16-le) <= 2560`, read back after store, reject the `fail` backend, catch all backend errors and diagnose in Korean. No fallback to file or env. | [R] §2, §11 |
-| D62 | Env overrides: `KB_<SECTION>_<KEY>`, two levels only, YAML scalars. Reserved: `KB_AGENT`, `KB_ROOT`, `KB_REQUIRE_LIVE`, `KB_SKIP_EMACS`, `KB_FAKE_NOW`, `KB_INIT_*`. `KB_INIT_{ENVIRONMENT,JIRA_URL,JIRA_PAT,JIRA_PROJECTS,CONFLUENCE_URL,CONFLUENCE_PAT,CONFLUENCE_SPACE,LLM_URL,LLM_MODEL,LLM_KEY}`. Secrets go to keyring. | §5.7, §7 |
+| D62 | Env overrides: `KB_<SECTION>_<KEY>`, two levels only, YAML scalars. Reserved: `KB_AGENT`, `KB_ROOT`, `KB_REQUIRE_LIVE`, `KB_FAKE_NOW`, `KB_INIT_*` (the editor-skip flag of the `main` branch does not exist in the nvim branch). `KB_INIT_{ENVIRONMENT,JIRA_URL,JIRA_PAT,JIRA_PROJECTS,CONFLUENCE_URL,CONFLUENCE_PAT,CONFLUENCE_SPACE,LLM_URL,LLM_MODEL,LLM_KEY}`. Secrets go to keyring. | §5.7, §7 |
 | D63 | FTS5 with `unicode61`, each term auto-prefixed `term*`, LIKE on zero hits. `kb.py search` adds a pure-Python scan of daily, inbox and wiki. | [R] Korean miss |
-| D64 | Bases filter with `file.inFolder`, exclude `_views`, require `file.hasProperty("status_category")` so stubs drop out, and `status_category != "done"`. Syntax checked against obsidian-help commit 578f73cc and app 1.15.0 [R]. `setup.md`: enable Bases, absolute link format, exclude `examples/ tests/ scripts/ emacs/ docs/ prompts/ obsidian/ _trash/ wheels/`. T6 parser resolves bare names in `raw/assets`. | §6.9 |
+| D64 | Bases filter with `file.inFolder`, exclude `_views`, require `file.hasProperty("status_category")` so stubs drop out, and `status_category != "done"`. Syntax checked against obsidian-help commit 578f73cc and app 1.15.0 [R]. `setup.md`: enable Bases, absolute link format, exclude `examples/ tests/ scripts/ nvim/ docs/ prompts/ obsidian/ _trash/ wheels/ .venv/ .venv313/` (nvim branch: `nvim/` replaces the editor folder of the `main` branch). T6 parser resolves bare names in `raw/assets`. | §6.9 |
 | D65 | Test design: ports 8081-8083 are for demo and manual use only. pytest uses port 0, `allow_reuse_address=False`. Autouse: remove key, loopback-only sockets, fake keyring. Subprocess env adds a dead `HTTPS_PROXY` and `NO_PROXY=127.0.0.1,localhost`. ERT is added to the tree and run under both console locales. | [V], [R] |
 
 ## 2. Shared contracts
@@ -988,3 +999,17 @@ Conventions:
 6. 설치 스크립트의 범위: `install.ps1`은 `.venv`, `WORK_KB_ROOT`, 점검만 한다. Neovim 설정 폴더에는 아무것도 쓰지 않는다. 일반 설정은 nvim-config 소유라 덮어쓰면 두 저장소가 서로를 망가뜨린다.
 7. 시험 구동기: Neovim 시험은 `tests/nvim_proc.py`(작업 객체, 프로세스 트리 종료, 시간 제한이 있는 읽기)로 시작한다. 전체 실행이 5시간 멈춘 일이 있었다. 시간 초과가 scoop 래퍼만 죽였고 살아남은 손자 프로세스가 출력 파이프를 쥐고 있었다.
 8. `capture.ahk`: 자체 서버가 아니라 nvim-config 데몬(`nvd`)을 구동한다. AutoHotkey가 없는 PC에서 썼으므로 실행해 보지 못했다(미확인).
+9. nvim 판에서 대체된 기록. 지우지 않고 표시만 한다(이력은 git과 `main` 브랜치에 있다).
+   - §0의 Emacs 확인 항목(텍스트·클립보드·파일 캡처, 접두 키 교체) → Neovim 키로 바꾼 §0 항목.
+   - §1의 Emacs 전제 행 → 같은 표의 Neovim 행(`emacs/`→`nvim/`, transient→자체 Jira 메뉴, 접두 인수 `g`→`G`, consult→fzf-lua·rg·`kb.py search`, §9.7→DEPLOY 7단계).
+   - §3 Phase 기록의 **Emacs** 항목 → `main` 브랜치의 기록. nvim 판의 대응은 `nvim/lua/work-kb/*.lua`와 `tests/nvim/spec/*_spec.lua`.
+   - §3 Phase 6의 docs·repo-tree 줄 → 고쳐 적었다(키 표 대조 대상, `capture.ahk`가 부르는 것).
+   - 부록 A: D03(상대 인터프리터 경로·ERT), D10(`--argv-stdin`은 Neovim도 그대로 씀), D11(코딩 시스템 → `after/ftplugin/markdown.lua`와 플러그인의 UTF-8·LF 쓰기), D13(AHK → `nvd`), D53의 transient 키, 2절의 Emacs 내부 계약, 3절 Phase 표의 Emacs 행 → nvim 판의 플러그인·Lua 스펙.
+   - 부록 A의 D08(편집기 시험), D58(작업 6개·평면 이름), D62(편집기 건너뛰기 환경 변수 없음), D64(`setup.md` 제외 목록의 `nvim/`) → 행을 그 자리에서 고쳤다.
+   - 부록 A의 D01·D02와 §1 표의 Python 행 중 3.13 부분 → D-NV1.
+10. 2026-11 개선 합의(`review/PLAN.md`)에서 정한 것.
+   - **D-NV1 지원 Python은 3.14 하나**: 지시서 §2의 "최신 안정(3.13+)", D01의 3.13 두 번째 관문(`.venv313`), D02의 cp313 wheel 묶음, §1 표의 Python 행을 대체한다. `kb.py`의 사전 점검은 3.14 미만이면 "Python 3.14가 필요합니다"로 종료 4. `kb.py doctor`도 같은 기준으로 ✗. `kb.py wheels`는 기본·허용 대상이 3.14뿐(cp314). `install.ps1`은 3.14 `.venv`만 그대로 쓰고, 새로 만들 때 uv·`py` 후보도 3.14만. 3.15 안내(PyYAML wheel 없음)는 그대로. 이유: 3.13에서만 생기는 문제는 없었고, 문서·시험·설치가 서로 다른 버전 범위를 말하고 있었다. 검증은 3.14 하나로 한다.
+   - **D-NV2 Neovim 최소 0.12**: `health.lua`·`init.lua`(0.12)에 맞춰 `install.ps1`의 점검(`$MinNvim`)과 `kb.py doctor`의 편집기 줄도 0.12로. 문서도 0.12. 세 곳이 0.11과 0.12로 갈려 있었다. 플러그인은 0.12에서만 쓰고 시험했다.
+   - **D-NV3 상주 서버(`kb.py serve`) 정책**: 서버가 처리하는 명령은 `status`·`search`·`today`·`link`·`proposals list`·`act list`. `act transitions`는 Jira를 불러 오래 걸릴 수 있어 서버를 막지 않도록 빼고 한 번 실행으로 돌린다. 요청 하나의 시간 제한은 90초(kb 잠금 대기 60초 + 여유). 시간이 넘으면 서버를 끝낸다. 읽기 명령은 한 번 실행으로 한 번 다시 돌리고, 쓰기 명령(`today`·`link`)은 두 번 쓰지 않도록 다시 돌리지 않고 "시간 초과"로 실패한다. 시간 초과로 끝낸 뒤와 유휴 종료(0) 뒤에는 재시작 제한(60초)이 없다. 유휴 종료 순간 기다리던 요청은 한 번 실행으로 넘긴다. 서버는 가져온 `scripts/` 모듈 파일이 바뀌면 응답을 보낸 뒤 스스로 종료 0하고, 다음 요청이 새로 띄운다. 버린 안: 하트비트, Jira 시간 초과 단축(다른 명령에도 쓰여 부작용).
+   - D-NV4: agy 구현 결과 문안을 받아 기록 예정.
+   - 설치(`install.ps1`·`uninstall.ps1`): 매니페스트(`%LOCALAPPDATA%\work-kb\install-manifest.json`)는 클론끼리 함께 쓴다. `WORK_KB_ROOT` 기록에 정한 클론(`repo`)을 적고, `uninstall.ps1`은 자기 클론이 정한 값만 되돌린다. 다른 클론이 정한 값(그 폴더가 있음)은 `install.ps1`이 묻고(`-Yes`) 바꾸며 그 값을 이전 값으로 기록한다. 기록된 값의 폴더가 없으면(옮긴 클론) 우리 값으로 보고 처음 이전 값을 이어받는다. `-Offline`이면 uv 후보에 `--offline --no-python-downloads`를 붙인다.

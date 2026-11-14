@@ -43,8 +43,8 @@
 
 ### Python 3.15에서 PyYAML 설치 실패 / `kb.py`가 패키지 없음을 알림 (종료 4)
 
-- 원인: 3.15용 PyYAML wheel이 없다. 3.13 미만은 지원하지 않는다.
-- 명령: 3.14 또는 3.13으로 `python -m venv .venv` 후 `pip install -r requirements.txt`.
+- 원인: 3.15용 PyYAML wheel이 없다. 지원하는 Python은 3.14 하나다. 3.14 미만은 `kb.py`가 "Python 3.14가 필요합니다"로 거부한다(종료 4).
+- 명령: 3.14로 `python -m venv .venv`(또는 `py -3.14 -m venv .venv`) 후 `pip install -r requirements.txt`. 저장소 폴더에서 `install.ps1 -Only venv`도 된다(3.14가 아닌 `.venv`는 `-Yes`를 주면 이름을 바꿔 두고 새로 만든다).
 
 ## 한글·인코딩
 
@@ -84,7 +84,12 @@
 
 ### 상태를 한 번에 보고 싶다
 
-- 명령: Neovim에서 `:checkhealth work-kb`. 코드 루트, 볼트, 접두 키, Python, 상주 서버(`kb.py serve`) 상태가 나온다. Neovim 0.12 미만이면 오류로 표시된다.
+- 명령: Neovim에서 `:checkhealth work-kb`. 코드 루트, 볼트, 접두 키, Python, 상주 서버(`kb.py serve`) 상태가 나온다. Neovim 0.12 미만이면 오류로 표시된다(`install.ps1`의 점검과 `kb.py doctor`도 0.12를 최소 버전으로 본다). 상주 서버가 "놀고 있음"이면 정상이다. 다음 요청 때 뜬다.
+
+### 명령이 "시간 초과"로 끝난다
+
+- 원인: 상주 서버의 요청 하나가 90초를 넘었다(다른 명령이 잠금을 오래 잡는 등). 서버는 끝나고, 쓰기 명령(`today`·`link`)은 두 번 쓰지 않도록 다시 실행하지 않는다.
+- 명령: 잠시 뒤 같은 키를 다시 누른다. 서버는 다음 요청 때 새로 뜬다. 계속되면 아래 "잠금 중 (종료 6)"을 본다.
 
 ### `nvd`가 "daemon is not responding"
 

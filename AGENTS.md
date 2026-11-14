@@ -43,8 +43,9 @@
 | `today`, `carryover` | daily_prepare |
 | `mentions`, `index` | link |
 | `issues` | jira_sync |
-| `summary`, `decisions`, `actions` | compile |
+| `summary`, `decisions`, `actions`, `proposals` | compile |
 | `extracted` | ingest_images |
+| `lint` | lint |
 
 daily 쓰기 허용 목록 (이 넷뿐이다):
 1. capture가 daily 끝에 추가한다.
@@ -120,7 +121,7 @@ python scripts/kb.py serve
 
 | 명령 | 하는 일 |
 |---|---|
-| `status` | 마지막 동기화, 대기 outbox, 미처리 제안·이미지, 프로필별 연결·탐지, environment. 아무것도 쓰지 않는다 |
+| `status` | 마지막 동기화, 대기 outbox, 미처리 제안·이미지, 프로필별 탐지 기록, environment. 아무것도 쓰지 않는다. 연결은 확인하지 않는다(연결 점검은 `doctor`) |
 | `search "..."` | daily·inbox·wiki·jira에서 낱말 찾기(`--in`, `--limit`, `--json`) |
 | `today` | 오늘 daily 뼈대와 `today`·`carryover` 구역. `--check-done`은 완료 전환 제안만 출력(읽기) |
 | `link` | A단계. Jira 키·`@이름`을 엔티티 페이지 `mentions`에 엮는다(LLM 없음) |
@@ -131,6 +132,6 @@ python scripts/kb.py serve
 | `doctor` | 연결·환경 점검(`--redetect`는 거부) |
 | `act list`, `act transitions KEY` | outbox 보기, 가능한 전환 보기(읽기) |
 | `proposals list` | 주제 제안 보기 |
-| `serve` | 편집기(Neovim)가 띄워 두는 상주 서버. 빠른 읽기 계열 명령만 처리하고 요청마다 위 거부 규칙을 똑같이 적용한다. 끝나지 않는 명령이므로 에이전트가 직접 띄울 일은 없다 |
+| `serve` | 편집기(Neovim)가 띄워 두는 상주 서버. 빠른 명령(`status`·`search`·`today`·`link`·`proposals list`·`act list`)만 처리한다. `today`·`link`는 파일을 쓴다. 요청마다 위 거부 규칙을 똑같이 적용한다. 끝나지 않는 명령이므로 에이전트가 직접 띄울 일은 없다 |
 
 `KB_AGENT=1`에서 거부되는 명령(사람만 실행한다): `init`, `act`의 쓰기(`comment`, `transition`, `assign`, `worklog`, `create`, `promote`, `flush`), `proposals accept`, `push`, `demo`, `schedule`, `wheels`, `doctor --redetect`.

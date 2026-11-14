@@ -43,6 +43,7 @@ work-kb/
 ```
 
 볼트(daily/ inbox/ wiki/ 등)를 코드 폴더와 따로 둘 수도 있다. 명령의 `--root`(또는 환경변수 `KB_ROOT`)로 볼트 루트를 준다(`wheels`는 `--root`를 받기만 하고 무시한다. 늘 저장소 폴더에서 동작한다).
+Neovim은 `KB_ROOT`를 보지 않는다. Neovim 플러그인은 setup의 `vault`(nvim-config에서는 `lua\plugins\work-kb.lua`의 `opts.vault`)를 같은 볼트 폴더로 정한다. 플러그인은 요청마다 그 값을 `--root`로 넘긴다.
 
 ## 3. daily 형식과 캡처 규칙
 
@@ -76,7 +77,7 @@ date: 2026-11-05
 ## 4. 명령 표
 
 모든 명령은 `python scripts/kb.py <명령> [옵션]`. 모든 명령이 `--root`를 받는다(`wheels`만은 받아도 무시하고 저장소 폴더에서 동작한다). 옵션 전체는 `python scripts/kb.py <명령> --help`.
-`KB_AGENT=1` 세션에서는 읽기 계열만 허용된다(5절 참고, 아래 표의 "에이전트" 열).
+`KB_AGENT=1` 세션에서는 Jira 쓰기·게시·설정 변경 명령이 거부된다(5절 참고, 아래 표의 "에이전트" 열). 허용 명령 중에도 볼트 파일을 쓰는 것이 있다(`today`·`link`·`sync`·`compile`·`ingest`·`lint`).
 
 | 명령 | 하는 일 | 주요 옵션 | 에이전트 |
 |---|---|---|---|
@@ -88,7 +89,7 @@ date: 2026-11-05
 | `kb.py search` | daily·inbox·wiki·jira에서 낱말 검색 (공백은 AND) | `--json` `--limit` `--in wiki` | 허용 |
 | `kb.py sync` | Jira 일감을 캐시로 받기 (읽기 전용) | `--full` `--key` `--jql` `--cache` `--dry-run` | 허용 |
 | `kb.py act` | Jira 쓰기(outbox 경유). 하위: `comment` `transition` `transitions` `assign` `worklog` `create` `promote` `flush` `list` | `--yes` `--body` `--from-line` `--summary` `--retry-failed` `--retry-uncertain` | `list`·`transitions`만 |
-| `kb.py compile` | B단계: 태그·결정·할 일·엔티티 요약·주제 제안 (LLM) | `--date` `--since` `--task decisions` `--dry-run` `--force` | 허용 |
+| `kb.py compile` | B단계: 태그·결정·할 일·엔티티 요약·주제 제안 (LLM). 기본 범위는 오늘까지 7일의 daily(`--since`, 0이면 전부). inbox의 일반 글은 편찬하지 않는다(이미지 사이드카의 추출 글만 읽는다) | `--date` `--since` `--task decisions` `--dry-run` `--force` | 허용 |
 | `kb.py ingest` | B단계: 이미지에서 글 추출 → 사이드카 (비전 LLM) | `--dry-run` `--force` | 허용 |
 | `kb.py proposals` | 주제 제안: `list` / `accept <번호\|all>` | | `list`만 |
 | `kb.py lint` | C단계: 점검 보고 `wiki/_lint.md` (항상 종료 0) | `--llm` `--json` | 허용 |
@@ -96,7 +97,7 @@ date: 2026-11-05
 | `kb.py schedule` | 작업 스케줄러 XML과 `schtasks` 명령 생성(등록은 하지 않음) | `--print` `--xml-dir` `--company` | 거부 |
 | `kb.py wheels` | 오프라인 설치용 `wheels/` 내려받기 | `--targets` `--dir` | 거부 |
 | `kb.py demo` | 모의 서버 3개로 전체 흐름 시연 (임시 볼트) | `--keep` `--fixed-ports` | 거부 |
-| `kb.py serve` | 편집기용 상주 서버: 표준 입출력으로 JSON을 한 줄씩 주고받으며 빠른 명령(`status` `search` `today` `link` 등)을 같은 프로세스에서 실행 | `--idle-sec` | 허용 |
+| `kb.py serve` | 편집기용 상주 서버: 표준 입출력으로 JSON을 한 줄씩 주고받으며 빠른 명령(`status` `search` `today` `link` `proposals list` `act list`)만 같은 프로세스에서 실행. `today`·`link`는 파일을 쓴다. 그 밖의 명령은 거부하고 편집기가 한 번 실행으로 돌린다 | `--idle-sec` | 허용 |
 
 `kb.py demo`는 `tests/`의 모의 서버를 쓴다. 회사 배포는 `tests/`를 제외하므로 **demo는 집 전용**이다.
 
@@ -131,8 +132,8 @@ python scripts/kb.py act list --all
 
 ## 5. 에이전트
 
-에이전트(Claude Code 등)는 `AGENTS.md`를 따르고, 세션에 `KB_AGENT=1`을 둔다. 읽기 계열(`status` `search` `link` `today` 등)만 허용되고
-쓰기·설정 명령(`init` `act`의 쓰기 하위 명령 `proposals accept` `push` `schedule` `wheels` `demo`)은 종료 7로 거부된다.
+에이전트(Claude Code 등)는 `AGENTS.md`를 따르고, 세션에 `KB_AGENT=1`을 둔다. 볼트 안에서 도는 명령(`status` `search` `link` `today` 등)은 허용된다. 그중 `link`·`today` 등은 관리 구역과 허용된 daily 쓰기를 한다.
+Jira 쓰기·게시·설정 명령(`init` `act`의 쓰기 하위 명령 `proposals accept` `push` `schedule` `wheels` `demo` `doctor --redetect`)은 종료 7로 거부된다.
 에이전트는 `kb.py status`로 마지막 동기화, 대기 outbox, 미처리 제안·이미지, 프로필별 탐지 결과, environment를 먼저 본다.
 
 ## 6. Neovim
@@ -140,6 +141,11 @@ python scripts/kb.py act list --all
 Neovim 쪽 일반 설정(Neovim, Neovide, 폰트, LSP, `nvd` 데몬)은 이 저장소에 없다. 별도 저장소 nvim-config가 맡고, 이 저장소의 `nvim/` 폴더는 work-kb 플러그인 하나다.
 `install.ps1`이 사용자 환경 변수 `WORK_KB_ROOT`를 이 저장소 폴더로 정하면 nvim-config가 `<WORK_KB_ROOT>\nvim`을 불러오고 접두 키 `<leader>k`로 키와 `:WorkKb`가 생긴다.
 설치, 파일·폴더 위치, 키 표, 사용법: `docs/USER-GUIDE.md`
+
+접두 키는 한 줄로 바꾼다. 두 방법이 있다.
+
+- 접두 키 전체: setup에 `prefix`를 준다. nvim-config에서는 `lua\plugins\work-kb.lua`의 `opts = { prefix = "<F8>" }`. `prefix = false`면 키를 붙이지 않는다.
+- 키 하나를 직접: `vim.keymap.set("n", "<F8>c", function() require("work-kb").call("capture") end)`. 이름은 `:WorkKb`와 같다.
 
 ### 클립보드 요구 사항
 
