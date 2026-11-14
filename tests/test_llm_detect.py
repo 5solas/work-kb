@@ -634,9 +634,9 @@ def test_red_words(answer, expected):
 
 def test_baseline_failure_raises_detect_error(run_detect):
     with pytest.raises(DetectError) as info:
-        run_detect(http_500_once=True)
-    assert [p["step"] for p in info.value.probes] == ["context", "baseline"]
-    assert info.value.probes[1]["http_status"] == 500
+        run_detect(http_500_always=True)
+    assert [p["step"] for p in info.value.probes] == ["context", "baseline", "baseline(재시도)"]
+    assert info.value.probes[-1]["http_status"] == 500
     assert info.value.exit_code == 3  # 종료 코드 표: 3 = 네트워크·서버
     assert DetectError("x").exit_code == 3
 
@@ -780,3 +780,33 @@ def test_arithmetic_prompt_is_fixed(run_detect):
     users = {b["messages"][-1]["content"] for b in bodies[:3]}
     assert users == {llm_detect.ARITHMETIC_PROMPT}
     assert all(b["max_tokens"] == llm_detect.PROBE_MAX_TOKENS for b in bodies)
+
+
+def test_models_get_not_retried_on_429(serve, monkeypatch):
+    import requests
+    from lib import llm_client as lc
+
+    _, client = serve()
+    seen_max_429: list[int] = []
+
+    def fake_request(self, method, url, **kwargs):
+        seen_max_429.append(lc.MAX_429)
+        resp = requests.Response()
+        resp.status_code = 429
+        resp.headers["Retry-After"] = "0"
+        resp._content = b'{"error": {"message": "rate limited"}}'
+        resp._content_consumed = True
+        return resp
+
+    monkeypatch.setattr(requests.Session, "request", fake_request)
+    res = llm_detect.detect_context(client, "main")
+    assert res["context_source"] == "assumed"
+    assert seen_max_429 == [0]
+
+
+def test_baseline_retries_once(serve):
+    mock, client = serve(http_500_once=True)
+    res = llm_detect.detect_reasoning(client, "main", Budget())
+    assert mock.counts["chat"] >= 2
+    assert res["probes"][0]["step"] == "baseline"
+    assert res["probes"][1]["step"] == "baseline(재시도)"

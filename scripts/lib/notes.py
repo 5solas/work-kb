@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -20,16 +21,17 @@ BOM = b"\xef\xbb\xbf"
 DAILY_NAME = re.compile(r"^(\d{4}-\d{2}-\d{2})\.md$")
 TIME_PREFIX = re.compile(r"^- (?:\[[ xX>]\] )?(\d{2}:\d{2})(?:\s|$)")
 HEADING2 = re.compile(r"^## +(.+?)\s*$")
-FENCE = re.compile(r"^(```|~~~)")
+FENCE = re.compile(r"^(`{3,}|~{3,})(.*)$")
 URL_RE = re.compile(r"https?://[^\s<>\"')\]]+")
 # CommonMark 코드 스팬: 같은 길이의 백틱 줄로 열고 닫는다(``KB-5``, ```a `b` c```).
 INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 # 줄 나누기: `\n`과 홀로 선 CR(뒤에 \r·\n이 없는 \r)만. str.splitlines는 \x0c·\x1c·  같은
 # 문자에서도 끊어서 사람이 붙여 넣은 줄을 둘로 쪼갠다(managed._marker_lines와 같은 규칙).
-_LINE_BREAK = re.compile(r"(?<=\n)|(?<=\r)(?![\r\n])")
+_LINE_BREAK = re.compile(r"(?<=\n)|(?<=\r)(?!\r*\n)")
 # Obsidian 절대 경로 링크 `[[jira/KEY-1]]`(D64)의 키 앞부분
 _JIRA_PATH_PREFIX = "[[jira/"
 WIKILINK_RE = re.compile(r"\[\[([^\]\|#]+)(?:#[^\]\|]*)?(?:\|[^\]]*)?\]\]")
+WIKILINK_SPAN_RE = re.compile(r"!?\[\[(?:(?!\]\]).)*\]\]")
 IMAGE_EMBED_RE = re.compile(r"!\[\[([^\]\|]+)(?:\|[^\]]*)?\]\]")
 
 VIEW_COLUMNS = ("키", "제목", "상태", "담당", "마감", "갱신")
@@ -73,6 +75,11 @@ def split_lines(text: str, *, keepends: bool = False) -> list[str]:
     return parts if keepends else [part.rstrip("\r\n") for part in parts]
 
 
+def defang_comments(text: str) -> str:
+    """마크다운 본문·요약 등에 섞인 HTML 주석 표식(`<!--`, `-->`)을 무력화한다."""
+    return text.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+
+
 def decode(data: bytes) -> str:
     """BOM을 떼고 UTF-8로 해독한다. 실패하면 UnicodeDecodeError."""
     if data.startswith(BOM):
@@ -96,39 +103,47 @@ def _region_lookup(data: bytes) -> list[tuple[str, int, int]]:
         return []
 
 
+def _is_closing_fence(stripped: str, fence_char: str, fence_len: int) -> bool:
+    if not fence_char:
+        return False
+    tail = stripped.lstrip(fence_char)
+    return len(stripped) - len(tail) >= fence_len and not tail.strip(" \t")
+
+
 def iter_lines(rel: str, data: bytes) -> Iterator[NoteLine]:
     """줄마다 NoteLine을 낸다. 해독 실패는 호출자가 처리한다(UnicodeDecodeError)."""
     rel = rel.replace("\\", "/")
     day = day_of(rel)
     spans = _region_lookup(data)
     text = decode(data)
+    fm = frontmatter._locate(data)
+    front_end = fm[2] if fm is not None else 0
     offset = len(BOM) if data.startswith(BOM) else 0
     in_fence = False
-    in_front = False
-    fence_mark = ""
+    fence_char = ""
+    fence_len = 0
     for lineno, raw in enumerate(split_lines(text, keepends=True), start=1):
         line = raw.rstrip("\r\n")
         stripped = line.strip()
         region = next((name for name, start, end in spans if start <= offset < end), None)
         is_marker = managed._MARKER.fullmatch(line.encode("utf-8")) is not None
-        if lineno == 1 and stripped == "---":
-            in_front = True
+        if offset < front_end:
             in_code = True
-        elif in_front:
+        elif in_fence:
             in_code = True
-            if stripped == "---":
-                in_front = False
+            if _is_closing_fence(stripped, fence_char, fence_len):
+                in_fence = False
+                fence_char = ""
+                fence_len = 0
         else:
             fence = FENCE.match(stripped)
-            if fence and (not in_fence or stripped.startswith(fence_mark)):
+            if fence and (fence.group(1)[0] != "`" or "`" not in fence.group(2)):
                 in_code = True
-                if in_fence:
-                    in_fence = False
-                else:
-                    in_fence = True
-                    fence_mark = fence.group(1)
+                in_fence = True
+                fence_char = fence.group(1)[0]
+                fence_len = len(fence.group(1))
             else:
-                in_code = in_fence or is_marker
+                in_code = is_marker
         time_match = TIME_PREFIX.match(line)
         yield NoteLine(
             rel=rel,
@@ -147,27 +162,25 @@ def iter_lines(rel: str, data: bytes) -> Iterator[NoteLine]:
 def section_span(data: bytes, heading: str) -> tuple[int, int] | None:
     """`## heading` 본문의 바이트 범위 (제목 줄 다음부터 다음 `## ` 전까지, 끝의 빈 줄 제외)."""
     text = decode(data)
-    offset = len(BOM) if data.startswith(BOM) else 0
     start: int | None = None
     end: int | None = None
     last_nonblank_end: int | None = None
-    for raw in split_lines(text, keepends=True):
-        line = raw.rstrip("\r\n")
-        match = HEADING2.match(line)
+    for raw, note_line in zip(split_lines(text, keepends=True), iter_lines("", data)):
+        next_offset = note_line.offset + len(raw.encode("utf-8"))
+        match = None if note_line.in_code else HEADING2.match(note_line.text)
         if match:
             if start is not None:
-                end = offset
+                end = note_line.offset
                 break
-            if match.group(1).strip() == heading.strip():
-                start = offset + len(raw.encode("utf-8"))
+            if unicodedata.normalize("NFC", match.group(1).strip()) == unicodedata.normalize("NFC", heading.strip()):
+                start = next_offset
                 last_nonblank_end = start
-        elif start is not None and line.strip():
-            last_nonblank_end = offset + len(raw.encode("utf-8"))
-        offset += len(raw.encode("utf-8"))
+        elif start is not None and note_line.text.strip():
+            last_nonblank_end = next_offset
     if start is None:
         return None
     if end is None:
-        end = offset
+        end = len(data)
     if last_nonblank_end is not None and last_nonblank_end < end:
         end = last_nonblank_end
     return (start, end)
@@ -208,15 +221,25 @@ def key_pattern(project_keys: list[str] | tuple[str, ...]) -> re.Pattern[str] | 
     if not keys:
         return None
     alternation = "|".join(re.escape(k) for k in sorted(keys, key=len, reverse=True))
-    return re.compile(rf"(?<![A-Za-z0-9_\-])(?:{alternation})-\d+(?![A-Za-z0-9_])")
+    return re.compile(rf"(?<![A-Za-z0-9_\-])(?:{alternation})-[0-9]+(?![A-Za-z0-9_])")
 
 
 def _closes_link(after: str) -> bool:
     return after.startswith(("]]", "|", "#"))
 
 
+def wikilink_spans(text: str) -> list[tuple[int, int]]:
+    if "[[" not in text:
+        return []
+    return [(m.start(), m.end()) for m in WIKILINK_SPAN_RE.finditer(text)]
+
+
+def inside_spans(spans: list[tuple[int, int]], start: int, end: int) -> bool:
+    return any(s <= start and end <= e for s, e in spans)
+
+
 def find_keys(text: str, project_keys: list[str] | tuple[str, ...]) -> list[KeyMatch]:
-    """프로젝트 키의 Jira 키를 찾는다. URL·인라인 코드 안은 제외.
+    """프로젝트 키의 Jira 키를 찾는다. URL·인라인 코드·임베드·비-키 위키링크 안은 제외.
 
     bracketed: `[[KEY-1]]`·`[[KEY-1|별칭]]`·`[[KEY-1#제목]]`, 그리고 Obsidian 절대 경로 링크
     `[[jira/KEY-1]]`·`[[jira/KEY-1.md]]`(뒤에 `|별칭`·`#제목` 가능, D64).
@@ -225,24 +248,31 @@ def find_keys(text: str, project_keys: list[str] | tuple[str, ...]) -> list[KeyM
     if pattern is None:
         return []
     masked = _masked(text)
+    spans = wikilink_spans(masked)
     found: list[KeyMatch] = []
     for match in pattern.finditer(masked):
         start, end = match.start(), match.end()
         after = masked[end:end + 5]
-        if masked[max(0, start - 2):start] == "[[":
+        if masked[max(0, start - 2):start] == "[[" and masked[max(0, start - 3):start] != "![[":
             bracketed = _closes_link(after)
-        elif masked[max(0, start - len(_JIRA_PATH_PREFIX)):start] == _JIRA_PATH_PREFIX:
+        elif (
+            masked[max(0, start - len(_JIRA_PATH_PREFIX)):start] == _JIRA_PATH_PREFIX
+            and masked[max(0, start - len(_JIRA_PATH_PREFIX) - 1):start] != "!" + _JIRA_PATH_PREFIX
+        ):
             bracketed = _closes_link(after[3:] if after.startswith(".md") else after)
         else:
             bracketed = False
+        if any(s <= start and end <= e and (masked[s] == "!" or not bracketed) for s, e in spans):
+            continue
         found.append(KeyMatch(start, end, match.group(0), bracketed))
     return found
 
 
 def find_people(text: str, prefix: str = "@") -> list[str]:
     """`@이름` 언급. 이메일(`a@b`)은 제외. 순서 유지, 중복 제거."""
+    normalized = unicodedata.normalize("NFC", text)
     pattern = re.compile(re.escape(prefix) + rf"({_PERSON_CHARS}+)")
-    masked = _masked(text)
+    masked = _masked(normalized)
     people: list[str] = []
     for match in pattern.finditer(masked):
         if match.start() > 0 and _EMAIL_LOCAL.search(masked[:match.start()]):
@@ -362,13 +392,13 @@ def page_template(kind: str, name: str, *, title: str | None, today: str) -> tup
             f"---\ntype: person\n{_fm_line('name', name)}updated: {today}\n---\n"
             f"# {name}\n\n## 개요\n\n## 최근 요약\n{_region('summary')}\n## 언급\n{_region('mentions')}"
         )
-        return Path("wiki") / "people" / f"{core.safe_name(name)}.md", body
+        return Path("wiki") / "people" / f"{core.link_safe_name(name)}.md", body
     if kind == "topic":
         body = (
             f"---\ntype: topic\n{_fm_line('name', name)}aliases: []\nupdated: {today}\n---\n"
             f"# {name}\n\n## 개요\n\n## 최근 요약\n{_region('summary')}\n## 언급\n{_region('mentions')}"
         )
-        return Path("wiki") / "topics" / f"{core.safe_name(name)}.md", body
+        return Path("wiki") / "topics" / f"{core.link_safe_name(name)}.md", body
     if kind == "decisions":
         return Path("wiki") / "decisions.md", f"# 결정 로그\n\n> LLM이 쓴 항목은 '제안'. 사람이 '확정'/'기각'으로 바꾼다.\n\n{_region('decisions')}"
     if kind == "actions":
@@ -395,6 +425,15 @@ def ensure_page(cfg: Config, kind: str, name: str | None = None, *, title: str |
 # ---------------------------------------------------------------- 뷰 표
 
 
+def _strip_outer_pipes(line: str) -> str:
+    inner = line.removeprefix("|")
+    if inner.endswith("|"):
+        slashes = len(inner) - 1 - len(inner[:-1].rstrip("\\"))
+        if slashes % 2 == 0:
+            inner = inner[:-1]
+    return inner
+
+
 def parse_table(text: str) -> list[dict[str, str]]:
     """첫 마크다운 표를 헤더 이름 → 셀 문자열의 dict 목록으로 읽는다."""
     rows: list[dict[str, str]] = []
@@ -405,7 +444,7 @@ def parse_table(text: str) -> list[dict[str, str]]:
             if header is not None:
                 break
             continue
-        cells = [c.replace("\\|", "|").strip() for c in re.split(r"(?<!\\)\|", stripped.strip("|"))]
+        cells = [c.replace("\\|", "|").strip() for c in re.split(r"(?<!\\)\|", _strip_outer_pipes(stripped))]
         if header is None:
             header = cells
             continue
@@ -420,8 +459,13 @@ def read_view(cfg: Config, name: str) -> list[dict[str, str]]:
     path = cfg.path("jira", "_views", f"{name}.md")
     if not path.exists():
         return []
-    _front, body = frontmatter.split(path.read_bytes())
-    rows = parse_table(decode(body))
+    try:
+        _front, body = frontmatter.split(path.read_bytes())
+        text = decode(body)
+    except UnicodeDecodeError as exc:
+        core.get_logger(cfg.root).warning("%s: %s (%s)", NOT_UTF8, path, exc)
+        return []
+    rows = parse_table(text)
     for row in rows:
         raw = row.get("키", "")
         links = wikilinks(raw)

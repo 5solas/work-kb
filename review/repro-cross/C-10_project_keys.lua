@@ -1,0 +1,13 @@
+dofile(vim.fs.dirname(debug.getinfo(1, "S").source:sub(2)) .. "/repro_common.lua")
+local v = TMPVAULT()
+vim.uv.fs_copyfile(REPO .. "/config.yaml", v .. "/config.yaml")
+W(v .. "/config.local.yaml", "environment: home\njira:\n  project_keys: [KB, OPS]\n")
+require("work-kb").setup({ root = REPO, vault = v, python = REPO .. "/.venv/Scripts/python.exe", prefix = false, server = { enable = false } })
+local ui = require("work-kb.ui")
+ui.select = function(prompt, items, o) P("select prompt:", prompt, "items:", items, "default:", o and o.default); return nil end
+local p = require("work-kb.proc")
+local code, text = p.run_output(p.kb_args("status", "--json"))
+P("status --json code:", code, "has project_keys:", text:find("project_keys", 1, true) ~= nil)
+P("jira.project_keys(text) ->", require("work-kb.jira").project_keys(text))
+P("read_project ->", pcall(require("work-kb.jira").read_project))
+VERDICT(text:find("project_keys", 1, true) == nil, "kb.py status --json has no project_keys, so n/p never offer project choices")

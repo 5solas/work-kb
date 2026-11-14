@@ -6,6 +6,7 @@ import datetime as dt
 import os
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,7 @@ D05 = dt.date(2026, 11, 5)
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 LOCK_CHILD = r"""
 import sys
+import unicodedata
 sys.path.insert(0, sys.argv[1])
 from lib import core
 with core.kb_lock(sys.argv[2], "다른 작업"):
@@ -643,3 +645,41 @@ def test_cli_without_project_keys_exit_4(vault, run_kb):
 def test_agent_mode_allowed(cfg, vault, run_kb):
     proc = run_kb("today", "--date", "2026-11-05", env={"KB_AGENT": "1"})
     assert proc.returncode == 0, proc.stderr
+
+
+def test_skeleton_idempotent_with_leading_hr(cfg, vault):
+    path = _daily(vault, "2026-11-15")
+    _write(path, "---\n## 기록\n- 10:00 메모\n")
+    daily_prepare.run(cfg, dt.date(2026, 11, 15), carryover=False)
+    once = path.read_bytes()
+    daily_prepare.run(cfg, dt.date(2026, 11, 15), carryover=False)
+    assert path.read_bytes() == once
+    assert once.decode("utf-8").count("## 기록") == 1
+
+
+def test_carryover_after_fenced_heading(cfg, vault):
+    _write(
+        _daily(vault, "2026-11-14"),
+        "## 기록\n- [ ] 할 일 A\n```bash\n## 셸 주석처럼 보이는 줄\n```\n- [ ] 할 일 B\n",
+    )
+    daily_prepare.run(cfg, dt.date(2026, 11, 15))
+    carry = _region(_daily(vault, "2026-11-15").read_bytes(), "carryover")
+    assert any("할 일 B" in line for line in carry)
+
+
+def test_nfd_record_heading(cfg, vault):
+    data = unicodedata.normalize("NFD", "## 기록\n- [ ] 할 일\n").encode("utf-8")
+    assert notes.section_span(data, "기록") is not None
+    out = daily_prepare.ensure_skeleton(data)
+    assert unicodedata.normalize("NFC", out.decode("utf-8")).count("## 기록") == 1
+
+
+def test_carryover_task_with_keyed_embed(cfg, vault):
+    _write(
+        _daily(vault, "2026-11-14"),
+        "## 기록\n- [ ] 개인: ![[raw/assets/KB-12-whiteboard.png]] 정리\n- [ ] [[docs/KB-12]] 문서 검토\n",
+    )
+    daily_prepare.run(cfg, dt.date(2026, 11, 15))
+    carry = "\n".join(_region(_daily(vault, "2026-11-15").read_bytes(), "carryover"))
+    assert "KB-12-whiteboard.png" in carry
+    assert "docs/KB-12" in carry

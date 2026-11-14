@@ -94,7 +94,7 @@ def _fold(text: str) -> str:
 
 def _one_line(value: Any, limit: int = 200) -> str:
     text = " ".join(str(value or "").split())
-    text = text.replace("<!--", "&lt;!--")
+    text = notes.defang_comments(text)
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
@@ -407,7 +407,7 @@ def _stale_stubs(vault: _Vault) -> _Section:
 def _similar_titles(vault: _Vault) -> _Section:
     section = _Section("similar_titles", "유사 제목 쌍")
     for sub, kind in (("topics", "topic"), ("people", "person")):
-        names: list[tuple[str, str, str]] = []  # (정규화, 이름, rel)
+        names: list[tuple[str, str]] = []  # (정규화, rel)
         prefix = f"wiki/{sub}/"
         for rel, data in sorted(vault.md.items()):
             if not rel.startswith(prefix) or "/" in rel[len(prefix):]:
@@ -415,9 +415,9 @@ def _similar_titles(vault: _Vault) -> _Section:
             name = str(_fm(data).get("name") or rel[len(prefix):-3]).strip()
             key = _SEPARATORS.sub("", _fold(name))
             if key:
-                names.append((key, name, rel))
-        for i, (key_a, name_a, rel_a) in enumerate(names):
-            for key_b, name_b, rel_b in names[i + 1:]:
+                names.append((key, rel))
+        for i, (key_a, rel_a) in enumerate(names):
+            for key_b, rel_b in names[i + 1:]:
                 matcher = difflib.SequenceMatcher(None, key_a, key_b)
                 if matcher.real_quick_ratio() < SIMILARITY or matcher.quick_ratio() < SIMILARITY:
                     continue
@@ -1056,12 +1056,6 @@ def _t5_section(vault: _Vault, outcome: dict | None, previous: list[str] | None)
 # ---------------------------------------------------------------- 실행
 
 
-SECTION_ORDER = (
-    "orphans", "stale_stubs", "similar_titles", "broken_links", "stale_cache", "outbox",
-    "old_proposed", "pending_proposals", "images", "gave_up", "broken_markers", "contradictions",
-)
-
-
 def _render(vault: _Vault, sections: Sequence[_Section]) -> str:
     total = sum(s.count for s in sections)
     lines = [f"- 점검: {vault.now.strftime('%Y-%m-%d %H:%M')} · 항목 {total}개 · `kb.py lint`가 다시 씁니다(손으로 고치지 않음)", ""]
@@ -1075,16 +1069,26 @@ def _render(vault: _Vault, sections: Sequence[_Section]) -> str:
 def _write(cfg: Config, body: str, current: bytes | None) -> bool:
     """`wiki/_lint.md`의 lint 구역만 바꾼다. 바뀌었으면 True."""
     path = cfg.root / LINT_REL
-    if current is None:
-        _rel, template = notes.page_template("lint", "", title=None, today=core.now(cfg.tz).date().isoformat())
-        base = template.encode("utf-8")
-    else:
-        base = current
-    new = managed.replace_region(base, REGION, body)
-    if new == current:
-        return False
-    core.atomic_write(path, new, expect_sha256=core.sha256_hex(current) if current is not None else core.MUST_NOT_EXIST)
-    return True
+    with core.kb_lock(cfg.root, "lint"):
+        try:
+            fresh = path.read_bytes() if path.is_file() else None
+        except OSError:
+            fresh = current
+        base_cur = fresh if fresh is not None else current
+        if base_cur is None:
+            _rel, template = notes.page_template("lint", "", title=None, today=core.now(cfg.tz).date().isoformat())
+            base = template.encode("utf-8")
+        else:
+            base = base_cur
+        new = managed.replace_region(base, REGION, body)
+        if new == base_cur:
+            return False
+        core.atomic_write(
+            path,
+            new,
+            expect_sha256=core.sha256_hex(base_cur) if base_cur is not None else core.MUST_NOT_EXIST,
+        )
+        return True
 
 
 def run(cfg: Config, *, llm: bool = False, client: LlmClient | None = None) -> dict:

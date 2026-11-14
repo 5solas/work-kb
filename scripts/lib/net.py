@@ -52,6 +52,16 @@ def _as_bool(value: Any, where: str) -> bool:
     raise core.ConfigError(f"{where}: true 또는 false여야 합니다 (지금 값: {value!r})")
 
 
+def resolve_conn(cfg: Any, conn: Mapping[str, Any] | None) -> dict[str, Any]:
+    """연결 설정 dict의 상대 경로 `ca_bundle`을 `cfg.config_dir`(없으면 `cfg.root`) 기준으로 푼다."""
+    out = dict(conn or {})
+    ca = out.get("ca_bundle")
+    if ca and not Path(str(ca)).expanduser().is_absolute():
+        base = getattr(cfg, "config_dir", None) or getattr(cfg, "root", Path("."))
+        out["ca_bundle"] = str(Path(base) / str(ca))
+    return out
+
+
 def session_for(conn: Mapping[str, Any] | None, token: str | None) -> requests.Session:
     """연결 하나에 쓸 세션을 만든다. 토큰은 Bearer 헤더로 붙이고 로그 가림에 등록한다."""
     conn = conn or {}
@@ -193,16 +203,19 @@ def _translate(exc: rex.RequestException, url: str, timeout: float) -> core.KbEr
 def _auth_error(status: int, method: str, url: str) -> core.KbError:
     host = _host(url)
     if status == 401:
-        return _error(
+        exc = _error(
             core.AuthError,
             f"인증에 실패했습니다 (401, {method} {host})",
             "토큰(PAT·키)이 틀렸거나 만료되었습니다. `python scripts/kb.py init`으로 다시 입력하세요",
         )
-    return _error(
-        core.AuthError,
-        f"권한이 없습니다 (403, {method} {host})",
-        "계정 권한을 확인하세요. Jira라면 브라우저로 한 번 로그인해 CAPTCHA를 푸세요",
-    )
+    else:
+        exc = _error(
+            core.AuthError,
+            f"권한이 없습니다 (403, {method} {host})",
+            "계정 권한을 확인하세요. Jira라면 브라우저로 한 번 로그인해 CAPTCHA를 푸세요",
+        )
+    exc.status = status  # type: ignore[attr-defined]
+    return exc
 
 
 # ---------------------------------------------------------------- 요청

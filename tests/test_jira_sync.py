@@ -525,6 +525,7 @@ def test_bad_arguments_exit_4(env, capsys, args):
 
 
 def test_dry_run_writes_nothing(env, capsys, monkeypatch):
+    (env.vault / ".state" / "kb.lock").unlink(missing_ok=True)
     before = tree(env.vault)
     code, out, _ = run(capsys, env.vault, "--dry-run")
     assert code == 0
@@ -923,3 +924,52 @@ def test_comment_line_truncates_to_200_chars():
     head, _, body = line.partition("김철수: ")
     assert head == "- 2026-11-01 10:02 "  # 설정 시간대로
     assert len(body) == 200 and body.endswith("…")
+
+
+def test_full_sync_survives_403_out_of_scope_issue(env, capsys, monkeypatch):
+    assert run(capsys, env.vault)[0] == 0
+    env.jira.remove("KB-5")
+    env.jira.remove("KB-10")
+    calls = {"myself": 0}
+
+    def on_read(req):
+        if req.path == "/rest/api/2/myself":
+            calls["myself"] += 1
+        elif req.path in ("/rest/api/2/issue/KB-5", "/rest/api/2/issue/KB-10"):
+            return 403, {"errorMessages": ["You do not have the permission to see the specified issue."]}
+        return None
+
+    env.jira.modes["on_read"] = on_read
+    set_now(monkeypatch, "2026-11-04T16:40:03+09:00")
+    code, _, err = run(capsys, env.vault, "--full")
+    assert code == 0, err
+    assert frontmatter.parse((env.vault / "jira" / "KB-5.md").read_bytes()).get("in_scope") == "false"
+    assert frontmatter.parse((env.vault / "jira" / "KB-10.md").read_bytes()).get("in_scope") == "false"
+    assert calls["myself"] == 1
+
+
+def test_403_with_dead_token_still_exits_2(env, capsys, monkeypatch):
+    assert run(capsys, env.vault)[0] == 0
+    env.jira.remove("KB-5")
+
+    def on_read(req):
+        if req.path == "/rest/api/2/issue/KB-5":
+            return 403, {"errorMessages": ["Forbidden"]}
+        return None
+
+    env.jira.modes["on_read"] = on_read
+    env.jira.modes["myself_status"] = 401
+    set_now(monkeypatch, "2026-11-04T16:40:03+09:00")
+    code, _, _ = run(capsys, env.vault, "--full")
+    assert code == 2
+
+
+def test_sync_key_403_unchanged(env, capsys):
+    def on_read(req):
+        if req.path == "/rest/api/2/issue/KB-5":
+            return 403, {"errorMessages": ["Forbidden"]}
+        return None
+
+    env.jira.modes["on_read"] = on_read
+    code, _, _ = run(capsys, env.vault, "--key", "KB-5")
+    assert code == 2

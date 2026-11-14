@@ -144,3 +144,14 @@ def test_realistic_korean_issue():
     assert "- 원인 확인\n  - 로그 분석\n- 조치" in out
     assert "```\nretry(*3*)\n```" in out
     assert "| 담당 | 홍길동 |" in out
+
+
+def test_nested_placeholders_restored():
+    out = to_markdown("[see {{KB-12}}|https://example.com]")
+    assert "\x00" not in out
+    assert "[see `KB-12`](https://example.com)" == out
+
+
+def test_code_inside_quote():
+    out = to_markdown("{quote}\n{code}\nline1\nline2\n{code}\n{quote}")
+    assert out == "> ```\n> line1\n> line2\n> ```"

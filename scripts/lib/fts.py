@@ -13,8 +13,9 @@ from __future__ import annotations
 
 import sqlite3
 import unicodedata
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from lib import core
 
@@ -219,11 +220,19 @@ class Cache:
 
     # ------------------------------------------------------------ 읽기
 
+    def _read(self, fn: Callable[[], Any]) -> Any:
+        try:
+            return fn()
+        except sqlite3.OperationalError as exc:
+            if _is_busy(exc):
+                raise _busy_error(self.path, exc) from exc
+            raise
+
     def count(self) -> int:
-        return int(self._conn.execute("SELECT count(*) FROM issues").fetchone()[0])
+        return int(self._read(lambda: self._conn.execute("SELECT count(*) FROM issues").fetchone()[0]))
 
     def get(self, key: str) -> dict | None:
-        row = self._conn.execute(f"SELECT {', '.join(COLUMNS)} FROM issues WHERE key = ?", (key,)).fetchone()
+        row = self._read(lambda: self._conn.execute(f"SELECT {', '.join(COLUMNS)} FROM issues WHERE key = ?", (key,)).fetchone())
         return None if row is None else dict(row)
 
     def _rows(self, cursor: sqlite3.Cursor, via: str) -> list[dict]:
@@ -241,12 +250,16 @@ class Cache:
         if not self.fts_enabled:
             raise sqlite3.OperationalError("no such module: fts5")
         cols = ", ".join(f"i.{name} AS {name}" for name in COLUMNS)
-        cursor = self._conn.execute(
-            f"SELECT {cols} FROM issues_fts JOIN issues AS i ON i.key = issues_fts.key "
-            "WHERE issues_fts MATCH ? ORDER BY bm25(issues_fts), i.key",
-            (query,),
-        )
-        return self._rows(cursor, "fts")
+
+        def _run() -> list[dict]:
+            cursor = self._conn.execute(
+                f"SELECT {cols} FROM issues_fts JOIN issues AS i ON i.key = issues_fts.key "
+                "WHERE issues_fts MATCH ? ORDER BY bm25(issues_fts), i.key",
+                (query,),
+            )
+            return self._rows(cursor, "fts")
+
+        return self._read(_run)
 
     def search_like(self, terms: Iterable[str]) -> list[dict]:
         """모든 낱말이 key·summary·status·assignee·body 중 어딘가에 들어 있는 행(ASCII는 대소문자 무시)."""
@@ -261,11 +274,15 @@ class Cache:
             params.extend(pattern for _ in LIKE_COLUMNS)
         if not clauses:
             return []
-        cursor = self._conn.execute(
-            f"SELECT {', '.join(COLUMNS)} FROM issues WHERE {' AND '.join(clauses)} ORDER BY updated DESC, key",
-            params,
-        )
-        return self._rows(cursor, "like")
+
+        def _run() -> list[dict]:
+            cursor = self._conn.execute(
+                f"SELECT {', '.join(COLUMNS)} FROM issues WHERE {' AND '.join(clauses)} ORDER BY updated DESC, key",
+                params,
+            )
+            return self._rows(cursor, "like")
+
+        return self._read(_run)
 
     def search(self, terms: Iterable[str]) -> list[dict]:
         """낱말 AND 검색. FTS5 → (OperationalError·0건이면) LIKE. 각 행에 path·via('fts'|'like')가 붙는다."""

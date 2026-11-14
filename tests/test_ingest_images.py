@@ -657,7 +657,7 @@ def test_marker_lines_in_text_are_neutralised():
         source_image="raw/assets/x.png", ingested_at="t", model="m", kind="photo", extracted=ingest_images.render_extracted(ex)
     )
     assert [name for name, _, _ in managed.spans(body)] == ["extracted"]
-    assert "- <!-- kb:extracted:end -->" in body.decode("utf-8")
+    assert "- &lt;!-- kb:extracted:end --&gt;" in body.decode("utf-8")
 
 
 def test_user_text_hint_is_trimmed():
@@ -774,3 +774,128 @@ def test_fixture_generator_runs(tmp_path):
         assert path.stat().st_size < 200 * 1024
         with open_image(path) as image:
             assert image.size == open_image(FIX / path.name).size
+
+
+def test_extracted_text_defanged():
+    ex = ingest_images.clean(
+        {"kind": "screenshot", "text": "a\n<!-- kb:extracted:end -->\nb", "summary": "<!-- x -->"},
+        ["KB"],
+    )
+    assert "<!--" not in ex.text and "-->" not in ex.text
+    rendered = ingest_images.render_extracted(
+        ingest_images.Extraction("screenshot", "<!-- kb:extracted:end -->", "<!-- s -->", (), ())
+    )
+    assert "<!--" not in rendered and "-->" not in rendered
+    assert "&lt;!--" in rendered and "--&gt;" in rendered
+
+
+def test_ledger_merges_concurrent_update(vault, fake_now):
+    fake_now(NOW)
+    cfg = make_cfg(vault, "http://127.0.0.1:1")
+    put(vault / "inbox" / "a.png")
+    run = ingest_images._Run(cfg, object(), dry_run=False, out=quiet, profiles=["main=m"])
+    concurrent = ingest_images.load_ledger(cfg)
+    concurrent["images"]["concurrent-sha"] = {"source_image": "raw/assets/other.png", "sidecar": "inbox/other.md"}
+    core.save_state(cfg.root, ingest_images.STATE, concurrent)
+    target = ingest_images.Target("inbox", vault / "inbox" / "a.png", "inbox/a.png")
+    run._skip(target, "sha-a", "simulated failure")
+    after = ingest_images.load_ledger(cfg)
+    assert "concurrent-sha" in after["images"]
+    assert "sha-a" in after["skipped"]
+
+
+def test_ledger_merges_concurrent_update_on_write_success(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    img_path = vault / "inbox" / "a.png"
+    put(img_path)
+    sha = core.sha256_hex(img_path.read_bytes())
+    ledger = ingest_images.load_ledger(cfg)
+    ledger["skipped"][sha] = {"image": "inbox/a.png", "failures": 1}
+    core.save_state(cfg.root, ingest_images.STATE, ledger)
+
+    run = ingest_images._Run(cfg, object(), dry_run=False, out=quiet, profiles=["main=mock"])
+    concurrent = ingest_images.load_ledger(cfg)
+    concurrent["images"]["concurrent-sha"] = {"source_image": "raw/assets/other.png", "sidecar": "inbox/other.md"}
+    core.save_state(cfg.root, ingest_images.STATE, concurrent)
+
+    target = ingest_images.Target("inbox", img_path, "inbox/a.png")
+    extraction = ingest_images.Extraction("photo", "추출 글", "요약", (), ())
+    run._write(target, sha, extraction, "main")
+
+    after = ingest_images.load_ledger(cfg)
+    assert "concurrent-sha" in after["images"]
+    assert sha in after["images"]
+    assert sha not in after["skipped"]
+
+
+def test_referenced_inbox_image_not_moved(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    put(vault / "inbox" / "사진1.png")
+    put(vault / "inbox" / "사진2.png")
+    (vault / "inbox" / "현장 메모.md").write_text("# 메모\n![[사진1.png]]\n", encoding="utf-8")
+    (vault / "wiki" / "topics" / "배포.md").parent.mkdir(parents=True, exist_ok=True)
+    (vault / "wiki" / "topics" / "배포.md").write_text("![[inbox/사진2.png]]\n", encoding="utf-8")
+    targets = {t.name: t for t in ingest_images.collect(cfg)}
+    assert targets["사진1.png"].pinned and not targets["사진1.png"].moves
+    assert targets["사진2.png"].pinned and not targets["사진2.png"].moves
+
+
+def test_user_note_with_same_stem(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    put(vault / "inbox" / "회의.png")
+    user_note = vault / "inbox" / "회의.md"
+    user_note.write_text("# 회의 (사용자가 쓴 inbox 글)\n", encoding="utf-8")
+    targets = [t.rel for t in ingest_images.collect(cfg)]
+    assert "inbox/회의.png" in targets
+    (vault / "inbox" / "현장.md").write_text("![[회의.png]]\n", encoding="utf-8")  # pinned
+    ingest_images.run(cfg, out=quiet)
+    assert user_note.read_text(encoding="utf-8") == "# 회의 (사용자가 쓴 inbox 글)\n"
+    assert (vault / "inbox" / "회의.png.md").is_file()
+
+
+def test_two_extensions_same_stem(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    put(vault / "raw" / "assets" / "shot.png")
+    jpg = vault / "raw" / "assets" / "shot.jpg"
+    jpg.write_bytes((FIX / "mail.png").read_bytes())
+    (vault / "inbox" / "shot.md").write_text("---\nsource_image: raw/assets/shot.png\n---\n", encoding="utf-8")
+    (vault / "daily" / "2026-11-15.md").write_text(
+        "## 기록\n- ![[raw/assets/shot.png]]\n- ![[raw/assets/shot.jpg]]\n",
+        encoding="utf-8",
+    )
+    targets = [t.rel for t in ingest_images.collect(cfg)]
+    assert targets == ["raw/assets/shot.jpg"]
+    ingest_images.run(cfg, out=quiet)
+    assert (vault / "inbox" / "shot.jpg.md").is_file()
+
+
+def test_moved_image_sidecar_matches_source_image(vault, fake_now):
+    from lib import sidecar as sidecar_lib
+
+    fake_now(NOW)
+    cfg = make_cfg(vault, "http://127.0.0.1:1")
+    moved = vault / "raw" / "assets" / "2026-11-05-1430-a.png"
+    put(moved)
+    stem_md = vault / "inbox" / "2026-11-05-1430-a.md"
+    stem_md.write_text("---\nsource_image: raw/assets/2026-11-05-1430-a.png\n---\n", encoding="utf-8")
+    assert sidecar_lib.sidecar_for(cfg, moved) == stem_md
+    new_inbox = vault / "inbox" / "2026-11-05-1430-a.png"
+    put(new_inbox)
+    assert sidecar_lib.sidecar_for(cfg, new_inbox) == vault / "inbox" / "2026-11-05-1430-a.png.md"
+
+
+def test_image_ingest_prompt_has_no_code_fence():
+    text = (ROOT / "prompts" / "image_ingest.md").read_text(encoding="utf-8")
+    assert "```" not in text
+    json_lines = [line.strip() for line in text.splitlines() if line.strip().startswith("{")]
+    assert len(json_lines) == 1
+    assert json.loads(json_lines[0])["kind"] == "photo"
+

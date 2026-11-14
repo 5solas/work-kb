@@ -38,10 +38,9 @@ LEDGER = "links"  # .state/links.json
 CACHE = "links_cache"  # .state/links_cache.json
 COMPILE_LEDGER = "compile"  # .state/compile.json (compile이 쓰고 link는 태그 개수만 읽는다, D22)
 MAX_TEXT = 120
-MANAGED_DIRS = (("jira",), ("wiki", "projects"), ("wiki", "people"))
-STUB_KEY = re.compile(r"^([A-Z][A-Z0-9_]+)-(\d+)$")
+MANAGED_DIRS = (("jira",), ("wiki", "projects"), ("wiki", "people"), ("wiki", "topics"))
+STUB_KEY = re.compile(r"^([A-Z][A-Z0-9_]+)-([0-9]+)$")
 
-_WIKILINK_SPAN = re.compile(r"!?\[\[(?:(?!\]\]).)*\]\]")
 _BULLET = re.compile(r"^(?:[-*+]|>|#{1,6})\s+")
 _CHECKBOX = re.compile(r"^\[[ xX>]\]\s+")
 _INBOX_STAMP = re.compile(r"^(\d{4})-?(\d{2})-?(\d{2})(?:-(\d{2})(\d{2}))?")
@@ -120,6 +119,14 @@ class Plan:
 
 
 @dataclass(frozen=True)
+class _TopicRule:
+    rel: str
+    stem: str
+    folded_stem: str
+    pattern: re.Pattern[str] | None
+
+
+@dataclass(frozen=True)
 class _Ctx:
     cfg: Config
     project_keys: tuple[str, ...]
@@ -127,11 +134,63 @@ class _Ctx:
     prefix: str
     normalize: bool
     today: str
+    topics: tuple[_TopicRule, ...] = ()
+    topics_hash: str = ""
 
     @property
     def fingerprint(self) -> str:
-        raw = json.dumps([CACHE_VERSION, MAX_TEXT, list(self.project_keys), self.prefix, self.normalize], ensure_ascii=False)
+        raw = json.dumps(
+            [CACHE_VERSION, MAX_TEXT, list(self.project_keys), self.prefix, self.normalize, self.topics_hash],
+            ensure_ascii=False,
+        )
         return core.sha256_hex(raw.encode("utf-8"))[:16]
+
+
+def _is_ascii_word(ch: str) -> bool:
+    return ch.isascii() and (ch.isalnum() or ch == "_")
+
+
+def _term_regex(terms: list[str]) -> re.Pattern[str] | None:
+    if not terms:
+        return None
+    parts = []
+    for term in sorted(terms, key=len, reverse=True):
+        prefix = r"(?<![A-Za-z0-9_])" if _is_ascii_word(term[0]) else ""
+        suffix = r"(?![A-Za-z0-9_])" if _is_ascii_word(term[-1]) else ""
+        parts.append(f"{prefix}{re.escape(term)}{suffix}")
+    return re.compile("|".join(parts))
+
+
+def _load_topics(cfg: Config) -> tuple[tuple[_TopicRule, ...], str]:
+    topics_dir = cfg.path("wiki", "topics")
+    if not topics_dir.is_dir():
+        return (), ""
+    rules: list[_TopicRule] = []
+    sigs: list[list[Any]] = []
+    for path in sorted(topics_dir.glob("*.md")):
+        if not core.is_scannable(path) or not path.is_file():
+            continue
+        rel = _page_rel("wiki", "topics", path.name)
+        stem = unicodedata.normalize("NFC", path.stem)
+        title = ""
+        aliases: list[str] = []
+        try:
+            fields = frontmatter.parse(path.read_bytes())
+        except (OSError, UnicodeDecodeError, core.KbError):
+            fields = {}
+        raw_title = fields.get("name") or fields.get("topic")
+        if isinstance(raw_title, str):
+            title = unicodedata.normalize("NFC", raw_title.strip())
+        raw_aliases = fields.get("aliases")
+        if isinstance(raw_aliases, list):
+            aliases = [unicodedata.normalize("NFC", str(a).strip()) for a in raw_aliases if isinstance(a, str) and a.strip()]
+        elif isinstance(raw_aliases, str) and raw_aliases.strip():
+            aliases = [unicodedata.normalize("NFC", raw_aliases.strip())]
+        terms = list({t for t in (stem, title, *aliases) if len(t) >= 2})
+        rules.append(_TopicRule(rel, stem, os.path.normcase(stem), _term_regex(terms)))
+        sigs.append([rel, title, aliases])
+    topics_hash = core.sha256_hex(json.dumps(sigs, ensure_ascii=False).encode("utf-8"))[:16]
+    return tuple(rules), topics_hash
 
 
 def _context(cfg: Config) -> _Ctx:
@@ -145,28 +204,26 @@ def _context(cfg: Config) -> _Ctx:
     prefix = str(cfg.get("people_prefix") or "@")
     normalize = bool(cfg.get("normalize_keys", True))
     today = core.now(cfg.tz).date().isoformat()
-    return _Ctx(cfg, keys, pattern, prefix, normalize, today)
+    topics, topics_hash = _load_topics(cfg)
+    return _Ctx(cfg, keys, pattern, prefix, normalize, today, topics, topics_hash)
 
 
 # ---------------------------------------------------------------- 줄 분석
 
 
 def _wikilink_spans(text: str) -> list[tuple[int, int]]:
-    if "[[" not in text:
-        return []
-    return [(m.start(), m.end()) for m in _WIKILINK_SPAN.finditer(text)]
+    return notes.wikilink_spans(text)
 
 
 def _inside(spans: list[tuple[int, int]], start: int, end: int) -> bool:
-    return any(s <= start and end <= e for s, e in spans)
+    return notes.inside_spans(spans, start, end)
 
 
 def _line_keys(text: str, ctx: _Ctx) -> list[notes.KeyMatch]:
     """언급으로 칠 키. `[[KEY-1]]`이거나 다른 위키링크 내부가 아닌 맨 글자 키."""
     if not ctx.key_re.search(text):
         return []
-    spans = _wikilink_spans(text)
-    return [m for m in notes.find_keys(text, ctx.project_keys) if m.bracketed or not _inside(spans, m.start, m.end)]
+    return notes.find_keys(text, ctx.project_keys)
 
 
 def _normalizable(text: str, match: notes.KeyMatch, spans: list[tuple[int, int]]) -> bool:
@@ -210,7 +267,7 @@ def _clean_text(text: str, time_: str | None) -> str:
         body = stripped
     if time_ and body.startswith(time_) and (len(body) == len(time_) or body[len(time_)].isspace()):
         body = body[len(time_):].lstrip()
-    body = body.replace("![[", "[[").replace("<!--", "&lt;!--")
+    body = notes.defang_comments(body.replace("![[", "[["))
     if len(body) > MAX_TEXT:
         cut = body[:MAX_TEXT]
         open_ = cut.rfind("[[")
@@ -247,7 +304,37 @@ def _inbox_day(rel: str, data: bytes) -> tuple[str, str]:
     return "", ""
 
 
-def _targets(keys: list[notes.KeyMatch], people: list[str]) -> tuple[str, ...]:
+def _find_topics(text: str, ctx: _Ctx) -> list[str]:
+    if not ctx.topics:
+        return []
+    masked = unicodedata.normalize("NFC", notes._masked(text))
+    by_exact = {rule.stem: rule.rel for rule in ctx.topics}
+    by_folded = {rule.folded_stem: rule.rel for rule in ctx.topics}
+    found: list[str] = []
+    plain_chars = list(masked)
+    for start, end in notes.wikilink_spans(masked):
+        if masked[start] == "!":
+            for i in range(start, end):
+                plain_chars[i] = " "
+            continue
+        inner = masked[start + 2 : end - 2].split("|", 1)[0].split("#", 1)[0].strip()
+        if inner.startswith("wiki/topics/"):
+            inner = inner[len("wiki/"):]
+        if inner.startswith("topics/"):
+            stem = inner[len("topics/"):]
+            if stem.lower().endswith(".md"):
+                stem = stem[:-3]
+            rel = by_exact.get(stem) or by_folded.get(os.path.normcase(stem))
+            if rel and rel not in found:
+                found.append(rel)
+    plain = "".join(plain_chars)
+    for rule in ctx.topics:
+        if rule.rel not in found and rule.pattern and rule.pattern.search(plain):
+            found.append(rule.rel)
+    return found
+
+
+def _targets(keys: list[notes.KeyMatch], people: list[str], topics: Iterable[str] = ()) -> tuple[str, ...]:
     out: list[str] = []
     for match in keys:
         for target in (f"jira/{match.key}.md", f"wiki/projects/{match.key.rsplit('-', 1)[0]}.md"):
@@ -257,6 +344,9 @@ def _targets(keys: list[notes.KeyMatch], people: list[str]) -> tuple[str, ...]:
         target = f"wiki/people/{core.safe_name(name)}.md"
         if target not in out:
             out.append(target)
+    for topic in topics:
+        if topic not in out:
+            out.append(topic)
     return tuple(out)
 
 
@@ -303,12 +393,13 @@ def _extract(rel: str, data: bytes, ctx: _Ctx) -> list[Entry]:
         text = line.text
         keys = _line_keys(text, ctx)
         people = notes.find_people(text, ctx.prefix) if ctx.prefix in text else []
-        if not keys and not people:
+        topics = _find_topics(text, ctx)
+        if not keys and not people and not topics:
             continue
         body = _clean_text(text, line.time)
         rendered = f"- {link} {line.time} {body}" if line.time else f"- {link} {body}"
         entries.append(
-            Entry(sort_day, line.time or last_time, rel, line.lineno, line.hash, rendered.rstrip(), _targets(keys, people))
+            Entry(sort_day, line.time or last_time, rel, line.lineno, line.hash, rendered.rstrip(), _targets(keys, people, topics))
         )
     return entries
 
@@ -420,6 +511,8 @@ def _template_for(rel: str) -> tuple[str, str]:
         return "jira", stem
     if parts[1] == "projects":
         return "project", stem
+    if parts[1] == "topics":
+        return "topic", stem
     return "person", stem
 
 
@@ -658,6 +751,8 @@ def _plan(ctx: _Ctx, *, rebuild: bool) -> Plan:
                     pass
             pages.append(PageWrite(rel, path, new, core.sha256_hex(data), _template_for(rel)[0], body_sha))
         else:
+            if rel.startswith("wiki/topics/"):
+                continue
             kind, name = _template_for(rel)
             if kind == "person":
                 name = _person_name(name)

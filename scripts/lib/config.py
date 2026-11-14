@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import ipaddress
 import os
 import re
 from dataclasses import dataclass, field
@@ -73,6 +74,13 @@ CODE_DEFAULTS: dict[str, Any] = {
 
 _SECTIONS = frozenset(k for k, v in CODE_DEFAULTS.items() if isinstance(v, dict))
 _TOP_LEVEL_ENV_KEYS = frozenset(k for k, v in CODE_DEFAULTS.items() if not isinstance(v, dict)) - {"kb_root"}
+_LIST_ENV_KEYS = frozenset(
+    (section, key)
+    for section, defaults in CODE_DEFAULTS.items()
+    if isinstance(defaults, Mapping)
+    for key, val in defaults.items()
+    if isinstance(val, list)
+)
 _RESERVED_ENV = frozenset(
     {"KB_AGENT", "KB_ROOT", "KB_REQUIRE_LIVE", "KB_SKIP_NVIM", "KB_FAKE_NOW", "KB_ENVIRONMENT"}
 )
@@ -96,11 +104,16 @@ def _norm_host(entry: Any) -> str:
     if not isinstance(entry, str):
         return ""
     text = entry.strip()
+    try:
+        ip = ipaddress.ip_address(_strip_brackets(text))
+    except ValueError:
+        ip = None
+    if ip is not None:
+        return str(ip)
     if "/" in text or ":" in text:
         text = _hostname(text) or ""
     text = text.lower().strip(".")
-    if text.startswith("*."):
-        text = text[2:]
+    text = text.removeprefix("*.")
     return text.strip(".")
 
 
@@ -165,9 +178,31 @@ def is_public_host(url: str, blocklist: Iterable[str]) -> bool:
     host = checked_host(url)
     if host is None:
         return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        target_ip = getattr(ip, "ipv4_mapped", None) or ip
+        if target_ip.is_global:
+            return True
+    else:
+        target_ip = None
     for entry in blocklist:
         domain = _norm_host(entry)
-        if domain and (host == domain or host.endswith("." + domain)):
+        if not domain:
+            continue
+        if ip is not None:
+            try:
+                entry_ip = ipaddress.ip_address(domain)
+            except ValueError:
+                entry_ip = None
+            if entry_ip is not None:
+                entry_target = getattr(entry_ip, "ipv4_mapped", None) or entry_ip
+                if entry_ip == ip or entry_target == target_ip:
+                    return True
+                continue
+        if host == domain or host.endswith("." + domain):
             return True
     return False
 
@@ -398,7 +433,7 @@ def _deep_merge(base: dict, over: Mapping) -> dict:
     return base
 
 
-def _parse_env_value(name: str, value: str) -> Any:
+def _parse_env_value(name: str, value: str, *, allow_list: bool = False) -> Any:
     if value == "":
         return ""
     try:
@@ -407,6 +442,8 @@ def _parse_env_value(name: str, value: str) -> Any:
         return value
     if isinstance(parsed, dict):
         raise core.ConfigError(f"{name}: 환경변수에는 단일 값이나 목록만 쓸 수 있습니다")
+    if isinstance(parsed, list) and not allow_list:
+        return value
     return parsed
 
 
@@ -424,7 +461,9 @@ def parse_env_overrides(environ: Mapping[str, str]) -> dict:
         rest = name[3:].lower()
         section, _, key = rest.partition("_")
         if section in _SECTIONS and key:
-            out.setdefault(section, {})[key] = _parse_env_value(raw_name, environ[raw_name])
+            out.setdefault(section, {})[key] = _parse_env_value(
+                raw_name, environ[raw_name], allow_list=(section, key) in _LIST_ENV_KEYS
+            )
         elif rest in _TOP_LEVEL_ENV_KEYS:
             out[rest] = _parse_env_value(raw_name, environ[raw_name])
     return out
@@ -434,6 +473,8 @@ def _apply_overrides(data: dict, overrides: Mapping[str, Any]) -> None:
     for key, value in overrides.items():
         if key in _SECTIONS and isinstance(value, Mapping):
             section = data.setdefault(key, {})
+            if not isinstance(section, Mapping):
+                raise core.ConfigError(f"{key}: '키: 값' 묶음이어야 합니다")
             for sub, sub_value in value.items():
                 if isinstance(section.get(sub), Mapping):
                     raise core.ConfigError(
@@ -572,4 +613,5 @@ def save_local(root: Path | str, data: Mapping[str, Any]) -> None:
         body = yaml.safe_dump(_plain(data), allow_unicode=True, sort_keys=False, default_flow_style=False)
     except yaml.YAMLError as exc:
         raise core.ConfigError(f"config.local.yaml로 바꿀 수 없는 값이 있습니다: {exc}") from exc
-    core.atomic_write(Path(root) / LOCAL_NAME, (_LOCAL_HEADER + body).encode("utf-8"))
+    with core.kb_lock(root, "설정 저장"):
+        core.atomic_write(Path(root) / LOCAL_NAME, (_LOCAL_HEADER + body).encode("utf-8"))

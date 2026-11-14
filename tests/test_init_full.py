@@ -185,3 +185,60 @@ def test_from_env_values_in_process(vault, mock_jira, monkeypatch):
     data = yaml.safe_load(_local(vault).read_text(encoding="utf-8"))
     assert data["environment"] == "company"
     assert data["jira"]["project_keys"] == ["OPS"]
+
+
+def test_yes_skips_confirmations(vault, mock_jira, monkeypatch):
+    # (1) --yes는 Wizard._confirm을 묻지 않고 True로 넘기되, 일반 값 입력은 여전히 ask로 받는다
+    script = Script(["home", mock_jira.base_url, "KB"], [TOKEN])
+    out: list[str] = []
+    wizard = init.Wizard(vault, ask=script.ask, ask_secret=script.ask_secret, out=out.append, yes=True)
+    assert init._confirm(wizard, "진행할까요? (y/n)", "n") is True
+    assert script.asked == []
+
+    # (2) step_schedule에서도 확인 질문 없이 생성한다
+    init.step_schedule(wizard, {"environment": "home"})
+    assert script.asked == []
+    assert any("schtasks" in line or "작업" in line for line in out)
+
+    # (3) CLI `init.main(["--yes"])`이 run_wizard(..., yes=True)로 전달된다
+    seen: dict[str, object] = {}
+
+    def fake_run_wizard(root, **kwargs):
+        seen["root"] = root
+        seen.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(init, "run_wizard", fake_run_wizard)
+    assert init.main(["--root", str(vault), "--yes"]) == 0
+    assert seen["yes"] is True
+
+    # (4) 실제 run_wizard(yes=True)에서 값 프롬프트는 그대로 묻는다
+    monkeypatch.undo()
+    config.save_local(
+        vault,
+        {
+            "environment": "home",
+            "jira": {"base_url": mock_jira.base_url, "project_keys": ["KB"], "pat_ref": "keyring:work-kb/jira"},
+            "confluence": {"enabled": False},
+            "llm": {"enabled": False},
+        },
+    )
+    step_calls: list[str] = []
+
+    def fake_conf(wiz, data):
+        step_calls.append(f"conf:{wiz.yes}")
+
+    monkeypatch.setattr(init, "FULL_STEPS", [init.step_environment, init.step_jira, fake_conf, init.step_schedule])
+    script_cli = Script(["", "", "KB"], [TOKEN])
+    code = init.run_wizard(vault, ask=script_cli.ask, ask_secret=script_cli.ask_secret, out=out.append, run_doctor=False, yes=True)
+    assert code == 0
+    assert [p.split(" ")[0] for p, _ in script_cli.asked] == ["환경", "Jira", "동기화할"]
+    assert step_calls == ["conf:True"]
+
+
+def test_yes_help_states_it_answers_yes_regardless_of_default(capsys):
+    with pytest.raises(SystemExit):
+        init.main(["--help"])
+    help_text = capsys.readouterr().out
+    assert "기본값과 상관없이" in help_text and "--yes" in help_text
+

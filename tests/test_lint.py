@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import os
@@ -84,7 +85,11 @@ def items(result: dict, key: str) -> list[dict]:
 
 
 def tree(root: Path) -> dict[str, bytes]:
-    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+    return {
+        p.relative_to(root).as_posix(): p.read_bytes()
+        for p in sorted(root.rglob("*"))
+        if p.is_file() and p.relative_to(root).as_posix() != ".state/kb.lock"
+    }
 
 
 def ts(day: str) -> float:
@@ -732,6 +737,22 @@ def test_chunks_repeat_summary_when_group_is_split():
         assert ids[0] == "S1" and len(ids) >= 2
     sent = [i for chunk in chunks for g in chunk for i, _ in g.items if i.startswith("D")]
     assert sent == [f"D{n}" for n in range(1, 6)]
+
+
+def test_write_takes_lock(vault, monkeypatch):
+    cfg = config.load(vault, environ={})
+    calls: list[str] = []
+
+    @contextlib.contextmanager
+    def spy_lock(root, purpose="작업", *args, **kwargs):
+        calls.append(purpose)
+        raise core.LockBusy("잠금 테스트")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(core, "kb_lock", spy_lock)
+    with pytest.raises(core.LockBusy):
+        lint._write(cfg, "- 없음", None)
+    assert calls
 
 
 def test_decision_parser_handles_comments_and_headings():

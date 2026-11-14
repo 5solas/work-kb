@@ -1,6 +1,7 @@
 """lib/config.py: 병합 순서, 환경변수 덮기, 환경 판정(안전 쪽), 공개 호스트, 저장."""
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import datetime as dt
 from pathlib import Path
@@ -599,3 +600,38 @@ def test_example_company_block(vault):
         assert config._hostname(url).endswith(".invalid")
     for profile in cfg.profiles().values():
         assert "detected" not in profile
+
+
+def test_env_string_with_brackets_stays_string():
+    out = config.parse_env_overrides({"KB_CONFLUENCE_TITLE_PREFIX": "[TEAM] "})
+    value = out["confluence"]["title_prefix"]
+    assert isinstance(value, str) and value == "[TEAM] "
+
+
+def test_null_section_with_env_override_is_config_error(vault):
+    write(vault / "config.local.yaml", "environment: home\njira:\n")
+    with pytest.raises(core.ConfigError):
+        config.load(vault, environ={"KB_JIRA_MAX_RESULTS": "50"})
+
+
+def test_save_local_takes_lock(vault, monkeypatch):
+    calls: list[str] = []
+
+    @contextlib.contextmanager
+    def spy_lock(root, purpose="작업", *args, **kwargs):
+        calls.append(purpose)
+        raise core.LockBusy("잠금 테스트")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(core, "kb_lock", spy_lock)
+    with pytest.raises(core.LockBusy):
+        config.save_local(vault, {"environment": "home"})
+    assert calls
+
+
+def test_is_public_host_checks_blocklist_even_for_private_ip():
+    assert config.is_public_host("http://1.2.3.4/v1", []) is True
+    assert config.is_public_host("http://127.0.0.1:9287/v1", []) is False
+    assert config.is_public_host("http://127.0.0.1:9287/v1", ["127.0.0.1"]) is True
+    assert config.is_public_host("http://[::1]:9287/v1", ["::1"]) is True
+

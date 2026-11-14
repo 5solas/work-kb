@@ -34,8 +34,10 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Mapping, TextIO
+from urllib.parse import urlsplit
 
 import markdown
+from markdown.treeprocessors import Treeprocessor
 
 from lib import config, core, frontmatter, managed
 from lib.config import Config
@@ -65,6 +67,7 @@ _ENTITY = re.compile(r"&([A-Za-z][A-Za-z0-9]*);")
 _XML_ENTITIES = frozenset({"amp", "lt", "gt", "quot", "apos"})
 _INLINE_CODE = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)")
 _CODE_SPAN = re.compile(r"<(pre|code)\b[^>]*>.*?</\1>", re.DOTALL)
+_SAFE_SCHEMES = frozenset({"http", "https", "mailto"})
 
 
 # ---------------------------------------------------------------- 경로 고르기
@@ -322,6 +325,43 @@ class Doc:
     body: str  # 손질한 마크다운(위키링크는 그대로)
 
 
+def _strip_comments_outside_code(text: str) -> str:
+    """코드 블록(```/~~~)과 인라인 코드(`…`) 밖의 HTML 주석(`<!--…-->`)만 지운다."""
+    nonce = core.sha256_hex(text.encode("utf-8"))[:8]
+    saved: list[str] = []
+
+    def keep(chunk: str) -> str:
+        token = f"KBCD{nonce}N{len(saved)}X"
+        saved.append(chunk)
+        return token
+
+    out_lines: list[str] = []
+    fence: str | None = None
+    buf: list[str] = []
+    for line in text.splitlines(keepends=True):
+        bare = line.rstrip("\r\n")
+        fence_match = _FENCE.match(bare)
+        if fence is not None:
+            buf.append(line)
+            if fence_match and fence_match.group(1)[0] == fence[0] and len(fence_match.group(1)) >= len(fence):
+                out_lines.append(keep("".join(buf)))
+                buf.clear()
+                fence = None
+            continue
+        if fence_match:
+            fence = fence_match.group(1)
+            buf = [line]
+            continue
+        out_lines.append(_INLINE_CODE.sub(lambda m: keep(m.group(0)), line))
+    if buf:
+        out_lines.append(keep("".join(buf)))
+
+    stripped = _COMMENT.sub("", "".join(out_lines))
+    for index, original in enumerate(saved):
+        stripped = stripped.replace(f"KBCD{nonce}N{index}X", original)
+    return stripped
+
+
 def prepare(rel: str, data: bytes, prefix: str) -> Doc:
     """파일 바이트 → 제목과 손질한 마크다운. 마커가 깨졌거나 UTF-8이 아니면 KbError."""
     fm_raw, body = frontmatter.split(data)
@@ -338,7 +378,7 @@ def prepare(rel: str, data: bytes, prefix: str) -> Doc:
     text = unicodedata.normalize("NFC", text)
     if _norm_rel(rel).casefold() == DECISIONS_REL:
         text = keep_confirmed_decisions(text)
-    text = _COMMENT.sub("", text)
+    text = _strip_comments_outside_code(text)
     if _unclosed_comment(text):
         raise core.KbError(f"{rel}: HTML 주석이 닫히지 않음 (`<!--`에 맞는 `-->`가 없습니다). 고친 뒤 다시 게시하세요")
     h1, text = _split_h1(text)
@@ -427,11 +467,54 @@ def _fix_entities(text: str) -> str:
     return _ENTITY.sub(repl, text)
 
 
+def _append_text(parent: ET.Element, last_kept: ET.Element | None, chunk: str) -> None:
+    if not chunk:
+        return
+    if last_kept is not None:
+        last_kept.tail = (last_kept.tail or "") + chunk
+    else:
+        parent.text = (parent.text or "") + chunk
+
+
+def _sanitize_element(parent: ET.Element) -> None:
+    children = list(parent)
+    if not children:
+        return
+    kept: list[ET.Element] = []
+    last_kept: ET.Element | None = None
+    for child in children:
+        _sanitize_element(child)
+        parent.remove(child)
+        if child.tag == "img":
+            _append_text(parent, last_kept, (child.get("alt") or "") + (child.tail or ""))
+            continue
+        if child.tag == "a":
+            href = re.sub(r"[\x00-\x20]+", "", child.get("href") or "")
+            scheme = urlsplit(href).scheme.lower()
+            if scheme not in _SAFE_SCHEMES:
+                _append_text(parent, last_kept, child.text or "")
+                for sub in list(child):
+                    kept.append(sub)
+                    last_kept = sub
+                _append_text(parent, last_kept, child.tail or "")
+                continue
+        kept.append(child)
+        last_kept = child
+    for sub in kept:
+        parent.append(sub)
+
+
+class _SafeLinksImages(Treeprocessor):
+    def run(self, root: ET.Element) -> None:
+        _sanitize_element(root)
+
+
 def _markdown() -> markdown.Markdown:
     md = markdown.Markdown(extensions=["tables", "fenced_code"], output_format="xhtml")
     # 원시 HTML은 통과시키지 않고 글자로 보인다(storage를 깨뜨리거나 매크로를 끼워 넣지 못하게)
     md.preprocessors.deregister("html_block")
     md.inlinePatterns.deregister("html")
+    md.treeprocessors.register(_SafeLinksImages(md), "kb_safe_links", 5)
     return md
 
 

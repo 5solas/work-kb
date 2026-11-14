@@ -83,7 +83,9 @@ def _emph(s: str) -> str:
 
 
 def _restore(s: str, store: list[str]) -> str:
-    return _PH_RE.sub(lambda m: store[int(m.group(1))], s)
+    while _PH_RE.search(s):
+        s = _PH_RE.sub(lambda m: store[int(m.group(1))], s)
+    return s
 
 
 def _inline(s: str) -> str:
@@ -143,7 +145,6 @@ def _convert(text: str) -> str:
 
     out: list[str] = []
     table: list[tuple[bool, str]] = []
-    list_widths: list[int] = []  # unused state kept simple
 
     def flush_table() -> None:
         if table:
@@ -207,6 +208,12 @@ def _convert(text: str) -> str:
 
     result = "\n".join(out)
     result = result.replace(_BOLD_MARK, "**").replace(_ITALIC_MARK, "*")
+    def _restore_code(m: re.Match) -> str:
+        block = codes[int(m.group(2))]
+        quote_prefix = m.group(1) or ""
+        return "\n".join(quote_prefix + ln for ln in block.split("\n")) if quote_prefix else block
+
+    result = re.sub(r"^(> )?\x05(\d+)\x05", _restore_code, result, flags=re.MULTILINE)
     result = _CODE_PH_RE.sub(lambda m: codes[int(m.group(1))], result)
     result = re.sub(r"\n{3,}", "\n\n", result)
     return result.strip("\n")

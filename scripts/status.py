@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
 
-from lib import config, core, managed, notes
+from lib import config, core, managed, notes, outbox, sidecar
 from lib.config import Config
 
 IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
@@ -90,8 +90,9 @@ def confluence_pushes(cfg: Config, problems: list[str]) -> dict[str, Any]:
 
 
 def outbox_counts(cfg: Config, problems: list[str]) -> dict[str, int]:
-    """`jira/outbox.jsonl`의 상태별 개수. 파일이 없으면 0."""
+    """`jira/outbox.jsonl`의 상태별 개수. 파일이 없으면 0. 오래되거나 주인이 죽은 sending은 uncertain."""
     counts = {"pending": 0, "sending": 0, "failed": 0}
+    uncertain = 0
     path = cfg.path("jira", "outbox.jsonl")
     if not path.is_file():
         return counts
@@ -101,6 +102,7 @@ def outbox_counts(cfg: Config, problems: list[str]) -> dict[str, int]:
     except OSError as exc:
         problems.append(f"jira/outbox.jsonl을 읽지 못했습니다 ({exc})")
         return counts
+    stale = outbox.stale_after(cfg)
     for line in raw.splitlines():
         if not line.strip():
             continue
@@ -109,9 +111,15 @@ def outbox_counts(cfg: Config, problems: list[str]) -> dict[str, int]:
         except (UnicodeDecodeError, ValueError):
             broken += 1
             continue
-        status = entry.get("status") if isinstance(entry, Mapping) else None
-        if status in counts:
-            counts[status] += 1
+        if not isinstance(entry, Mapping):
+            continue
+        state = outbox.state_of(entry, stale)
+        if state == outbox.UNCERTAIN:
+            uncertain += 1
+        elif state in counts:
+            counts[state] += 1
+    if uncertain:
+        counts["uncertain"] = uncertain
     if broken:
         problems.append(f"jira/outbox.jsonl에 읽지 못한 줄 {broken}개")
     return counts
@@ -173,12 +181,12 @@ def unprocessed_images(cfg: Config) -> int:
     if inbox.is_dir():
         for path in inbox.iterdir():
             if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file() and core.is_scannable(path):
-                if not path.with_suffix(".md").exists():
+                if not sidecar.sidecar_for(cfg, path).exists():
                     count += 1
     assets = cfg.path("raw", "assets")
     for name in sorted(_embedded_assets(cfg)):
         image = assets / name
-        if image.is_file() and not cfg.path("inbox", f"{Path(name).stem}.md").exists():
+        if image.is_file() and not sidecar.sidecar_for(cfg, image).exists():
             count += 1
     return count
 
@@ -310,7 +318,7 @@ def lock_holder(root: Path) -> str | None:
 
 def collect(cfg: Config) -> dict[str, Any]:
     """상태 사전. 키: environment, local_config, vault, agent, today, last_sync, confluence, outbox,
-    proposals, images, images_gave_up, compile_gave_up, llm, lock, problems."""
+    proposals, images, images_gave_up, compile_gave_up, jira, llm, lock, problems."""
     problems: list[str] = []
     day = core.now(cfg.tz).date()
     daily = notes.daily_path(cfg, day)
@@ -327,6 +335,7 @@ def collect(cfg: Config) -> dict[str, Any]:
         "images": unprocessed_images(cfg),
         "images_gave_up": images_gave_up(cfg, problems),
         "compile_gave_up": compile_gave_up(cfg, problems),
+        "jira": {"project_keys": list(cfg.project_keys)},
         "llm": llm_info(cfg, problems),
         "lock": lock_holder(cfg.root),
         "problems": problems,
@@ -353,7 +362,10 @@ def render(info: Mapping[str, Any]) -> list[str]:
     else:
         lines.append("마지막 Confluence 게시: 없음")
     outbox = info["outbox"]
-    lines.append(f"outbox: 대기 {outbox['pending']}개, 전송 중 {outbox.get('sending', 0)}개, 실패 {outbox['failed']}개")
+    tail = f", 불확실 {outbox['uncertain']}개" if outbox.get("uncertain") else ""
+    lines.append(
+        f"outbox: 대기 {outbox['pending']}개, 전송 중 {outbox.get('sending', 0)}개, 실패 {outbox['failed']}개{tail}"
+    )
     lines.append(f"미처리 제안: {info['proposals']}개")
     given_up = info.get("images_gave_up", 0)
     lines.append(f"미처리 이미지: {info['images']}개" + (f" (포기한 이미지 {given_up}개, 이유는 .state/images.json)" if given_up else ""))

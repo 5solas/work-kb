@@ -55,6 +55,9 @@ FORCED_JSON_RULE = (
 )
 
 _FENCED = re.compile(r"^```[A-Za-z0-9_-]*[ \t]*\n(.*?)\n?```\s*$", re.DOTALL)
+_THINK_OPEN = re.compile(r"<think(?:ing)?>", re.IGNORECASE)
+_THINK_CLOSE = re.compile(r"</think(?:ing)?>", re.IGNORECASE)
+_THINK_ANY = re.compile(r"</?think(?:ing)?>", re.IGNORECASE)
 
 Messages = list[dict[str, Any]]
 MessagesFor = Union[Callable[[int], Messages], Sequence[Mapping[str, Any]]]
@@ -159,12 +162,35 @@ def _text_of(content: Any) -> str:
     return ""
 
 
+def _is_json_reply(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    fenced = _FENCED.match(stripped)
+    candidate = fenced.group(1).strip() if fenced else stripped
+    if not candidate:
+        return False
+    try:
+        json.loads(candidate)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _select_think_close(content: str, closes: list[re.Match[str]]) -> re.Match[str]:
+    for match in closes:
+        if _is_json_reply(content[match.end() :]):
+            return match
+    return closes[-1]
+
+
 def normalize_message(message: Mapping) -> tuple[str, str | None]:
     """(답, 생각)으로 나눈다(D39).
 
-    - 생각: `reasoning` 또는 `reasoning_content` 필드, content 안 마지막 `</think>` 앞부분
-      (`<think>`가 있든 없든), 닫히지 않은 `<think>…`(잘림).
-    - 답: 마지막 `</think>` 뒤의 글. content가 None이면 "".
+    - 생각: `reasoning` 또는 `reasoning_content` 필드, content 안 `</think>`·`</thinking>`
+      앞부분(대소문자 무시, 뒤쪽이 올바른 JSON이 되는 첫 닫기 태그 우선, 없으면 마지막),
+      닫히지 않은 `<think>`·`<thinking>…`(잘림).
+    - 답: 전체 content가 이미 올바른 JSON이면 태그를 자르지 않고 그대로 둔다.
     """
     if not isinstance(message, Mapping):
         return "", None
@@ -174,17 +200,30 @@ def normalize_message(message: Mapping) -> tuple[str, str | None]:
         value = message.get(key)
         if isinstance(value, str) and value.strip() and value.strip() not in traces:
             traces.append(value.strip())
-    cut = content.rfind("</think>")
-    if cut >= 0:
-        head = content[:cut].replace("<think>", "").replace("</think>", "").strip()
-        content = content[cut + len("</think>"):]
-        if head:
-            traces.append(head)
-    elif content.lstrip().startswith("<think>"):
-        rest = content.lstrip()[len("<think>"):].strip()
-        if rest:
-            traces.append(rest)
-        content = ""
+    stripped = content.strip()
+    is_json = False
+    if stripped:
+        try:
+            json.loads(stripped)
+            is_json = True
+        except (ValueError, TypeError):
+            is_json = False
+    if not is_json:
+        closes = list(_THINK_CLOSE.finditer(content))
+        if closes:
+            cut = _select_think_close(content, closes)
+            head = _THINK_ANY.sub("", content[: cut.start()]).strip()
+            content = content[cut.end() :]
+            if head:
+                traces.append(head)
+        else:
+            leading = content.lstrip()
+            opened = _THINK_OPEN.match(leading)
+            if opened:
+                rest = leading[opened.end() :].strip()
+                if rest:
+                    traces.append(rest)
+                content = ""
     return content.strip(), ("\n\n".join(traces) or None)
 
 
@@ -469,11 +508,7 @@ class LlmClient:
 
     def _conn(self, profile: Mapping[str, Any]) -> dict[str, Any]:
         conn = {k: profile[k] for k in ("ca_bundle", "verify", "trust_env", "proxies") if k in profile}
-        ca = conn.get("ca_bundle")
-        if ca and not Path(str(ca)).expanduser().is_absolute():
-            base = getattr(self.cfg, "config_dir", None) or getattr(self.cfg, "root", Path("."))
-            conn["ca_bundle"] = str(Path(base) / str(ca))
-        return conn
+        return net.resolve_conn(self.cfg, conn)
 
     def _key(self, name: str) -> str | None:
         if name not in self._keys:

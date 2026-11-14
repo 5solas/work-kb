@@ -8,88 +8,18 @@ from __future__ import annotations
 
 import json
 import socket
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import keyring
 import pytest
+from hypothesis import example, given
+from hypothesis import strategies as st
 
 from lib import config, core, llm_client, net, prompts
 from lib.llm_client import ChatHttpError, LlmClient, normalize_message
+from llm_fakes import FakeLLM, chat_reply
 
 ROOT = Path(__file__).resolve().parents[1]
-
-# ---------------------------------------------------------------- 가짜 서버
-
-
-def chat_reply(content, *, reasoning=None, reasoning_content=None, finish="stop", usage=True, model="fake-model"):
-    message = {"role": "assistant", "content": content}
-    if reasoning is not None:
-        message["reasoning"] = reasoning
-    if reasoning_content is not None:
-        message["reasoning_content"] = reasoning_content
-    body = {"id": "x", "object": "chat.completion", "model": model,
-            "choices": [{"index": 0, "message": message, "finish_reason": finish}]}
-    if usage:
-        body["usage"] = {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
-    return body
-
-
-class FakeLLM:
-    """요청을 기록하고 `replies` 큐(없으면 `default`)로 답한다. 답: (상태, 본문[, 머리글]) 또는 함수(req)."""
-
-    def __init__(self):
-        self.requests: list[dict] = []
-        self.replies: list = []
-        self.default = (200, chat_reply('{"ok": true}'))
-        self.models = (200, {"object": "list", "data": [{"id": "fake-model"}]})
-        fake = self
-
-        class Handler(BaseHTTPRequestHandler):
-            def _go(self):
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length else b""
-                body = json.loads(raw) if raw else None
-                req = {"method": self.command, "path": self.path, "json": body,
-                       "auth": self.headers.get("Authorization")}
-                fake.requests.append(req)
-                if self.path.endswith("/models"):
-                    reply = fake.models
-                else:
-                    reply = fake.replies.pop(0) if fake.replies else fake.default
-                if callable(reply):
-                    reply = reply(req)
-                status, payload, *rest = reply
-                headers = rest[0] if rest else {}
-                data = payload.encode("utf-8") if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                self.send_response(status)
-                for key, value in headers.items():
-                    self.send_header(key, value)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-
-            do_GET = do_POST = _go
-
-            def log_message(self, *args):
-                pass
-
-        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.server.daemon_threads = True
-        self.base_url = f"http://127.0.0.1:{self.server.server_address[1]}/v1"
-        self.thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
-        self.thread.start()
-
-    @property
-    def chats(self) -> list[dict]:
-        return [r for r in self.requests if r["path"].endswith("/chat/completions")]
-
-    def stop(self):
-        self.server.shutdown()
-        self.server.server_close()
-        self.thread.join(timeout=5)
 
 
 @pytest.fixture
@@ -180,6 +110,51 @@ def test_normalize_message(message, content, reasoning):
 
 def test_normalize_message_not_mapping():
     assert normalize_message(None) == ("", None)  # type: ignore[arg-type]
+
+
+def test_literal_close_think_inside_json():
+    payload = '{"decisions":[{"title":"t","content":"use </think> to end","source_line":"L1"}],"actions":[]}'
+    content, reasoning = normalize_message({"content": payload})
+    assert content == payload and reasoning is None
+    assert llm_client.parse_json_object(content)["decisions"][0]["content"] == "use </think> to end"
+
+
+def test_uppercase_and_thinking_tags():
+    assert normalize_message({"content": '<THINK>reasoning {here}</THINK>{"x":1}'}) == ('{"x":1}', "reasoning {here}")
+    assert normalize_message({"content": '<thinking>reasoning {here}</thinking>{"x":1}'}) == ('{"x":1}', "reasoning {here}")
+    assert normalize_message({"content": "  \n<THINKING>cut off"}) == ("", "cut off")
+
+
+def test_think_prefix_followed_by_json_with_literal_close_tag():
+    body = '{"t":"use </think> x"}'
+    content, reasoning = normalize_message({"content": f"<think>r</think>{body}"})
+    assert content == body and reasoning == "r"
+    assert llm_client.parse_json_object(content) == {"t": "use </think> x"}
+
+    # 추론 뒤에 코드 펜스로 감싼 JSON 안에 리터럴 닫기 태그가 있어도 보존
+    fenced = f"```json\n{body}\n```"
+    content2, reasoning2 = normalize_message({"content": f"<THINK>생각 중</THINK>\n{fenced}"})
+    assert content2 == fenced and reasoning2 == "생각 중"
+    assert llm_client.parse_json_object(content2) == {"t": "use </think> x"}
+
+    # 추론 내부의 선행 </think> 다음 부분이 JSON이 아니면 지나가고 실제 JSON 시작 앞의 </think>에서 자름
+    content3, reasoning3 = normalize_message({"content": f"<think>a</think> b </thinking>{body}"})
+    assert content3 == body and reasoning3 == "a b"
+
+
+@example(thought="r", value="use </think> x", close_tag="</think>")
+@given(
+    thought=st.text(alphabet=st.characters(blacklist_characters="<>"), min_size=0, max_size=40),
+    value=st.text(max_size=60).map(lambda s: f"{s}</think>x" if "</think>" not in s.lower() else s),
+    close_tag=st.sampled_from(["</think>", "</THINK>", "</thinking>", "</Thinking>"]),
+)
+def test_property_normalize_preserves_json_containing_close_tags(thought, value, close_tag):
+    payload = json.dumps({"t": value}, ensure_ascii=False)
+    raw = f"<think>{thought}{close_tag}{payload}"
+    content, reasoning = normalize_message({"content": raw})
+    assert json.loads(content) == {"t": value}
+    expected_trace = thought.strip() or None
+    assert reasoning == expected_trace
 
 
 # ---------------------------------------------------------------- 분량

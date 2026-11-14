@@ -725,6 +725,7 @@ def fetch_out_of_scope(
     if not candidates:
         return [], marks
     fields = client.sync_fields()
+    myself_ok = False
     for i in range(0, len(candidates), OUT_OF_SCOPE_BATCH):
         chunk = candidates[i : i + OUT_OF_SCOPE_BATCH]
         try:
@@ -740,6 +741,15 @@ def fetch_out_of_scope(
                 issue = client.issue(key, fields=fields)
             except NotFoundError:
                 marks[key] = {"in_scope": False}  # 지워졌거나 볼 권한이 없다
+                continue
+            except core.AuthError as exc:
+                status = getattr(exc, "status", None)
+                if status != 403 and not (status is None and "(403" in str(exc)):
+                    raise
+                if not myself_ok:
+                    client.myself()  # 토큰이 죽었으면 여기서 AuthError → exit 2
+                    myself_ok = True
+                marks[key] = {"in_scope": False}
                 continue
             new_key = _text(issue.get("key")).upper()
             if new_key == key:

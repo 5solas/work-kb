@@ -140,7 +140,7 @@ class ConfluenceClient:
         client = cls(
             base_url,
             pat,
-            conn=conf,
+            conn=net.resolve_conn(cfg, conf),
             space_key=str(conf.get("space_key") or "") or None,
             parent_page_id=None if parent is None else str(parent),
         )

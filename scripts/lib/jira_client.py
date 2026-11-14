@@ -344,7 +344,7 @@ class JiraClient:
         pat = kb_secrets.resolve(ref, cfg)
         if not pat:
             raise core.AuthError(kb_secrets.describe_missing(ref))
-        client = cls(base_url, pat, conn=jira, page_size=jira.get("max_results") or 500)
+        client = cls(base_url, pat, conn=net.resolve_conn(cfg, jira), page_size=jira.get("max_results") or 500)
         client._log_root = cfg.root
         preset = jira.get("sprint_field")
         if isinstance(preset, str) and preset.strip():

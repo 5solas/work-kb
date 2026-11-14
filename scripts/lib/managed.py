@@ -53,10 +53,12 @@ def _marker_lines(data: bytes) -> Iterator[tuple[int, int, int]]:
     pos, size = 0, len(data)
     while pos < size:
         nl = data.find(b"\n", pos)
-        stop = size if nl < 0 else nl
-        cr = data.find(b"\r", pos, stop)
-        while cr >= 0 and cr + 1 < size and data[cr + 1 : cr + 2] in (b"\r", b"\n"):
-            cr = data.find(b"\r", cr + 1, stop)
+        eol_cr = size
+        if nl >= 0:
+            eol_cr = nl
+            while eol_cr > pos and data[eol_cr - 1 : eol_cr] == b"\r":
+                eol_cr -= 1
+        cr = data.find(b"\r", pos, eol_cr)
         if cr >= 0:
             yield pos, cr, cr + 1
             pos = cr + 1

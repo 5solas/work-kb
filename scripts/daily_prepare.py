@@ -31,6 +31,7 @@ import datetime as dt
 import json
 import re
 import sys
+import unicodedata
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
@@ -42,8 +43,8 @@ NOTE_NO_SYNC = "- (Jira 동기화 전)"
 TODAY_STATE = "today"  # .state/today.json: daily별로 지난번에 그린 today 본문(merge 판정용)
 TODAY_STATE_KEEP = 31
 _SECTIONS = (("오늘", "today"), ("이월", "carryover"), ("기록", None))
-_JIRA_KEY = re.compile(r"^[A-Z][A-Z0-9_]+-\d+$")
-_TODAY_LINE = re.compile(r"^- \[([ xX])\] \[\[([A-Z][A-Z0-9_]+-\d+)(?:[|#][^\]]*)?\]\]")
+_JIRA_KEY = re.compile(r"^[A-Z][A-Z0-9_]+-[0-9]+$")
+_TODAY_LINE = re.compile(r"^- \[([ xX])\] \[\[([A-Z][A-Z0-9_]+-[0-9]+)(?:[|#][^\]]*)?\]\]")
 _OPEN_TASK = re.compile(r"^- \[ \] (.*)$")
 _ANY_TASK = re.compile(r"^- \[[ xX>]\] (.*)$")
 _TIME = re.compile(r"^\d{2}:\d{2}(?:\s+|$)")
@@ -148,7 +149,7 @@ def ensure_skeleton(data: bytes, rel: str = "daily/x.md") -> bytes:
             continue
         match = notes.HEADING2.match(line.text)
         if match:
-            headings.setdefault(match.group(1).strip(), line)
+            headings.setdefault(unicodedata.normalize("NFC", match.group(1).strip()), line)
 
     inserts: list[tuple[int, bytes]] = []
     for heading, region in _SECTIONS:

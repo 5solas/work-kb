@@ -1,4 +1,5 @@
 import datetime as dt
+import unicodedata
 
 import pytest
 
@@ -99,9 +100,13 @@ def test_find_keys_obsidian_absolute_path_links_are_bracketed(text):
     assert [(m.key, m.bracketed) for m in found] == [("KB-12", True)]
 
 
-@pytest.mark.parametrize("text", ["[[jira/KB-12-설계]]", "[[docs/KB-12]]", "[[jira/KB-12.mdx]]", "jira/KB-12"])
-def test_find_keys_other_paths_are_not_bracketed(text):
-    assert [m.bracketed for m in notes.find_keys(text, ["KB"])] == [False]
+@pytest.mark.parametrize("text", ["[[jira/KB-12-설계]]", "[[docs/KB-12]]", "[[jira/KB-12.mdx]]"])
+def test_find_keys_other_wikilink_paths_excluded(text):
+    assert notes.find_keys(text, ["KB"]) == []
+
+
+def test_find_keys_plain_path_is_not_bracketed():
+    assert [m.bracketed for m in notes.find_keys("jira/KB-12", ["KB"])] == [False]
 
 
 @pytest.mark.parametrize(
@@ -257,3 +262,45 @@ def test_page_template_plain_names_stay_unquoted():
     assert body.startswith("---\ntype: topic\nname: 배포 준비\naliases: []\nupdated: 2026-11-05\n---\n# 배포 준비\n")
     _rel, body = notes.page_template("project", "KB", title="- 캐시: 정리", today="2026-11-05")
     assert frontmatter.parse(body.encode("utf-8"))["title"] == "- 캐시: 정리"
+
+
+def test_unclosed_frontmatter_is_body():
+    src = "---\n## 기록\n- [ ] 개인 할 일\n- 10:00 KB-7 논의\n".encode()
+    lines = list(notes.iter_lines("daily/2026-11-14.md", src))
+    assert lines[0].text == "---" and not lines[0].in_code
+    assert any(line.text == "- [ ] 개인 할 일" and not line.in_code for line in lines)
+
+
+def test_find_people_nfd():
+    nfc = "- 10:00 @김철수 와 회의"
+    nfd = unicodedata.normalize("NFD", nfc)
+    assert notes.find_people(nfd) == ["김철수"]
+
+
+def test_find_keys_keeps_bracketed_links_and_skips_embeds():
+    text = "- [[KB-12]] [[jira/KB-13]] ![[raw/assets/KB-12-whiteboard.png]] ![[KB-14]] [[KB-15-설계]] KB-16"
+    found = notes.find_keys(text, ["KB"])
+    assert [(m.key, m.bracketed) for m in found] == [("KB-12", True), ("KB-13", True), ("KB-16", False)]
+
+
+def test_page_template_link_safe():
+    rel, _ = notes.page_template("topic", "a #b [c]|d", title=None, today="2026-11-05")
+    assert rel.stem == "a -b -c-d"
+    assert not any(ch in rel.stem for ch in "[]#^|")
+
+
+def test_parse_table_keeps_empty_last_cell():
+    table = "| 키 | 제목 |\n|---|---|\n|| 요약 |\n| KB-1 ||\n"
+    rows = notes.parse_table(table)
+    assert rows == [{"키": "", "제목": "요약"}, {"키": "KB-1", "제목": ""}]
+    assert notes.parse_table("| A ||\n|---|---|\n| 1 | 2 |\n") == [{"A": "1", "": "2"}]
+
+
+def test_read_view_bad_utf8(vault):
+    cfg = _cfg(vault)
+    view = vault / "jira" / "_views" / "today.md"
+    view.parent.mkdir(parents=True, exist_ok=True)
+    view.write_bytes(b"\xff\xfe| bad |")
+    assert notes.read_view(cfg, "today") == []
+    log_text = (vault / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
+    assert notes.NOT_UTF8 in log_text
