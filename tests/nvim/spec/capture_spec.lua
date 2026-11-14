@@ -408,4 +408,63 @@ describe("capture", function()
       H.eq(vim.fn.mode(), "n")
     end)
   end)
+
+  it("concurrent reader never sees a truncated daily", function()
+    with_vault({}, function(vault)
+      local file = daily_file(vault)
+      local lines = { "---", "date: 2026-11-05", "---", "## 기록" }
+      for i = 1, 20000 do
+        lines[#lines + 1] = string.format("- 09:%02d 기록 %d KB-%d 긴 줄을 만들어 파일을 키운다", i % 60, i, i)
+      end
+      H.write_bytes(file, table.concat(lines, "\n") .. "\n")
+      local size = vim.uv.fs_stat(file).size
+      H.ui_stub()
+      -- 다른 프로세스(예약 작업의 kb.py link, 동기화 도구)가 파일을 계속 읽는다: 본 크기 중 가장 작은 값과 읽은 횟수
+      local reader = vim.system({ H.python(), "-c", table.concat({
+        "import time,sys",
+        "p=sys.argv[1]; m=None; k=0; end=time.time()+2.5",
+        "while time.time()<end:",
+        "  try:",
+        "    with open(p,'rb') as f: n=len(f.read())",
+        "  except OSError: continue",
+        "  k+=1; m=n if m is None else min(m,n)",
+        "print(m, k)",
+      }, "\n"), file }, { text = true })
+      vim.wait(300)
+      local fileio = require("work-kb.fileio")
+      local t0 = vim.uv.hrtime()
+      local n = 0
+      while (vim.uv.hrtime() - t0) / 1e6 < 1800 and n < 100 do
+        n = n + 1
+        fileio.append(file, "- 10:00 캡처 " .. n)
+      end
+      local res = reader:wait()
+      local min_seen, reads = (res.stdout or ""):match("^(%d+) (%d+)")
+      H.ok(min_seen, "읽는 쪽 출력: " .. vim.inspect(res))
+      H.ok(tonumber(reads) > 10, "읽는 쪽이 거의 읽지 못함: " .. tostring(reads))
+      H.ok(tonumber(min_seen) >= size, string.format("잘린 daily를 읽음: %s < %d (%d번 캡처)", min_seen, size, n))
+      H.contains(H.read_bytes(file), "- 10:00 캡처 " .. n .. "\n")
+      -- 임시 파일이 남지 않는다
+      local left = vim.fn.glob(vault .. "/daily/.*.tmp", true, true)
+      H.eq(left, {})
+    end)
+  end)
+
+  it("atomic write: disk changed after reading is not overwritten, temp file removed", function()
+    with_vault({}, function(vault)
+      local file = daily_file(vault)
+      H.write_bytes(file, DAILY_LF)
+      local fileio = require("work-kb.fileio")
+      H.write_bytes(file, DAILY_LF .. "다른 프로세스\n")
+      local ok, err = pcall(fileio.write_bytes, file, "새 바이트", DAILY_LF)
+      H.ok(not ok, "디스크가 바뀌었는데 덮어씀")
+      H.contains(err, "읽은 뒤 바뀌었습니다")
+      H.eq(H.read_bytes(file), DAILY_LF .. "다른 프로세스\n")
+      H.eq(vim.fn.glob(vault .. "/daily/.*.tmp", true, true), {})
+      -- 바뀌지 않았으면 바꾼다
+      fileio.write_bytes(file, "새 바이트", DAILY_LF .. "다른 프로세스\n")
+      H.eq(H.read_bytes(file), "새 바이트")
+      H.eq(vim.fn.glob(vault .. "/daily/.*.tmp", true, true), {})
+    end)
+  end)
 end)
