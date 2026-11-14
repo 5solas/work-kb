@@ -183,3 +183,22 @@ def test_schema_change_recreates(db):
         assert cache.count() == 0
         cache.upsert(ROWS[:1])
         assert keys(cache.search(["캐시"])) == ["KB-12"]
+
+
+def test_read_while_locked_is_file_busy(db, monkeypatch):
+    monkeypatch.setattr(fts, "BUSY_TIMEOUT", 0.05)
+    with fts.Cache(db) as reader:
+        locker = sqlite3.connect(str(db), isolation_level=None)
+        locker.execute("BEGIN EXCLUSIVE")
+        try:
+            with pytest.raises(core.FileBusy):
+                reader.search(["캐시"])
+            with pytest.raises(core.FileBusy):
+                reader.search_like(["캐시"])
+            with pytest.raises(core.FileBusy):
+                reader.get("KB-12")
+            with pytest.raises(core.FileBusy):
+                reader.count()
+        finally:
+            locker.rollback()
+            locker.close()

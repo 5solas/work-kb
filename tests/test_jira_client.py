@@ -523,3 +523,31 @@ def test_mock_updates_mode():
         assert _jql(server, "updated >= '-30m'") == ["OPS-1", "KB-12"]  # 정렬 없음 → updated 내림차순
     with pytest.raises(KeyError):
         mock_jira.start(updates={"KB-999": {"summary": "x"}})
+
+
+def test_relative_ca_bundle_from_config_dir(tmp_path, monkeypatch):
+    from lib.confluence_client import ConfluenceClient
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "certs").mkdir()
+    pem = vault / "certs" / "corp.pem"
+    pem.write_text("DUMMY PEM\n", encoding="utf-8")
+    (vault / "config.yaml").write_text("environment: home\njira:\n  project_keys: [KB]\n", encoding="utf-8")
+    kb_secrets.store("work-kb", "jira", "tok-j")
+    kb_secrets.store("work-kb", "conf", "tok-c")
+    config.save_local(
+        vault,
+        {
+            "environment": "home",
+            "jira": {"base_url": "https://jira.example.invalid", "pat_ref": "keyring:work-kb/jira", "ca_bundle": "certs/corp.pem"},
+            "confluence": {"base_url": "https://conf.example.invalid", "pat_ref": "keyring:work-kb/conf", "ca_bundle": "certs/corp.pem"},
+        },
+    )
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    cfg = config.load(vault)
+    with JiraClient.from_config(cfg) as jc, ConfluenceClient.from_config(cfg) as cc:
+        assert jc._session.verify == str(pem)
+        assert cc._session.verify == str(pem)

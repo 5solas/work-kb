@@ -469,11 +469,7 @@ class LlmClient:
 
     def _conn(self, profile: Mapping[str, Any]) -> dict[str, Any]:
         conn = {k: profile[k] for k in ("ca_bundle", "verify", "trust_env", "proxies") if k in profile}
-        ca = conn.get("ca_bundle")
-        if ca and not Path(str(ca)).expanduser().is_absolute():
-            base = getattr(self.cfg, "config_dir", None) or getattr(self.cfg, "root", Path("."))
-            conn["ca_bundle"] = str(Path(base) / str(ca))
-        return conn
+        return net.resolve_conn(self.cfg, conn)
 
     def _key(self, name: str) -> str | None:
         if name not in self._keys:
