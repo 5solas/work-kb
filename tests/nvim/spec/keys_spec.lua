@@ -111,6 +111,37 @@ describe("keys", function()
     H.ok(ok, tostring(err))
   end)
 
+  it("removes keys bound under the old mapleader", function()
+    local saved_leader = vim.g.mapleader
+    local ok, err = pcall(function()
+      local kb = require("work-kb")
+      -- mapleader를 바꾼 뒤 키를 끄면 옛 리더로 붙인 키도 뗀다
+      vim.g.mapleader = ","
+      kb.setup({ root = H.repo, prefix = "<leader>k", server = { enable = false } })
+      H.ok(mapping(",kc"), "처음 리더 ,")
+      vim.g.mapleader = " "
+      kb.setup({ root = H.repo, prefix = false, server = { enable = false } })
+      H.ok(not mapping(",kc"), "옛 리더의 키가 남음")
+      -- 같은 접두 글("<leader>k")이어도 리더가 바뀌었으면 옮겨 붙인다
+      vim.g.mapleader = ","
+      kb.setup({ root = H.repo, prefix = "<leader>k", server = { enable = false } })
+      vim.g.mapleader = " "
+      kb.setup({ root = H.repo, prefix = "<leader>k", server = { enable = false } })
+      for _, e in ipairs(EXPECTED) do
+        H.ok(not mapping("," .. "k" .. e[1]), "옛 리더의 키가 남음: " .. e[1])
+        H.ok(mapping("<Space>k" .. e[1]), "새 리더의 키: " .. e[1])
+      end
+      H.ok(vim.fn.maparg(",kc", "x") == "", "비주얼 키도 뗀다")
+      -- 다른 접두 (<F8>)로 옮겨도 마찬가지
+      kb.setup({ root = H.repo, prefix = "<F8>", server = { enable = false } })
+      H.ok(not mapping("<Space>kc"))
+      H.ok(mapping("<F8>c"))
+    end)
+    vim.g.mapleader = saved_leader
+    cleanup()
+    H.ok(ok, tostring(err))
+  end)
+
   it("setup은 config 말고 아무 모듈도 불러오지 않고 서버도 바로 띄우지 않는다", function()
     local saved = {}
     for name, value in pairs(package.loaded) do
