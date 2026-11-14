@@ -629,14 +629,20 @@ def test_exits_after_code_change(vault, tmp_path, fake_now, start_server):
     shutil.copytree(SCRIPTS, scripts, ignore=shutil.ignore_patterns("__pycache__"))
     env = child_env(tmp_path, vault)
     v = str(vault)
+    # 바뀐 것이 없으면 응답 뒤에도 계속 돈다
+    server = start_server(env, script=scripts / "kb.py")
+    assert server.run(["status", "--root", v])[0] == 0
+    assert server.ping() and server.proc.poll() is None
+    server.close()
+    # 서버는 응답을 보낸 "뒤"에 파일을 본다. 응답 사이에 파일을 바꾸면 바로 앞 응답 뒤의 확인과 경쟁한다
+    # (R-agy-02). 그래서 서버가 준비 줄을 낸 뒤(감시 기준은 그 전에 잡힌다), 첫 요청 전에 바꾼다:
+    # 그 사이에는 서버가 파일을 보지 않으므로 첫 응답 뒤의 확인이 반드시 변경을 본다.
     for changed in ("status.py", "lib/core.py"):
         server = start_server(env, script=scripts / "kb.py")
-        assert server.run(["status", "--root", v])[0] == 0
-        assert server.ping() and server.proc.poll() is None  # 바뀐 것이 없으면 계속 돈다
         target = scripts / changed
         stat = target.stat()
         os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
-        code, out = server.run(["status", "--root", v])  # 이번 응답은 보낸 뒤 끝난다
+        code, out = server.run(["status", "--root", v])  # 이 응답은 보낸 뒤 끝난다
         assert code == 0, out
         assert server.proc.wait(timeout=15) == 0, changed
         assert "코드가 바뀌어" in server.err(), server.err()
