@@ -804,6 +804,32 @@ def test_ledger_merges_concurrent_update(vault, fake_now):
     assert "sha-a" in after["skipped"]
 
 
+def test_ledger_merges_concurrent_update_on_write_success(vault, llm, fake_now):
+    fake_now(NOW)
+    server = llm()
+    cfg = make_cfg(vault, server.base_url)
+    img_path = vault / "inbox" / "a.png"
+    put(img_path)
+    sha = core.sha256_hex(img_path.read_bytes())
+    ledger = ingest_images.load_ledger(cfg)
+    ledger["skipped"][sha] = {"image": "inbox/a.png", "failures": 1}
+    core.save_state(cfg.root, ingest_images.STATE, ledger)
+
+    run = ingest_images._Run(cfg, object(), dry_run=False, out=quiet, profiles=["main=mock"])
+    concurrent = ingest_images.load_ledger(cfg)
+    concurrent["images"]["concurrent-sha"] = {"source_image": "raw/assets/other.png", "sidecar": "inbox/other.md"}
+    core.save_state(cfg.root, ingest_images.STATE, concurrent)
+
+    target = ingest_images.Target("inbox", img_path, "inbox/a.png")
+    extraction = ingest_images.Extraction("photo", "추출 글", "요약", (), ())
+    run._write(target, sha, extraction, "main")
+
+    after = ingest_images.load_ledger(cfg)
+    assert "concurrent-sha" in after["images"]
+    assert sha in after["images"]
+    assert sha not in after["skipped"]
+
+
 def test_referenced_inbox_image_not_moved(vault, llm, fake_now):
     fake_now(NOW)
     server = llm()
