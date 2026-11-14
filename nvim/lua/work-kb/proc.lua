@@ -522,7 +522,7 @@ function M._spawn(spec)
   end
 
   local function reader(cb)
-    return function(err, data)
+    return function(_, data)
       if data then
         if cb then
           vim.schedule(function()
