@@ -193,16 +193,19 @@ def _translate(exc: rex.RequestException, url: str, timeout: float) -> core.KbEr
 def _auth_error(status: int, method: str, url: str) -> core.KbError:
     host = _host(url)
     if status == 401:
-        return _error(
+        exc = _error(
             core.AuthError,
             f"인증에 실패했습니다 (401, {method} {host})",
             "토큰(PAT·키)이 틀렸거나 만료되었습니다. `python scripts/kb.py init`으로 다시 입력하세요",
         )
-    return _error(
-        core.AuthError,
-        f"권한이 없습니다 (403, {method} {host})",
-        "계정 권한을 확인하세요. Jira라면 브라우저로 한 번 로그인해 CAPTCHA를 푸세요",
-    )
+    else:
+        exc = _error(
+            core.AuthError,
+            f"권한이 없습니다 (403, {method} {host})",
+            "계정 권한을 확인하세요. Jira라면 브라우저로 한 번 로그인해 CAPTCHA를 푸세요",
+        )
+    exc.status = status  # type: ignore[attr-defined]
+    return exc
 
 
 # ---------------------------------------------------------------- 요청
