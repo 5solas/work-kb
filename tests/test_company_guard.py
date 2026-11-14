@@ -266,3 +266,15 @@ def test_http_import_rule_catches(tmp_path):
     sample = tmp_path / "x.py"
     sample.write_text("import requests\nfrom lib import net, core\nfrom urllib import request\nimport http.client\nfrom lib import llm_client\n", encoding="utf-8")
     assert _http_imports(sample) == ["requests", "lib.net", "urllib.request", "http.client"]
+
+
+def test_public_ip_literal_refused():
+    assert config.is_public_host("https://104.18.0.1/v1", config.CODE_BLOCKLIST)
+    assert config.is_public_host("https://[2001:4860:4860::8888]/v1", config.CODE_BLOCKLIST)
+
+
+def test_private_ip_allowed():
+    assert not config.is_public_host("http://10.0.0.5:8080/v1", config.CODE_BLOCKLIST)
+    assert not config.is_public_host("http://192.168.1.20:8080/v1", config.CODE_BLOCKLIST)
+    assert not config.is_public_host("http://127.0.0.1:8080/v1", config.CODE_BLOCKLIST)
+    assert not config.is_public_host("http://[::1]:8080/v1", config.CODE_BLOCKLIST)

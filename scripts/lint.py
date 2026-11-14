@@ -1075,16 +1075,26 @@ def _render(vault: _Vault, sections: Sequence[_Section]) -> str:
 def _write(cfg: Config, body: str, current: bytes | None) -> bool:
     """`wiki/_lint.md`의 lint 구역만 바꾼다. 바뀌었으면 True."""
     path = cfg.root / LINT_REL
-    if current is None:
-        _rel, template = notes.page_template("lint", "", title=None, today=core.now(cfg.tz).date().isoformat())
-        base = template.encode("utf-8")
-    else:
-        base = current
-    new = managed.replace_region(base, REGION, body)
-    if new == current:
-        return False
-    core.atomic_write(path, new, expect_sha256=core.sha256_hex(current) if current is not None else core.MUST_NOT_EXIST)
-    return True
+    with core.kb_lock(cfg.root, "lint"):
+        try:
+            fresh = path.read_bytes() if path.is_file() else None
+        except OSError:
+            fresh = current
+        base_cur = fresh if fresh is not None else current
+        if base_cur is None:
+            _rel, template = notes.page_template("lint", "", title=None, today=core.now(cfg.tz).date().isoformat())
+            base = template.encode("utf-8")
+        else:
+            base = base_cur
+        new = managed.replace_region(base, REGION, body)
+        if new == base_cur:
+            return False
+        core.atomic_write(
+            path,
+            new,
+            expect_sha256=core.sha256_hex(base_cur) if base_cur is not None else core.MUST_NOT_EXIST,
+        )
+        return True
 
 
 def run(cfg: Config, *, llm: bool = False, client: LlmClient | None = None) -> dict:

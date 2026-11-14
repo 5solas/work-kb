@@ -565,6 +565,24 @@ class _Run:
         if not self.dry_run:
             core.save_state(self.cfg.root, STATE, self.ledger)
 
+    def _merge_ledger(
+        self,
+        *,
+        image: tuple[str, dict] | None = None,
+        skip: tuple[str, dict] | None = None,
+        unskip: str | None = None,
+    ) -> None:
+        """잠금 안에서 최신 원장을 다시 읽어 이번 변경만 병합해 저장한다."""
+        fresh = load_ledger(self.cfg)
+        if image is not None:
+            fresh["images"][image[0]] = image[1]
+        if skip is not None:
+            fresh["skipped"][skip[0]] = skip[1]
+        if unskip is not None:
+            fresh["skipped"].pop(unskip, None)
+        self.ledger = fresh
+        self._save_ledger()
+
     def _show_new_file(self, rel: str, data: bytes) -> None:
         text = data.decode("utf-8")
         for line in difflib.unified_diff([], text.splitlines(keepends=True), fromfile="/dev/null", tofile=f"b/{rel}"):
@@ -642,17 +660,22 @@ class _Run:
         if not record or self.dry_run:
             self.out(f"- 건너뜀: {target.rel} — {why}. 다음 실행에서 다시 시도합니다")
             return
-        entry = self.ledger["skipped"].get(sha) or {}
-        before = int(entry.get("count") or 0) if self._same_profiles(entry) else 0  # 프로필이 바뀌면 처음부터
-        count = before + 1
-        self.ledger["skipped"][sha] = {
-            "image": target.rel,
-            "count": count,
-            "status": "gave_up" if count >= GIVE_UP_AFTER else "skipped",
-            "profiles": sorted(self.profiles),
-            "at": self._now().isoformat(timespec="seconds"),
-            "error": core.redact(why)[:300],
-        }
+        with core.kb_lock(self.cfg.root, "ingest"):
+            fresh = load_ledger(self.cfg)
+            entry = fresh["skipped"].get(sha) or {}
+            before = int(entry.get("count") or 0) if self._same_profiles(entry) else 0  # 프로필이 바뀌면 처음부터
+            count = before + 1
+            skip_entry = {
+                "image": target.rel,
+                "count": count,
+                "status": "gave_up" if count >= GIVE_UP_AFTER else "skipped",
+                "profiles": sorted(self.profiles),
+                "at": self._now().isoformat(timespec="seconds"),
+                "error": core.redact(why)[:300],
+            }
+            fresh["skipped"][sha] = skip_entry
+            self.ledger = fresh
+            self._save_ledger()
         if count >= GIVE_UP_AFTER:
             self.out(
                 f"- 건너뜀: {target.rel} — {why}. {count}번째 실패라 다음 실행부터 보내지 않습니다"
@@ -660,8 +683,6 @@ class _Run:
             )
         else:
             self.out(f"- 건너뜀: {target.rel} — {why}. 다음 실행에서 다시 시도합니다 ({count}/{GIVE_UP_AFTER})")
-        with core.kb_lock(self.cfg.root, "ingest"):
-            self._save_ledger()
 
     # ------------------------------------------------------------ 중복
 
@@ -774,9 +795,7 @@ class _Run:
                         except (core.KbError, OSError) as exc:
                             self.out(f"  되돌리지 못했습니다: {entry['source_image']} ({exc})")
                     raise
-                self.ledger["images"][sha] = entry
-                self.ledger["skipped"].pop(sha, None)
-                self._save_ledger()
+                self._merge_ledger(image=(sha, entry), unskip=sha)
         except core.LockBusy:
             raise
         except (core.KbError, OSError) as exc:

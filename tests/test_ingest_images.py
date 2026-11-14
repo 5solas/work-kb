@@ -787,3 +787,18 @@ def test_extracted_text_defanged():
     )
     assert "<!--" not in rendered and "-->" not in rendered
     assert "&lt;!--" in rendered and "--&gt;" in rendered
+
+
+def test_ledger_merges_concurrent_update(vault, fake_now):
+    fake_now(NOW)
+    cfg = make_cfg(vault, "http://127.0.0.1:1")
+    put(vault / "inbox" / "a.png")
+    run = ingest_images._Run(cfg, object(), dry_run=False, out=quiet, profiles=["main=m"])
+    concurrent = ingest_images.load_ledger(cfg)
+    concurrent["images"]["concurrent-sha"] = {"source_image": "raw/assets/other.png", "sidecar": "inbox/other.md"}
+    core.save_state(cfg.root, ingest_images.STATE, concurrent)
+    target = ingest_images.Target("inbox", vault / "inbox" / "a.png", "inbox/a.png")
+    run._skip(target, "sha-a", "simulated failure")
+    after = ingest_images.load_ledger(cfg)
+    assert "concurrent-sha" in after["images"]
+    assert "sha-a" in after["skipped"]
