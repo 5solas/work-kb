@@ -482,9 +482,9 @@ def _commit(ctx: _Ctx, label: str, fn: Callable[[dict], list[Edit]]) -> bool:
 
 
 def _one_line(value: Any, limit: int) -> str:
-    """LLM 글을 한 줄로: 주석 표시 제거, 공백 정리, 길이 제한."""
+    """LLM 글을 한 줄로: 주석 표시 무력화, 공백 정리, 길이 제한."""
     text = unicodedata.normalize("NFC", str(value or ""))
-    text = text.replace("<!--", "").replace("-->", "")
+    text = notes.defang_comments(text)
     text = " ".join(text.split())
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"

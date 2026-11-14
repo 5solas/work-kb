@@ -395,8 +395,10 @@ def _clean_line(text: str) -> str:
 
 def clean(data: Mapping[str, Any], project_keys: list[str], hint: str = "") -> Extraction:
     """검증된 답을 정리한다. 키는 project_keys의 것만, 사람은 이미지 글이나 힌트에 나온 이름만."""
-    text = "\n".join(line for line in (_clean_line(x) for x in str(data.get("text") or "").splitlines()) if line)
-    summary = " ".join(_clean_line(str(data.get("summary") or "")).split())
+    text = notes.defang_comments(
+        "\n".join(line for line in (_clean_line(x) for x in str(data.get("text") or "").splitlines()) if line)
+    )
+    summary = notes.defang_comments(" ".join(_clean_line(str(data.get("summary") or "")).split()))
     allowed = set(project_keys)
     keys: list[str] = []
     for raw in data.get("jira_keys") or []:
@@ -421,13 +423,13 @@ def render_extracted(ex: Extraction, prefix: str = "@") -> str:
     """`extracted` 구역 본문. 읽은 글은 줄마다 `- `를 붙여(마커·제목·코드 울타리로 읽히지 않게) 둔다."""
     lines = [f"- 종류: {KIND_LABELS.get(ex.kind, ex.kind)}"]
     if ex.summary:
-        lines.append(f"- 요약: {ex.summary}")
+        lines.append(f"- 요약: {notes.defang_comments(ex.summary)}")
     if ex.jira_keys:
         lines.append("- 키: " + " · ".join(f"[[{key}]]" for key in ex.jira_keys))
     if ex.people:
         lines.append("- 사람: " + " · ".join(f"{prefix}{name}" for name in ex.people))
     if ex.text:
-        lines += ["", "### 읽은 글", *(f"- {line}" for line in ex.text.splitlines())]
+        lines += ["", "### 읽은 글", *(f"- {notes.defang_comments(line)}" for line in ex.text.splitlines())]
     return "\n".join(lines)
 
 

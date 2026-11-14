@@ -94,7 +94,7 @@ def _fold(text: str) -> str:
 
 def _one_line(value: Any, limit: int = 200) -> str:
     text = " ".join(str(value or "").split())
-    text = text.replace("<!--", "&lt;!--")
+    text = notes.defang_comments(text)
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 

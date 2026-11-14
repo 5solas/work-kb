@@ -657,7 +657,7 @@ def test_marker_lines_in_text_are_neutralised():
         source_image="raw/assets/x.png", ingested_at="t", model="m", kind="photo", extracted=ingest_images.render_extracted(ex)
     )
     assert [name for name, _, _ in managed.spans(body)] == ["extracted"]
-    assert "- <!-- kb:extracted:end -->" in body.decode("utf-8")
+    assert "- &lt;!-- kb:extracted:end --&gt;" in body.decode("utf-8")
 
 
 def test_user_text_hint_is_trimmed():
@@ -774,3 +774,16 @@ def test_fixture_generator_runs(tmp_path):
         assert path.stat().st_size < 200 * 1024
         with open_image(path) as image:
             assert image.size == open_image(FIX / path.name).size
+
+
+def test_extracted_text_defanged():
+    ex = ingest_images.clean(
+        {"kind": "screenshot", "text": "a\n<!-- kb:extracted:end -->\nb", "summary": "<!-- x -->"},
+        ["KB"],
+    )
+    assert "<!--" not in ex.text and "-->" not in ex.text
+    rendered = ingest_images.render_extracted(
+        ingest_images.Extraction("screenshot", "<!-- kb:extracted:end -->", "<!-- s -->", (), ())
+    )
+    assert "<!--" not in rendered and "-->" not in rendered
+    assert "&lt;!--" in rendered and "--&gt;" in rendered

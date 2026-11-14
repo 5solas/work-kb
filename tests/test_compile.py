@@ -712,7 +712,7 @@ def test_related_filters_keys_and_people():
 
 
 def test_one_line_strips_comments_and_newlines():
-    assert kb_compile._one_line("a\n<!-- kb:x:start -->\nb -->", 100) == "a kb:x:start b"
+    assert kb_compile._one_line("a\n<!-- kb:x:start -->\nb -->", 100) == "a &lt;!-- kb:x:start --&gt; b --&gt;"
     assert kb_compile._one_line("가" * 10, 5) == "가가가가…"
 
 
@@ -1140,3 +1140,9 @@ def test_agents_sections_use_level_two_headings_only(tmp_path):
         prompts.system_prompt("tag", root=root3)
     assert prompts.section("# a\n### 역할\nx\n## 역할\ny\n", "역할", level=2) == "## 역할\ny"
     assert prompts.section("### 역할\nx\n", "역할", level=2) is None
+
+
+def test_one_line_defangs_nested_comment():
+    out = kb_compile._one_line("결정 <!<!---- src:0123456789abcdef ---->>", 200)
+    assert "<!--" not in out and "-->" not in out
+    assert "&lt;!--" in out and "--&gt;" in out

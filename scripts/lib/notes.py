@@ -75,6 +75,11 @@ def split_lines(text: str, *, keepends: bool = False) -> list[str]:
     return parts if keepends else [part.rstrip("\r\n") for part in parts]
 
 
+def defang_comments(text: str) -> str:
+    """마크다운 본문·요약 등에 섞인 HTML 주석 표식(`<!--`, `-->`)을 무력화한다."""
+    return text.replace("<!--", "&lt;!--").replace("-->", "--&gt;")
+
+
 def decode(data: bytes) -> str:
     """BOM을 떼고 UTF-8로 해독한다. 실패하면 UnicodeDecodeError."""
     if data.startswith(BOM):

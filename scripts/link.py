@@ -267,7 +267,7 @@ def _clean_text(text: str, time_: str | None) -> str:
         body = stripped
     if time_ and body.startswith(time_) and (len(body) == len(time_) or body[len(time_)].isspace()):
         body = body[len(time_):].lstrip()
-    body = body.replace("![[", "[[").replace("<!--", "&lt;!--")
+    body = notes.defang_comments(body.replace("![[", "[["))
     if len(body) > MAX_TEXT:
         cut = body[:MAX_TEXT]
         open_ = cut.rfind("[[")
