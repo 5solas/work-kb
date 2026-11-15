@@ -16,7 +16,7 @@ jira:
     review: "reporter = currentUser() AND status = 'In Review'"
   poll_minutes: 15
   max_results: 500
-  # 쓰기 제한 시간(초). outbox·lint가 두 배(120초)를 보내는 중 불확실 기준으로 쓴다.
+  # outbox의 '보내는 중' 기록이 이 값(초)의 두 배보다 오래되면 '불확실'로 본다. HTTP 제한 시간은 아니다.
   write_timeout_sec: 60
   # 전체 동기화 주기(시간). 범위에서 빠진 일감(담당 변경·삭제·이동·권한 없음)을 정리한다.
   full_every_hours: 24
