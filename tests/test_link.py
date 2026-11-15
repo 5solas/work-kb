@@ -874,3 +874,19 @@ def test_short_md_wikilink_creates_mention_and_stays_unrewritten(vault, fake_now
     issue = (vault / "jira" / "KB-12.md").read_text(encoding="utf-8")
     assert "09:00" in issue and "[[KB-12.md]]" in issue
     assert (vault / "daily" / "2026-11-15.md").read_text(encoding="utf-8") == f"## 기록\n{line}"
+
+
+def test_md_wikilink_edge_cases_in_link_run(vault, fake_now):
+    """`[[KEY.md|별칭]]`·`[[KEY.md#제목]]`만 언급. 코드 울타리·임베드·비-일감 링크·소문자·없는 프로젝트는 아니다."""
+    fake_now(NOW)
+    cfg = _setup(vault)
+    text = (
+        "## 기록\n"
+        "```\n- 08:00 [[KB-90.md]] 코드 안\n```\n"
+        "- 09:00 [[KB-1.md|별칭]] 과 [[KB-2.md#제목]]\n"
+        "- 09:10 ![[KB-91.md]] 임베드, [[KB-92-설계.md]] 문서, [[kb-93.md]] 소문자, [[ZZ-1.md]] 남의 프로젝트\n"
+    )
+    _write(vault, "daily/2026-11-15.md", text)
+    link.run(cfg)
+    assert sorted(p.name for p in (vault / "jira").glob("*.md")) == ["KB-1.md", "KB-2.md"]
+    assert (vault / "daily" / "2026-11-15.md").read_text(encoding="utf-8") == text
