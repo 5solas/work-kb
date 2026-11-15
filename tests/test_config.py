@@ -665,3 +665,29 @@ def test_unused_jira_keys_removed_from_defaults_and_kept_ignored(vault):
     write(vault / "config.local.yaml", "environment: home\n")
     assert config.ignored_keys(config.load(vault, environ={})) == []
 
+
+def test_jira_code_defaults_match_config_yaml_and_modules(vault):
+    import daily_prepare
+    import jira_sync
+    import lint
+
+    raw = yaml.safe_load((REPO / "config.yaml").read_text(encoding="utf-8"))["jira"]
+    defaults = config.CODE_DEFAULTS["jira"]
+    for key in ("jql_mine", "full_every_hours", "done_transition_names", "write_timeout_sec", "poll_minutes", "max_results"):
+        assert defaults[key] == raw[key]
+
+    assert jira_sync.FULL_EVERY_HOURS == defaults["full_every_hours"]
+    assert list(daily_prepare.DONE_TRANSITION_NAMES) == defaults["done_transition_names"]
+    assert lint.DEFAULT_POLL_MINUTES == defaults["poll_minutes"]
+
+    write(vault / "config.yaml", "timezone: Asia/Seoul\n")
+    write(vault / "config.local.yaml", "environment: home\n")
+    cfg = config.load(vault, environ={})
+    assert cfg.get("jira.jql_mine") == raw["jql_mine"]
+    assert cfg.get("jira.full_every_hours") == 24
+    assert cfg.get("jira.done_transition_names") == ["Done", "완료"]
+    assert cfg.get("jira.write_timeout_sec") == 60
+    assert config.parse_env_overrides({"KB_JIRA_DONE_TRANSITION_NAMES": "[Done, 완료]"}) == {
+        "jira": {"done_transition_names": ["Done", "완료"]}
+    }
+

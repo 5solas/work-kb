@@ -57,11 +57,14 @@ CODE_DEFAULTS: dict[str, Any] = {
     "people_prefix": "@",
     "normalize_keys": True,
     "jira": {
+        "jql_mine": "(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) AND updated >= '-30d'",
         "project_keys": [],
         "views": {},
         "poll_minutes": 15,
         "max_results": 500,
         "write_timeout_sec": 60,
+        "full_every_hours": 24,
+        "done_transition_names": ["Done", "완료"],
     },
     "confluence": {
         "enabled": True,
