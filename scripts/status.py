@@ -320,6 +320,9 @@ def collect(cfg: Config) -> dict[str, Any]:
     """상태 사전. 키: environment, local_config, vault, agent, today, last_sync, confluence, outbox,
     proposals, images, images_gave_up, compile_gave_up, jira, llm, lock, problems."""
     problems: list[str] = []
+    ignored = config.ignored_keys(cfg)
+    if ignored:
+        problems.append(f"무시되는 키: {', '.join(ignored)} (Jira는 REST v2 · Bearer PAT 고정)")
     day = core.now(cfg.tz).date()
     daily = notes.daily_path(cfg, day)
     return {

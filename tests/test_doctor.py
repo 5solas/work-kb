@@ -822,3 +822,17 @@ def test_get_json_rejects_non_json():
     assert info.value.status == 200
     with pytest.raises(core.NetworkError):
         net.get_json(FakeSession(_resp(502)), "http://127.0.0.1/a")
+
+
+def test_doctor_reports_ignored_jira_keys_without_failing(vault):
+    (vault / "config.local.yaml").write_text(
+        "environment: home\njira:\n  api_version: 2\n  auth: pat\n",
+        encoding="utf-8",
+    )
+    ctx = doctor.Context(root_arg=str(vault), report=doctor.Report())
+    doctor.run_checks(ctx, [doctor.check_config, doctor.check_local, doctor.check_ignored_keys])
+    assert ctx.report.exit_code() == 0
+    ignored = [c for c in ctx.report.checks if c.name == "무시되는 키"]
+    assert len(ignored) == 1
+    assert ignored[0].state == "-"
+    assert "jira.api_version" in ignored[0].text and "jira.auth" in ignored[0].text

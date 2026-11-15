@@ -42,6 +42,14 @@ CODE_BLOCKLIST: frozenset[str] = frozenset(
     }
 )
 
+IGNORED_KEYS: tuple[str, ...] = ("jira.api_version", "jira.auth")
+
+
+def ignored_keys(cfg: Any) -> list[str]:
+    """더는 읽지 않지만 기존 config.local.yaml 호환을 위해 허용하는 키."""
+    return [key for key in IGNORED_KEYS if cfg.get(key) is not None]
+
+
 # 코드 기본값. 연결 값(주소·참조)은 두지 않는다.
 CODE_DEFAULTS: dict[str, Any] = {
     "kb_root": ".",
@@ -49,12 +57,14 @@ CODE_DEFAULTS: dict[str, Any] = {
     "people_prefix": "@",
     "normalize_keys": True,
     "jira": {
-        "api_version": 2,
-        "auth": "pat",
+        "jql_mine": "(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) AND updated >= '-30d'",
         "project_keys": [],
         "views": {},
         "poll_minutes": 15,
         "max_results": 500,
+        "write_timeout_sec": 60,
+        "full_every_hours": 24,
+        "done_transition_names": ["Done", "완료"],
     },
     "confluence": {
         "enabled": True,

@@ -213,7 +213,7 @@ def test_config_transition_names(vault, issues):
 
 
 def test_default_names_without_config(vault):
-    """설정 어디에도 done_transition_names가 없으면 기본값. 볼트로 복사된 저장소 config.yaml에서 그 키를 뺀다."""
+    """볼트 config.yaml에 done_transition_names가 없어도 CODE_DEFAULTS로 기본값을 채운다."""
     shared = vault / "config.yaml"
     if shared.exists():
         text = shared.read_text(encoding="utf-8")
@@ -221,8 +221,10 @@ def test_default_names_without_config(vault):
         shared.write_bytes(kept.encode("utf-8"))
     config.save_local(vault, {"environment": "home"})
     cfg = config.load(vault)
-    assert cfg.get("jira.done_transition_names") is None
+    assert cfg.get("jira.done_transition_names") == ["Done", "완료"]
     assert daily_prepare.done_transition_names(cfg) == ["Done", "완료"]
+    bare = config.Config(root=vault, data={}, environment="home")
+    assert daily_prepare.done_transition_names(bare) == ["Done", "완료"]
 
 
 def test_cached_transitions_pick_actual_name(cfg, vault, issues):

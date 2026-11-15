@@ -218,7 +218,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 | `i` | `capture-inbox` | 제목을 묻고 분할 버퍼 `*work-kb-inbox*`를 연다. 본문을 쓰고 `C-c C-c`로 저장하면 `inbox\`에 글이 생기고, `C-c C-k`는 저장하지 않고 닫는다 |
 | `t` | `today` | 오늘 daily를 준비하고(오늘·이월 구역) 연다 |
 | `s` | `search` | daily·inbox·wiki·jira에서 찾는다. 쓸 수 있는 첫 방법을 고른다: fzf-lua가 있으면 대화형 검색(정규식), 없으면 rg(입력한 구를 글자 그대로 찾아 quickfix에), 둘 다 없으면 `kb.py search`(공백은 AND, quickfix에) |
-| `o` | `open-at-point` | 커서 위치의 Jira 키, 위키링크, `@이름`을 연다. 캐시에 없거나 뼈대뿐인 일감은 먼저 받아 온다 |
+| `o` | `open-at-point` | 커서 위치의 Jira 키(`[[KEY-1]]`·`[[KEY-1.md]]`·`[[jira/KEY-1]]`·맨 키), 위키링크, `@이름`을 연다. 캐시에 없거나 뼈대뿐인 일감은 먼저 받아 온다 |
 | `l` | `link` | Jira 키, `@이름`, 기존 주제(`wiki/topics/`의 파일명·`name`·`aliases`)를 엔티티 페이지에 연결한다. 주제 페이지는 만들지 않는다(`a`로 승인) |
 | `?` | `status` | 상태 요약(마지막 동기화, 대기·`불확실` outbox, 미처리 제안·이미지 등) |
 | `j` | `jira` | Jira 작업 메뉴를 연다(6.4절) |

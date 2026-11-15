@@ -52,10 +52,10 @@ STUB_DAYS = 30
 PROPOSAL_DAYS = 14
 CACHE_DAYS = 7
 SYNC_FACTOR = 4  # last_sync가 poll_minutes × 4보다 오래되면 보고
-DEFAULT_POLL_MINUTES = 15
+DEFAULT_POLL_MINUTES = config.CODE_DEFAULTS["jira"]["poll_minutes"]
 SIMILARITY = 0.85
 MAX_LIST = 50  # 절마다 보고에 적는 최대 항목 수(나머지는 '외 N개')
-STALE_SENDING_SEC = 120.0  # jira_act.stale_after 기본값(write_timeout_sec 60 × 2)
+STALE_SENDING_SEC = 2 * outbox.STALE_BASE_SEC  # jira_act.stale_after 기본값(write_timeout_sec 60 × 2)
 MAX_SUMMARY_CHARS = 1500
 MAX_DECISION_CHARS = 500
 MAX_WHY = 300
@@ -507,10 +507,7 @@ def _outbox(vault: _Vault) -> _Section:
     except (core.KbError, OSError) as exc:
         vault.problems.append(f"jira/outbox.jsonl을 읽지 못했습니다 ({exc})")
         return section
-    try:
-        stale_sec = 2 * float(cfg.get("jira.write_timeout_sec") or STALE_SENDING_SEC / 2)
-    except (TypeError, ValueError):
-        stale_sec = STALE_SENDING_SEC
+    stale_sec = outbox.stale_after(cfg)
     now = dt.datetime.now(dt.timezone.utc)  # claimed_at은 실제 시계(KB_FAKE_NOW와 무관)
     labels = {"pending": "대기", "sending": "전송 중", "failed": "실패", "uncertain": "불확실"}
     hints = {

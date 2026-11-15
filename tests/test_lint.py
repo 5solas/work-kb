@@ -287,6 +287,19 @@ def test_outbox_states(kb, cfg, no_llm):
     assert "읽지 못한 줄 1개" in text
 
 
+def test_outbox_respects_write_timeout_sec_consistently_with_outbox(kb, no_llm):
+    now = dt.datetime.now(dt.UTC)
+    row = {"id": "01G", "action": "comment", "key": "KB-7", "status": "sending", "attempts": 1,
+           "claimed_at": (now - dt.timedelta(seconds=30)).isoformat(timespec="seconds"), "pid": os.getpid()}
+    write(kb, "jira/outbox.jsonl", json.dumps(row, ensure_ascii=False) + "\n")
+
+    write(kb, "config.local.yaml", "environment: home\njira:\n  write_timeout_sec: 10\n")
+    assert items(run(config.load(kb, environ={})), "outbox")[0]["state"] == "uncertain"
+
+    write(kb, "config.local.yaml", "environment: home\njira:\n  write_timeout_sec: -5\n")
+    assert items(run(config.load(kb, environ={})), "outbox")[0]["state"] == "sending"
+
+
 # ---------------------------------------------------------------- 오래된 '제안'·미처리 제안
 
 

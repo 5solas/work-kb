@@ -647,7 +647,7 @@ def prepare(cfg: Config, day: dt.date | str, *, carryover: bool = True) -> Path:
 
 # ---------------------------------------------------------------- --check-done (읽기 전용)
 
-DONE_TRANSITION_NAMES = ("Done", "완료")
+DONE_TRANSITION_NAMES = tuple(config.CODE_DEFAULTS["jira"]["done_transition_names"])
 _MOVE_HOPS = 5
 KB_CMD = "python scripts/kb.py"
 

@@ -1052,3 +1052,8 @@ Conventions:
    - **D-NV7 보류·기각**
      - 보류: P-97(`link` 새 원천 미감지, `daily_prepare` FileBusy)·P-100(`lint._fit` 예산)은 재현 뒤, P-98(상대 JQL 페이지 밀림)은 실제 Jira DC에서, P-99(재시도에 검증 오류 첨부)는 실제 모델로, P-101(`gave_up` 이미지 경고)은 설계 결정 뒤.
      - 기각 P-93: 클립보드 임시 파일은 볼트로 옮기지 않는다. ASCII 경로로 한글 문제를 피한다(D12).
+   - **D-NV8 설정·링크 불일치 정리**
+     - cfg-1: `jira.write_timeout_sec`(기본 60)을 `config.yaml`·`CODE_DEFAULTS`에 둔다. outbox·lint·status는 `outbox.stale_after`로 같은 값을 읽는다. HTTP 제한 시간은 `jira.timeout`이다.
+     - cfg-2: 읽는 곳이 없는 `jira.api_version`·`jira.auth`를 기본값에서 뺐다. 남아 있으면 오류 없이 무시하고 `doctor`·`status`가 알린다.
+     - cfg-3: `jql_mine`·`full_every_hours`·`done_transition_names`의 기본값은 `CODE_DEFAULTS`에만 둔다(값은 그대로). 그래서 `config.yaml`에 키가 없어도 기본값을 쓰고, `KB_JIRA_DONE_TRANSITION_NAMES`는 `[A, B]` 목록도 받는다.
+     - cfg-4: `link`도 `[[KEY-1.md]]`(`.md` 대소문자 무관, `|별칭`·`#제목`)를 일감 링크로 본다(Neovim `o`와 같음). P-52 제외(임베드, 일감 아닌 링크 안의 키)는 그대로다.

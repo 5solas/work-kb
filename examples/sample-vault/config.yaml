@@ -8,8 +8,6 @@ people_prefix: "@"
 normalize_keys: true
 
 jira:
-  api_version: 2
-  auth: pat
   # 상대 시간은 따옴표로 감싼다(DECISIONS D49). ORDER BY는 쓰지 않는다.
   jql_mine: "(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) AND updated >= '-30d'"
   views:
@@ -18,6 +16,8 @@ jira:
     review: "reporter = currentUser() AND status = 'In Review'"
   poll_minutes: 15
   max_results: 500
+  # outbox의 '보내는 중' 기록이 이 값(초)의 두 배보다 오래되면 '불확실'로 본다. HTTP 제한 시간은 아니다.
+  write_timeout_sec: 60
   # 전체 동기화 주기(시간). 범위에서 빠진 일감(담당 변경·삭제·이동·권한 없음)을 정리한다.
   full_every_hours: 24
   # `today --check-done`이 제안하는 완료 전환 이름(앞에서부터 시도). 자동 전환은 없다.

@@ -40,7 +40,7 @@ from lib.jira_client import JiraClient, JqlError, NotFoundError, parse_datetime,
 STATE = "sync"
 LOCK_OWNER = "jira_sync"
 FULL_AFTER = dt.timedelta(days=25)
-FULL_EVERY_HOURS = 24  # jira.full_every_hours 기본값: 마지막 전체 동기화가 이보다 오래면 전체
+FULL_EVERY_HOURS = config.CODE_DEFAULTS["jira"]["full_every_hours"]  # 마지막 전체 동기화가 이보다 오래면 전체
 OUT_OF_SCOPE_BATCH = 50  # 범위 밖 일감을 다시 받을 때 `key in (…)` 하나에 넣는 키 수
 MARGIN_MINUTES = 5
 COMMENT_CHARS = 200
