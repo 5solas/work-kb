@@ -288,7 +288,7 @@ def test_outbox_states(kb, cfg, no_llm):
 
 
 def test_outbox_respects_write_timeout_sec_consistently_with_outbox(kb, no_llm):
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     row = {"id": "01G", "action": "comment", "key": "KB-7", "status": "sending", "attempts": 1,
            "claimed_at": (now - dt.timedelta(seconds=30)).isoformat(timespec="seconds"), "pid": os.getpid()}
     write(kb, "jira/outbox.jsonl", json.dumps(row, ensure_ascii=False) + "\n")

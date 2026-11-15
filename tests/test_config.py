@@ -48,8 +48,8 @@ def test_repo_config_yaml_loads(vault):
 
 
 def test_write_timeout_sec_single_source_of_truth(vault):
-    from lib import outbox
     import lint
+    from lib import outbox
 
     raw = yaml.safe_load((REPO / "config.yaml").read_text(encoding="utf-8"))
     assert raw["jira"]["write_timeout_sec"] == 60
