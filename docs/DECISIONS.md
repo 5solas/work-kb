@@ -1052,3 +1052,8 @@ Conventions:
    - **D-NV7 보류·기각**
      - 보류: P-97(`link` 새 원천 미감지, `daily_prepare` FileBusy)·P-100(`lint._fit` 예산)은 재현 뒤, P-98(상대 JQL 페이지 밀림)은 실제 Jira DC에서, P-99(재시도에 검증 오류 첨부)는 실제 모델로, P-101(`gave_up` 이미지 경고)은 설계 결정 뒤.
      - 기각 P-93: 클립보드 임시 파일은 볼트로 옮기지 않는다. ASCII 경로로 한글 문제를 피한다(D12).
+   - **D-NV8 설정·링크 불일치 정리**
+     - `jira.write_timeout_sec`(기본 `60`)을 `config.yaml`·`CODE_DEFAULTS`에 넣고 `outbox.STALE_BASE_SEC`·`lint._outbox`가 같은 값을 읽게 통일했다.
+     - 미사용 키 `jira.api_version`·`jira.auth`는 기본 설정과 `CODE_DEFAULTS`에서 뺐다. 기존 `config.local.yaml`에 남아 있어도 오류 없이 무시하고 `doctor`·`status`가 안내한다.
+     - `jira.jql_mine`·`jira.full_every_hours`(24)·`jira.done_transition_names`([Done, 완료])를 `CODE_DEFAULTS`로 모아 모듈 기본값과 단일 출처로 맞췄다.
+     - `notes.find_keys`도 `[[KEY-1.md]]`(대소문자 무관 `.md`, `|별칭`·`#제목` 포함)을 일감 링크로 인식한다. P-52 임베드·비-일감 위키링크 제외는 유지한다.
