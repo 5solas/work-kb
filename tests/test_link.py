@@ -862,3 +862,15 @@ def test_link_does_not_create_topic_pages(vault, fake_now):
     _write(vault, "daily/2026-11-15.md", "## 기록\n- 09:00 [[topics/존재하지않음]] 메모\n")
     link.run(cfg)
     assert not (vault / "wiki" / "topics" / "존재하지않음.md").exists()
+
+
+def test_short_md_wikilink_creates_mention_and_stays_unrewritten(vault, fake_now):
+    fake_now(NOW)
+    cfg = _setup(vault)
+    line = "- 09:00 [[KB-12.md]] 확인\n"
+    _write(vault, "daily/2026-11-15.md", f"## 기록\n{line}")
+    assert link.normalize_text("[[KB-12.md]]", ["KB"]) == ("[[KB-12.md]]", 0)
+    link.run(cfg)
+    issue = (vault / "jira" / "KB-12.md").read_text(encoding="utf-8")
+    assert "09:00" in issue and "[[KB-12.md]]" in issue
+    assert (vault / "daily" / "2026-11-15.md").read_text(encoding="utf-8") == f"## 기록\n{line}"

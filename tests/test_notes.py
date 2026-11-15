@@ -304,3 +304,20 @@ def test_read_view_bad_utf8(vault):
     assert notes.read_view(cfg, "today") == []
     log_text = (vault / ".state" / "logs" / "kb.log").read_text(encoding="utf-8")
     assert notes.NOT_UTF8 in log_text
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["[[KB-12.md]]", "[[KB-12.MD]]", "[[KB-12.md|별칭]]", "[[KB-12.md#설명]]"],
+)
+def test_find_keys_short_md_wikilinks_are_bracketed(text):
+    found = notes.find_keys(f"- 19:00 {text} 메모", ["KB"])
+    assert [(m.key, m.bracketed) for m in found] == [("KB-12", True)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["![[KB-12.md]]", "[[KB-12-설계]]", "[[KB-12.md-설계]]", "[[KB-12.mdx]]", "[[topics/KB-12.md]]"],
+)
+def test_find_keys_md_embed_and_non_issue_wikilinks_excluded(text):
+    assert notes.find_keys(f"- 19:00 {text} 메모", ["KB"]) == []
