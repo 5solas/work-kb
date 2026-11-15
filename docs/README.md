@@ -188,7 +188,7 @@ Jira 쓰기는 `jira/outbox.jsonl`에 먼저 기록하고 바로 전송을 시�
 | 상태 | 뜻 |
 |---|---|
 | `pending` | 아직 못 보냄. 다음 `kb.py act flush`가 보낸다 |
-| `sending` | 보내는 중. 주인 프로세스가 죽었거나 `2 × write_timeout_sec`(기본 120초)가 지나면 `uncertain`으로 본다 |
+| `sending` | 보내는 중. 주인 프로세스가 죽었거나 `2 × jira.write_timeout_sec`(기본 60초, 합 120초)가 지나면 `uncertain`으로 본다 |
 | `done` | 성공 (이후 `sync --key`로 캐시 갱신) |
 | `failed` | 5번 실패, 또는 권한 없음·4xx처럼 되풀이해도 소용없는 오류 |
 | `uncertain` | 서버가 받았는지 모름(전송 뒤 끊김·타임아웃·이상한 2xx). 자동 재전송 없음. 다시 보내다 일시 오류가 나도 `failed`가 되지 않는다 |

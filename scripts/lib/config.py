@@ -55,6 +55,7 @@ CODE_DEFAULTS: dict[str, Any] = {
         "views": {},
         "poll_minutes": 15,
         "max_results": 500,
+        "write_timeout_sec": 60,
     },
     "confluence": {
         "enabled": True,

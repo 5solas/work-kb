@@ -42,8 +42,22 @@ def test_repo_config_yaml_loads(vault):
     assert cfg.llm_task("decisions")["reasoning"] == "on"
     assert cfg.llm_task("tag")["reasoning"] == "off"
     assert "updated >= '-30d'" in cfg.get("jira.jql_mine")
+    assert cfg.get("jira.write_timeout_sec") == 60
     assert config.CODE_BLOCKLIST <= cfg.blocklist
     assert cfg.get("confluence.title_prefix") == "[KB] "
+
+
+def test_write_timeout_sec_single_source_of_truth(vault):
+    from lib import outbox
+    import lint
+
+    raw = yaml.safe_load((REPO / "config.yaml").read_text(encoding="utf-8"))
+    assert raw["jira"]["write_timeout_sec"] == 60
+    assert config.CODE_DEFAULTS["jira"]["write_timeout_sec"] == 60
+    assert outbox.STALE_BASE_SEC == config.CODE_DEFAULTS["jira"]["write_timeout_sec"]
+    assert lint.STALE_SENDING_SEC == 2 * config.CODE_DEFAULTS["jira"]["write_timeout_sec"]
+    bare = config.Config(root=vault, data={}, environment="home")
+    assert outbox.stale_after(bare) == 2 * config.CODE_DEFAULTS["jira"]["write_timeout_sec"]
 
 
 def test_repo_config_yaml_quotes_reasoning_and_has_no_connection_values():

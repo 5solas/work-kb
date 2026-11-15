@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
-from lib import core
+from lib import config, core
 
 REL = ("jira", "outbox.jsonl")
 LOCK_OWNER = "jira_act"
@@ -41,7 +41,7 @@ PENDING, SENDING, DONE, FAILED = "pending", "sending", "done", "failed"
 STATUSES = (PENDING, SENDING, DONE, FAILED)
 UNCERTAIN = "uncertain"
 MAX_ATTEMPTS = 5
-STALE_BASE_SEC = 60.0  # jira.write_timeout_sec 기본값. 보내는 중 표시는 이것의 두 배보다 오래되면 불확실
+STALE_BASE_SEC = float(config.CODE_DEFAULTS["jira"]["write_timeout_sec"])  # 보내는 중 표시는 이것의 두 배보다 오래되면 불확실
 FIELD_ORDER = ("id", "ts", "action", "key", "payload", "source", "status", "attempts", "last_error", "done_at")
 REMOVE: Any = object()
 """update·modify의 changes 값으로 주면 그 필드를 기록에서 뺀다."""
