@@ -253,6 +253,17 @@ def check_local(ctx: Context) -> None:
     ctx.report.ok("config.local.yaml", f"environment: {cfg.environment}")
 
 
+@check("무시되는 키")
+def check_ignored_keys(ctx: Context) -> None:
+    if ctx.cfg is None:
+        return
+    from lib import config
+
+    ignored = config.ignored_keys(ctx.cfg)
+    if ignored:
+        ctx.report.info("무시되는 키", f"{', '.join(ignored)} (Jira는 REST v2 · Bearer PAT 고정)")
+
+
 @check("공개 호스트 차단")
 def check_public_hosts(ctx: Context) -> None:
     cfg = ctx.cfg
@@ -1163,6 +1174,7 @@ CHECKS: list[Checker] = [
     check_utf8,
     check_config,
     check_local,
+    check_ignored_keys,
     check_public_hosts,
     check_secrets,
     check_keyring,

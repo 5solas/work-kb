@@ -473,3 +473,9 @@ def test_outbox_counts(vault):
     assert counts == {"pending": 1, "sending": 1, "failed": 1, "uncertain": 2}
     assert any("outbox.jsonl" in p for p in problems)
 
+
+def test_status_reports_ignored_jira_keys(vault):
+    _write_local(vault, {"environment": "home", "jira": {"api_version": 2, "auth": "pat"}})
+    info = status.collect(config.load(vault, environ={}))
+    assert any("무시되는 키" in p and "jira.api_version" in p and "jira.auth" in p for p in info["problems"])
+

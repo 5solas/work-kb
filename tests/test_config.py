@@ -95,7 +95,7 @@ def test_merge_precedence(vault):
     cfg = config.load(vault, environ={"KB_JIRA_MAX_RESULTS": "50", "KB_LLM_ENABLED": "true"})
     assert cfg.get("jira.max_results") == 50  # 환경변수 > local > config.yaml
     assert cfg.get("jira.poll_minutes") == 10  # config.yaml > 코드 기본값
-    assert cfg.get("jira.api_version") == 2  # 코드 기본값
+    assert cfg.get("jira.write_timeout_sec") == 60  # 코드 기본값
     assert cfg.get("jira.views") == {"today": "a = 1", "blocked": "c = 1"}  # 묶음은 깊게 합친다
     assert cfg.get("confluence.title_prefix") == "[메모] "
     assert cfg.get("llm.enabled") is True
@@ -648,4 +648,20 @@ def test_is_public_host_checks_blocklist_even_for_private_ip():
     assert config.is_public_host("http://127.0.0.1:9287/v1", []) is False
     assert config.is_public_host("http://127.0.0.1:9287/v1", ["127.0.0.1"]) is True
     assert config.is_public_host("http://[::1]:9287/v1", ["::1"]) is True
+
+
+def test_unused_jira_keys_removed_from_defaults_and_kept_ignored(vault):
+    assert "api_version" not in config.CODE_DEFAULTS["jira"]
+    assert "auth" not in config.CODE_DEFAULTS["jira"]
+    raw = yaml.safe_load((REPO / "config.yaml").read_text(encoding="utf-8"))
+    assert "api_version" not in raw["jira"]
+    assert "auth" not in raw["jira"]
+
+    write(vault / "config.yaml", (REPO / "config.yaml").read_text(encoding="utf-8"))
+    write(vault / "config.local.yaml", "environment: home\njira:\n  api_version: 2\n  auth: pat\n")
+    cfg = config.load(vault, environ={})
+    assert config.ignored_keys(cfg) == ["jira.api_version", "jira.auth"]
+
+    write(vault / "config.local.yaml", "environment: home\n")
+    assert config.ignored_keys(config.load(vault, environ={})) == []
 

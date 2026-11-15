@@ -8,8 +8,6 @@ people_prefix: "@"
 normalize_keys: true
 
 jira:
-  api_version: 2
-  auth: pat
   # 상대 시간은 따옴표로 감싼다(DECISIONS D49). ORDER BY는 쓰지 않는다.
   jql_mine: "(assignee = currentUser() OR reporter = currentUser() OR watcher = currentUser()) AND updated >= '-30d'"
   views:

@@ -973,3 +973,11 @@ def test_sync_key_403_unchanged(env, capsys):
     env.jira.modes["on_read"] = on_read
     code, _, _ = run(capsys, env.vault, "--key", "KB-5")
     assert code == 2
+
+
+def test_sync_succeeds_with_legacy_api_version_and_auth_in_local(vault, start_jira, capsys, fake_now):
+    fake_now(NOW)
+    server = start_jira()
+    _configure(vault, server.base_url, api_version=2, auth="pat")
+    code, _out, err = run(capsys, vault)
+    assert code == 0, err
