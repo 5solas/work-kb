@@ -18,7 +18,8 @@
 - outbox: 대기(pending)·전송 중(sending)·실패(failed)·불확실(uncertain: `last_error: uncertain` 또는 오래된 sending).
 - 14일 넘은 '제안': `wiki/decisions.md`에서 `상태: 제안`이고 제목 날짜가 14일보다 오래된 항목.
 - 미처리 제안: `.state/compile.json`의 대기 중 주제 제안(`kb.py proposals accept`).
-- 미처리 이미지: status와 같은 규칙(사이드카 없는 inbox 이미지·daily에 임베드된 raw/assets 이미지) + 포기한 이미지.
+- 미처리 이미지: status와 같은 규칙(사이드카 없는 inbox 이미지·daily에 임베드된 raw/assets 이미지) + 포기한 이미지
+  (`status.images_given_up`: 원장에 포기로 남았고 지금도 미처리인 이미지만).
 - 포기한 편찬 단위: `.state/compile.json`의 gave_up(D40).
 - 마커 손상 파일: 관리 구역 마커가 깨졌거나(D24) UTF-8이 아닌 파일.
 - 모순 후보(`--llm`, T5): 엔티티 요약과 관련 결정을 LLM에 보내 `{"conflicts":[{a,b,why}]}`. 기본은 꺼짐이고
@@ -583,38 +584,13 @@ def _pending_proposals(vault: _Vault) -> _Section:
 def _images(vault: _Vault) -> _Section:
     section = _Section("images", "미처리 이미지")
     cfg = vault.cfg
-    inbox = cfg.path("inbox")
-    if inbox.is_dir():
-        for path in sorted(inbox.iterdir()):
-            if path.suffix.lower() in kb_status.IMAGE_SUFFIXES and path.is_file() and core.is_scannable(path):
-                if not path.with_suffix(".md").exists():
-                    rel = f"inbox/{path.name}"
-                    section.items.append({"image": rel, "state": "unprocessed"})
-                    section.lines.append(f"- {_code(rel)}")
-    assets = cfg.path("raw", "assets")
-    for name in sorted(kb_status._embedded_assets(cfg)):
-        if (assets / name).is_file() and not cfg.path("inbox", f"{Path(name).stem}.md").exists():
-            rel = f"raw/assets/{name}"
-            section.items.append({"image": rel, "state": "unprocessed"})
-            section.lines.append(f"- {_code(rel)}")
+    for rel, _path in kb_status.pending_images(cfg):  # status·ingest와 같은 집합
+        section.items.append({"image": rel, "state": "unprocessed"})
+        section.lines.append(f"- {_code(rel)}")
     if section.items:
         section.notes.append("- `kb.py ingest`로 처리합니다(비전 프로필 필요).")
-    try:
-        ledger = core.load_state(cfg.root, kb_status.IMAGES_LEDGER)
-    except (core.KbError, OSError) as exc:
-        vault.problems.append(f".state/images.json을 읽지 못했습니다 ({exc})")
-        ledger = {}
-    skipped = ledger.get("skipped") if isinstance(ledger, Mapping) else None
-    for sha, entry in sorted((skipped or {}).items()) if isinstance(skipped, Mapping) else ():
-        if not isinstance(entry, Mapping):
-            continue
-        count = entry.get("count")
-        given_up = entry.get("status") == "gave_up" or (
-            isinstance(count, int) and not isinstance(count, bool) and count >= kb_status.IMAGE_GIVE_UP_AFTER
-        )
-        if not given_up:
-            continue
-        image = str(entry.get("image") or sha)
+    for entry in kb_status.images_given_up(cfg, vault.problems):  # 지금도 미처리인 것만
+        image = entry["image"]
         section.items.append({"image": image, "state": "gave_up", "error": entry.get("error")})
         error = f" · {_one_line(entry.get('error'), 100)}" if entry.get("error") else ""
         section.lines.append(f"- 포기: {_code(image)}{error} → `kb.py ingest --force`")
@@ -797,7 +773,11 @@ def _group_tokens(group: _Group) -> int:
 
 
 def _t5_chunks(groups: Sequence[_Group], budget: int) -> list[list[_Group]]:
-    """입력 한도에 맞춰 묶음을 나눈다. 한 묶음이 너무 크면 결정을 나눠 요약을 되풀이한다(D41: T5는 부분 결과를 합친다)."""
+    """입력 한도에 맞춰 묶음을 나눈다. 한 묶음이 너무 크면 결정을 나눠 요약을 되풀이한다(D41: T5는 부분 결과를 합친다).
+
+    나눈 조각은 항상 두 항목 이상이다(하나로는 모순이 없다). 요약이 없는 묶음은 앞 조각의 마지막 결정을
+    다음 조각의 짝으로 되풀이한다(`_t5_rest`와 같은 방식).
+    """
     pieces: list[_Group] = []
     for group in groups:
         if _group_tokens(group) <= budget:
@@ -809,9 +789,9 @@ def _t5_chunks(groups: Sequence[_Group], budget: int) -> list[list[_Group]]:
             if item[0].startswith("S"):
                 continue
             trial = _Group(group.header, [*current.items, item])
-            if len(current.items) > len(head) and _group_tokens(trial) > budget:
+            if len(current.items) >= max(len(head) + 1, 2) and _group_tokens(trial) > budget:
                 pieces.append(current)
-                current = _Group(group.header, [*head, item])
+                current = _Group(group.header, [*(head or current.items[-1:]), item])
             else:
                 current = trial
         if len(current.items) >= 2:
@@ -839,7 +819,13 @@ def _t5_user(groups: Sequence[_Group]) -> str:
 
 
 def _fit(groups: Sequence[_Group], budget: int) -> list[_Group]:
-    """받은 프로필의 한도에 맞게 앞에서부터 자른다(적어도 첫 묶음의 두 항목은 보낸다)."""
+    """받은 프로필의 한도에 맞게 앞에서부터 자른다(적어도 첫 묶음의 두 항목은 보낸다).
+
+    그 두 항목은 한도를 넘어도 보낸다(의도한 동작, P-100). 하나로는 모순을 볼 수 없고, 한도는 어림값이라
+    서버가 받아 주는 일이 많다. 넘는 양은 요약·결정 필드의 글자 상한(`MAX_SUMMARY_CHARS`·`MAX_DECISION_CHARS`)에
+    묶여 보통 입력에서 어림 1.3k~1.4k 토큰쯤이다. 서버가 거절하면 그 묶음은 검사하지 못한 채
+    partial 또는 skipped로 남는다.
+    """
     out: list[_Group] = []
     for group in groups:
         trial = [*out, group]
@@ -990,7 +976,7 @@ def _run_t5(client: LlmClient, vault: _Vault, decisions: Sequence[_Decision], re
             note=f"묶음 {len(groups)}개 중 {unchecked}개는 다 검사하지 못했습니다 (LLM 응답을 받지 못했거나 입력 한도를 넘음)",
         )
     else:
-        result.update(status="skipped", note="LLM 응답을 받지 못해 모순 검사를 건너뛰었습니다 (연결·형식 오류, `.state/logs` 참고)")
+        result.update(status="skipped", note="LLM 응답을 받지 못해 모순 검사를 건너뛰었습니다 (연결·형식 오류 또는 입력 한도 초과, `.state/logs` 참고)")
     return result
 
 

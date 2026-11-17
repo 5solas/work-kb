@@ -319,37 +319,176 @@ def test_summarize_detected_shows_output_floor_d41():
     assert "출력 하한" not in status.summarize_detected({"reasoning_toggle": {"method": "none"}})
 
 
+def _sha(data: bytes) -> str:
+    return core.sha256_hex(data)
+
+
+def _images_ledger(root: Path, skipped: dict) -> Path:
+    state = root / ".state" / "images.json"
+    state.write_text(json.dumps({"images": {}, "skipped": skipped}, ensure_ascii=False), encoding="utf-8")
+    return state
+
+
 def test_images_gave_up_from_images_ledger(vault, fake_now, capsys):
-    """ingest가 포기한 이미지(skipped[sha].count >= 3)를 센다. 모양이 다르거나 깨져도 치명적이지 않다."""
+    """ingest가 포기한 이미지 중 지금도 미처리인 것만 센다(P-101). 모양이 다르거나 깨져도 치명적이지 않다."""
     fake_now("2026-11-05T09:00:00+09:00")
     _write_local(vault, {"environment": "home"})
     cfg = config.load(vault)
     assert status.images_gave_up(cfg, []) == 0  # 원장 없음
+    data = {name: f"\x89PNG {name}".encode() for name in "abcdefg"}
+    for name, raw in data.items():
+        (vault / "inbox" / f"{name}.png").write_bytes(raw)  # 사이드카 없음 = 미처리
     ledger = {
-        "images": {"s0": {"sidecar": "inbox/a.md"}},
+        "images": {"s0": {"sidecar": "inbox/z.md"}},
         "skipped": {
-            "s1": {"count": 3, "error": "x", "image": "inbox/a.png"},
-            "s2": {"count": 5, "error": "x", "image": "inbox/b.png"},
-            "s3": {"count": 2, "error": "x", "image": "inbox/c.png"},
-            "s4": {"count": "3"},
-            "s5": "이상한 값",
-            "s6": {"count": True},
+            _sha(data["a"]): {"count": 3, "error": "x", "image": "inbox/a.png"},
+            _sha(data["b"]): {"count": 5, "error": "y", "image": "inbox/b.png", "status": "gave_up"},
+            _sha(data["c"]): {"count": 2, "error": "x", "image": "inbox/c.png"},
+            _sha(data["d"]): {"count": "3", "image": "inbox/d.png"},
+            _sha(data["e"]): "이상한 값",
+            _sha(data["f"]): {"count": True, "image": "inbox/f.png"},
+            "s9": {"count": 4, "error": "x", "image": "inbox/없는그림.png"},  # 미처리 이미지에 없는 sha
         },
     }
     state = vault / ".state" / "images.json"
     state.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    before = _tree(vault)
     assert status.images_gave_up(cfg, []) == 2
+    found = status.images_given_up(cfg, [])
+    assert sorted(found, key=lambda e: e["image"]) == [
+        {"sha": _sha(data["a"]), "image": "inbox/a.png", "count": 3, "error": "x"},
+        {"sha": _sha(data["b"]), "image": "inbox/b.png", "count": 5, "error": "y"},
+    ]
+    assert [e["sha"] for e in found] == sorted(e["sha"] for e in found)
     assert status.main(["--root", str(vault)]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert "미처리 이미지: 0개 (포기한 이미지 2개, 이유는 .state/images.json)" in out
+    assert "미처리 이미지: 7개 (포기한 이미지 2개, 이유는 .state/images.json)" in out
     assert json.loads(_json_out(vault, capsys))["images_gave_up"] == 2
+    assert _tree(vault) == before  # 읽기만 한다(원장도 그대로)
     for broken in ('{"skipped": []}', '["x"]', "{깨짐"):
         state.write_text(broken, encoding="utf-8")
         problems: list[str] = []
         assert status.images_gave_up(cfg, problems) == 0
+        assert status.images_given_up(cfg, []) == []
         assert len(problems) == (1 if broken == "{깨짐" else 0)
     assert status.main(["--root", str(vault)]) == 0
-    assert "미처리 이미지: 0개" in capsys.readouterr().out.splitlines()
+    assert "미처리 이미지: 7개" in capsys.readouterr().out.splitlines()
+
+
+def test_images_gave_up_status_field_counts_like_lint(vault):
+    """status == gave_up이면 count가 작아도 포기다(lint와 같은 규칙)."""
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    raw = b"\x89PNG a"
+    (vault / "inbox" / "a.png").write_bytes(raw)
+    _images_ledger(vault, {_sha(raw): {"count": 1, "status": "gave_up", "image": "inbox/a.png"}})
+    assert status.images_given_up(cfg, []) == [{"sha": _sha(raw), "image": "inbox/a.png", "count": 1, "error": None}]
+
+
+def test_images_gave_up_ghost_disappears_when_image_is_gone_or_changed(vault):
+    """지우거나 내용을 바꾼 이미지는 원장에 남아 있어도 세지 않는다(P-101). 원장은 건드리지 않는다."""
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    raw = b"\x89PNG a"
+    image = vault / "inbox" / "a.png"
+    image.write_bytes(raw)
+    state = _images_ledger(vault, {_sha(raw): {"count": 3, "status": "gave_up", "error": "x", "image": "inbox/a.png"}})
+    ledger = state.read_bytes()
+    assert status.images_gave_up(cfg, []) == 1
+    image.write_bytes(b"\x89PNG other")  # 같은 이름, 다른 내용
+    assert status.images_gave_up(cfg, []) == 0
+    image.write_bytes(raw)
+    assert status.images_gave_up(cfg, []) == 1
+    (vault / "inbox" / "a.md").write_text("---\nsource_image: inbox/a.png\n---\n", encoding="utf-8")  # 처리됨
+    assert status.images_gave_up(cfg, []) == 0
+    (vault / "inbox" / "a.md").unlink()
+    image.unlink()  # 삭제
+    assert status.images_gave_up(cfg, []) == 0
+    assert status.images_given_up(cfg, []) == []
+    assert state.read_bytes() == ledger
+
+
+def test_images_gave_up_follows_rename_and_duplicate(vault):
+    """이름을 바꾸거나 같은 내용의 사본만 남아도 ingest는 여전히 포기한다. 지금 경로로 알린다."""
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    raw = b"\x89PNG a"
+    image = vault / "inbox" / "a.png"
+    image.write_bytes(raw)
+    _images_ledger(vault, {_sha(raw): {"count": 3, "status": "gave_up", "error": "x", "image": "inbox/a.png"}})
+    copy = vault / "inbox" / "0사본.png"
+    copy.write_bytes(raw)
+    found = status.images_given_up(cfg, [])
+    assert [e["image"] for e in found] == ["inbox/a.png"]  # 사본이 있어도 한 번, 원장에 적힌 경로 우선
+    image.unlink()
+    assert [e["image"] for e in status.images_given_up(cfg, [])] == ["inbox/0사본.png"]
+    copy.rename(vault / "inbox" / "새이름.png")
+    assert [e["image"] for e in status.images_given_up(cfg, [])] == ["inbox/새이름.png"]
+    assert status.images_gave_up(cfg, []) == 1
+
+
+def test_images_gave_up_recorded_path_with_backslash(vault):
+    """원장의 경로가 역슬래시여도(손으로 고친 원장) 같은 이미지로 본다. 사본이 있어도 적힌 경로로 알린다."""
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    raw = b"\x89PNG a"
+    (vault / "inbox" / "a.png").write_bytes(raw)
+    (vault / "inbox" / "0사본.png").write_bytes(raw)
+    _images_ledger(vault, {_sha(raw): {"count": 3, "status": "gave_up", "image": "inbox\\a.png"}})
+    assert [e["image"] for e in status.images_given_up(cfg, [])] == ["inbox/a.png"]
+
+
+def test_images_gave_up_raw_asset_needs_daily_embed(vault):
+    """raw/assets 이미지는 daily가 임베드할 때만 미처리다. 임베드를 지우면 포기 경고도 사라진다."""
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    raw = b"\x89PNG board"
+    (vault / "raw" / "assets" / "2026-11-05-1420-보드.png").write_bytes(raw)
+    daily = vault / "daily" / "2026-11-05.md"
+    daily.write_text("## 기록\n- 14:20 ![[raw/assets/2026-11-05-1420-보드.png]] 회의\n", encoding="utf-8")
+    _images_ledger(vault, {_sha(raw): {"count": 3, "status": "gave_up", "image": "raw/assets/2026-11-05-1420-보드.png"}})
+    assert [e["image"] for e in status.images_given_up(cfg, [])] == ["raw/assets/2026-11-05-1420-보드.png"]
+    daily.write_text("## 기록\n- 14:20 회의\n", encoding="utf-8")
+    assert status.unprocessed_images(cfg) == 0
+    assert status.images_gave_up(cfg, []) == 0
+
+
+def test_images_gave_up_skips_hashing_without_qualifying_entry(vault, monkeypatch):
+    """원장에 포기 항목이 없으면 이미지를 읽지 않는다(평소 비용 0)."""
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    raw = b"\x89PNG a"
+    (vault / "inbox" / "a.png").write_bytes(raw)
+    _images_ledger(vault, {_sha(raw): {"count": 2, "status": "skipped", "image": "inbox/a.png"}})
+
+    def refuse(_cfg):
+        raise AssertionError("포기 항목이 없는데 미처리 이미지를 훑었습니다")
+
+    monkeypatch.setattr(status, "pending_images", refuse)
+    assert status.images_given_up(cfg, []) == []
+    assert status.images_gave_up(cfg, []) == 0
+
+
+def test_images_gave_up_unreadable_image_keeps_warning(vault, monkeypatch):
+    """미처리 이미지를 읽지 못하면(잠김 등) 확인할 수 없으니 경고를 남긴다."""
+    _write_local(vault, {"environment": "home"})
+    cfg = config.load(vault)
+    raw = b"\x89PNG a"
+    (vault / "inbox" / "a.png").write_bytes(raw)
+    (vault / "inbox" / "b.png").write_bytes(b"\x89PNG b")
+    _images_ledger(vault, {
+        _sha(raw): {"count": 3, "status": "gave_up", "error": "x", "image": "inbox/a.png"},
+        "s9": {"count": 3, "status": "gave_up", "image": "inbox/지운그림.png"},
+    })
+    real = Path.read_bytes
+
+    def locked(self):
+        if self.suffix == ".png":
+            raise PermissionError("잠김")
+        return real(self)
+
+    monkeypatch.setattr(Path, "read_bytes", locked)
+    assert [e["image"] for e in status.images_given_up(cfg, [])] == ["inbox/a.png"]
 
 
 def test_confluence_push_ledger_empty_broken_and_odd(vault, fake_now, capsys):

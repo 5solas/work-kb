@@ -342,18 +342,76 @@ def test_images_same_rule_as_status_plus_gave_up(kb, cfg, no_llm):
     write(kb, "inbox/처리됨.md", "---\nsource_image: inbox/처리됨.png\n---\n")
     write(kb, "raw/assets/2026-11-04-1420-보드.png", b"\x89PNG c")
     write(kb, "raw/assets/2026-11-04-1500-안쓰임.png", b"\x89PNG d")  # daily가 가리키지 않음
-    write(kb, "daily/2026-11-04.md", daily("2026-11-04", "- 14:20 ![[raw/assets/2026-11-04-1420-보드.png]] 회의\n"))
+    write(kb, "raw/assets/2026-11-03-0900-x.png", b"\x89PNG x")
+    write(kb, "raw/assets/2026-11-03-0901-y.png", b"\x89PNG y")
+    write(kb, "daily/2026-11-04.md", daily(
+        "2026-11-04",
+        "- 09:00 ![[raw/assets/2026-11-03-0900-x.png]] 포기한 그림\n"
+        "- 09:01 ![[raw/assets/2026-11-03-0901-y.png]] 한 번 실패\n"
+        "- 14:20 ![[raw/assets/2026-11-04-1420-보드.png]] 회의\n",
+    ))
     core.save_state(kb, "images", {"skipped": {
-        "aa": {"image": "raw/assets/2026-11-03-0900-x.png", "count": 3, "status": "gave_up", "error": "형식 오류"},
-        "bb": {"image": "raw/assets/2026-11-03-0901-y.png", "count": 1, "status": "skipped"},
+        core.sha256_hex(b"\x89PNG x"): {"image": "raw/assets/2026-11-03-0900-x.png", "count": 3, "status": "gave_up", "error": "형식 오류"},
+        core.sha256_hex(b"\x89PNG y"): {"image": "raw/assets/2026-11-03-0901-y.png", "count": 1, "status": "skipped"},
+        core.sha256_hex(b"\x89PNG d"): {"image": "raw/assets/2026-11-04-1500-안쓰임.png", "count": 3, "status": "gave_up"},  # 임베드 없음
+        "aa": {"image": "inbox/지운그림.png", "count": 3, "status": "gave_up", "error": "형식 오류"},  # 파일 없음
     }})
     result = run(cfg)
     found = items(result, "images")
     unprocessed = [i["image"] for i in found if i["state"] == "unprocessed"]
-    assert unprocessed == ["inbox/새그림.png", "raw/assets/2026-11-04-1420-보드.png"]
+    assert unprocessed == [
+        "inbox/새그림.png", "raw/assets/2026-11-03-0900-x.png", "raw/assets/2026-11-03-0901-y.png", "raw/assets/2026-11-04-1420-보드.png",
+    ]
     assert len(unprocessed) == kb_status.unprocessed_images(cfg)
-    assert [i["image"] for i in found if i["state"] == "gave_up"] == ["raw/assets/2026-11-03-0900-x.png"]
-    assert "kb.py ingest --force" in lint_region(kb)
+    gave_up = [i for i in found if i["state"] == "gave_up"]
+    assert gave_up == [{"image": "raw/assets/2026-11-03-0900-x.png", "state": "gave_up", "error": "형식 오류"}]
+    assert len(gave_up) == kb_status.images_gave_up(cfg, [])
+    assert "- 포기: `raw/assets/2026-11-03-0900-x.png` · 형식 오류 → `kb.py ingest --force`" in lint_region(kb)
+    assert "지운그림" not in lint_region(kb) and "- 포기: `raw/assets/2026-11-04-1500-안쓰임.png`" not in lint_region(kb)
+
+
+def test_images_user_note_with_same_stem_is_not_a_sidecar(kb, cfg, no_llm):
+    """`inbox/<stem>.md`가 이 이미지의 사이드카가 아니면(사용자 노트) status·ingest처럼 미처리로 센다."""
+    write(kb, "inbox/a.png", b"\x89PNG a")
+    write(kb, "inbox/a.md", "# 그냥 내 노트\n")
+    write(kb, "raw/assets/2026-11-04-1420-보드.png", b"\x89PNG c")
+    write(kb, "inbox/2026-11-04-1420-보드.md", "# 회의 메모\n")
+    write(kb, "daily/2026-11-04.md", daily("2026-11-04", "- 14:20 ![[raw/assets/2026-11-04-1420-보드.png]] 회의\n"))
+    core.save_state(kb, "images", {"skipped": {
+        core.sha256_hex(b"\x89PNG a"): {"image": "inbox/a.png", "count": 3, "status": "gave_up", "error": "형식 오류"},
+    }})
+    found = items(run(cfg), "images")
+    unprocessed = [i["image"] for i in found if i["state"] == "unprocessed"]
+    assert unprocessed == ["inbox/a.png", "raw/assets/2026-11-04-1420-보드.png"]
+    assert len(unprocessed) == kb_status.unprocessed_images(cfg)
+    assert [i["image"] for i in found if i["state"] == "gave_up"] == ["inbox/a.png"]
+    assert "- `inbox/a.png`" in lint_region(kb)
+
+
+def test_images_gave_up_only_while_pending(kb, cfg, no_llm):
+    """포기한 이미지는 지금도 미처리일 때만 알린다(P-101). 지우거나 바꾸면 사라지고, 이름을 바꾸면 새 경로로 알린다."""
+    raw = b"\x89PNG a"
+    image = write(kb, "inbox/a.png", raw)
+    core.save_state(kb, "images", {"skipped": {
+        core.sha256_hex(raw): {"image": "inbox/a.png", "count": 3, "status": "gave_up", "error": "형식 오류"},
+    }})
+    ledger = (kb / ".state" / "images.json").read_bytes()
+
+    def gave_up() -> list[str]:
+        return [i["image"] for i in items(run(cfg), "images") if i["state"] == "gave_up"]
+
+    assert gave_up() == ["inbox/a.png"]
+    image.rename(kb / "inbox" / "새이름.png")  # 이름만 바뀜: ingest는 여전히 포기한다
+    assert gave_up() == ["inbox/새이름.png"]
+    assert "- 포기: `inbox/새이름.png` · 형식 오류 → `kb.py ingest --force`" in lint_region(kb)
+    write(kb, "inbox/새이름.png", b"\x89PNG other")  # 내용이 바뀜
+    assert gave_up() == []
+    write(kb, "inbox/새이름.png", raw)
+    assert gave_up() == ["inbox/새이름.png"]
+    (kb / "inbox" / "새이름.png").unlink()  # 삭제
+    assert gave_up() == []
+    assert "포기:" not in lint_region(kb)
+    assert (kb / ".state" / "images.json").read_bytes() == ledger  # 원장은 그대로
 
 
 def test_compile_gave_up_units(kb, cfg, no_llm):
@@ -620,6 +678,42 @@ def test_t5_splits_large_input_and_merges(kb, llm):
     assert result["counts"]["contradictions"] == 1  # 같은 쌍은 합친다
 
 
+def test_t5_over_budget_pair_rejected_by_server_is_skipped(kb, llm):
+    """P-100: 한도가 아주 작으면 최소 한 쌍이 한도를 넘는다. 서버가 거절하면 그 묶음은 못 본 채 skipped, 종료 0."""
+    long = "가" * 3000
+    write(kb, "wiki/topics/큰주제.md", entity("topic", "큰주제", summary=f"{long}\n"))
+    decisions = "".join(
+        f"## 2026-11-0{n} 큰주제 결정 {n}\n- 상태: 확정\n- 관련: 큰주제 {'마' * 800}\n- 내용: 큰주제 {'바' * 800}\n- 근거: {'사' * 800}\n\n"
+        for n in (1, 2)
+    )
+    write(kb, "wiki/decisions.md", "# 결정 로그\n\n" + region(decisions, "decisions"))
+    mock = llm(canned={"contradictions": '{"conflicts": []}'}, context_length=2000)
+    data = {
+        "environment": "home",
+        "jira": {"project_keys": ["KB", "OPS"]},
+        "llm": {
+            "enabled": True,
+            "profiles": {"main": {"base_url": f"{mock.base_url}/v1", "model": "mock", "detected": {"context_tokens": 2000}}},
+            "fallback_order": ["main"],
+        },
+    }
+    config.save_local(kb, data)
+    cfg = config.load(kb)
+    result = run(cfg, llm=True)
+    sent = chat_requests(mock)
+    assert sent, "한도를 넘어도 최소 한 쌍은 보낸다"
+    for body in sent:
+        user = body["messages"][-1]["content"]
+        assert "[S1]" in user and ("[D1]" in user or "[D2]" in user)  # 요청마다 요약 + 결정 하나
+        total = lint.estimate_tokens("".join(m["content"] for m in body["messages"]))
+        assert total > lint.LlmClient(cfg).input_limit(lint.TASK)  # 최소 한 쌍이 프로필의 입력 한도보다 크다
+    t5 = result["contradictions"]
+    assert t5["status"] == "skipped" and result["counts"]["contradictions"] == 0
+    assert t5["note"].startswith("LLM 응답을 받지 못해") and "입력 한도 초과" in t5["note"]
+    assert "입력 한도 초과" in lint_region(kb)
+    assert lint.main(["--root", str(kb), "--llm"]) == 0
+
+
 def _many_topics(root: Path, count: int = 5) -> None:
     """t5_vault + 주제 count개(요약 400자)와 주제마다 관련 결정 하나(400자)."""
     t5_vault(root)
@@ -750,6 +844,55 @@ def test_chunks_repeat_summary_when_group_is_split():
         assert ids[0] == "S1" and len(ids) >= 2
     sent = [i for chunk in chunks for g in chunk for i, _ in g.items if i.startswith("D")]
     assert sent == [f"D{n}" for n in range(1, 6)]
+
+
+def test_fit_keeps_first_pair_even_over_budget():
+    """P-100(의도한 동작): 첫 묶음의 두 항목은 한도를 넘어도 보낸다. 하나로는 모순을 볼 수 없다."""
+    group = lint._Group("주제 큰것 (wiki/topics/큰것.md)", [("S1", "가" * 900), ("D1", "나" * 900), ("D2", "다" * 900)])
+    budget = 200
+    chosen = lint._fit([group, lint._Group("주제 다음", [("S2", "라"), ("D3", "마")])], budget)
+    assert [[i for i, _ in g.items] for g in chosen] == [["S1", "D1"]]
+    assert lint.estimate_tokens(lint._t5_user(chosen)) > budget
+    roomy = lint._fit([group], 10_000)
+    assert [i for i, _ in roomy[0].items] == ["S1", "D1", "D2"]
+
+
+def test_chunks_without_summary_never_send_a_single_decision():
+    """요약 없는 묶음을 나눌 때도 조각마다 두 항목 이상이고(하나로는 모순이 없다), 빠지는 결정이 없다."""
+    group = lint._Group("관련 대상이 없는 결정", [(f"D{n}", f"결정{n} " + "나" * 900) for n in range(1, 4)])
+    chunks = lint._t5_chunks([group], budget=200)
+    pieces = [[i for i, _ in g.items] for chunk in chunks for g in chunk]
+    assert len(pieces) >= 2
+    assert all(len(ids) >= 2 for ids in pieces), pieces
+    assert {i for ids in pieces for i in ids} == {"D1", "D2", "D3"}
+
+
+def test_t5_no_summary_group_over_budget_checks_every_decision(kb):
+    """요약 없는 묶음이 한도를 넘어도 요청마다 결정이 둘 이상이고, 다 봤으면 ok다(빠뜨린 채 ok라 하지 않는다)."""
+    decisions = "".join(f"## 2026-11-0{n} 따로 결정 {n}\n- 상태: 확정\n- 내용: {'나' * 450}{n}\n\n" for n in (1, 2, 3))
+    write(kb, "wiki/decisions.md", "# 결정 로그\n\n" + region(decisions, "decisions"))
+    cfg = local(kb, llm={"enabled": True, "profiles": {"main": {"base_url": "http://127.0.0.1:9/v1", "model": "mock"}}})
+    vault = lint._load_vault(cfg)
+    parsed = lint._decisions((kb / "wiki" / "decisions.md").read_bytes())
+    groups, _ = lint._t5_groups(vault, parsed)
+    assert [g.header for g in groups] == ["관련 대상이 없는 결정"]
+
+    class _Client(_HalfClient):
+        def run_task(self, task, messages_for, *, validate, needs_vision=False):
+            from lib.llm_client import TaskOutcome
+
+            self.users.append(messages_for(self.limit)[-1]["content"])
+            data = {"conflicts": []}
+            validate(data)
+            return TaskOutcome("ok", data, "main", [{"profile": "main", "status": "ok"}])
+
+    client = _Client(limit=1)  # 사용자 프롬프트 한도는 바닥값(200)
+    outcome = lint.contradictions(cfg, vault, parsed, client=client)
+    assert client.users
+    for user in client.users:
+        assert sum(f"[D{n}]" in user for n in (1, 2, 3)) >= 2, user
+    assert all(any(f"[D{n}]" in user for user in client.users) for n in (1, 2, 3))
+    assert outcome["status"] == "ok"
 
 
 def test_write_takes_lock(vault, monkeypatch):

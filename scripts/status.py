@@ -4,7 +4,7 @@
 항목: 환경, config.local.yaml, 오늘 daily, 마지막 동기화(.state/sync.json),
 마지막 Confluence 게시(.state/confluence.json의 가장 최근 pushed_at과 게시한 쪽 수), outbox 대기·실패,
 미처리 제안(wiki/_proposals.md), 미처리 이미지(사이드카 없는 inbox 이미지와 daily에 임베드된
-raw/assets 이미지)와 ingest가 포기한 이미지(.state/images.json의 skipped[sha].count >= 3),
+raw/assets 이미지)와 ingest가 포기한 이미지(.state/images.json의 skipped 중 지금도 미처리인 이미지와 sha가 같은 것),
 포기한 편찬 단위(.state/compile.json의 gave_up), LLM 프로필과 탐지 결과
 (`detected: pending`은 '탐지 대기', method none + 기준선 생각 켜짐이면 '출력 하한 2048(D41)'),
 잠금 소유자(.state/kb.lock), KB_AGENT.
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping
@@ -29,7 +30,7 @@ DETECT_PENDING = "탐지 대기"  # detected: "pending"(init --dev가 키 없이
 COMPILE_LEDGER = "compile"  # .state/compile.json
 IMAGES_LEDGER = "images"  # .state/images.json (ingest가 쓴다)
 CONFLUENCE_LEDGER = "confluence"  # .state/confluence.json (kb.py push가 쓴다)
-IMAGE_GIVE_UP_AFTER = 3  # ingest의 포기 규칙: skipped[sha].count >= 3
+IMAGE_GIVE_UP_AFTER = 3  # ingest의 포기 규칙: skipped[sha].status == gave_up 또는 count >= 3
 NONE_REASONING_FLOOR = 2048  # llm_client.NONE_REASONING_FLOOR와 같은 값(D41, 가져오지 않으려고 따로 둔다)
 _LIST_ITEM = re.compile(r"^(?:[-*+] |\d+[.)] )")
 
@@ -170,25 +171,28 @@ def _embedded_assets(cfg: Config) -> set[str]:
     return names
 
 
-def unprocessed_images(cfg: Config) -> int:
-    """사이드카(`inbox/<이미지 이름>.md`, D21)가 없는 이미지 수.
+def pending_images(cfg: Config) -> Iterator[tuple[str, Path]]:
+    """사이드카(`inbox/<이미지 이름>.md`, D21)가 없는 이미지의 (볼트 상대 경로, 경로). inbox 먼저, 각각 이름순.
 
     - `inbox/*.png|jpg|jpeg|webp`
     - daily `## 기록`에 `![[raw/assets/…]]`로 임베드되었고 `raw/assets`에 있는 이미지(캡처 C·F의 결과, §6.5 T6)
     """
-    count = 0
     inbox = cfg.path("inbox")
     if inbox.is_dir():
-        for path in inbox.iterdir():
+        for path in sorted(inbox.iterdir()):
             if path.suffix.lower() in IMAGE_SUFFIXES and path.is_file() and core.is_scannable(path):
                 if not sidecar.sidecar_for(cfg, path).exists():
-                    count += 1
+                    yield f"inbox/{path.name}", path
     assets = cfg.path("raw", "assets")
     for name in sorted(_embedded_assets(cfg)):
         image = assets / name
         if image.is_file() and not sidecar.sidecar_for(cfg, image).exists():
-            count += 1
-    return count
+            yield f"raw/assets/{name}", image
+
+
+def unprocessed_images(cfg: Config) -> int:
+    """미처리 이미지 수(`pending_images`와 같은 집합)."""
+    return sum(1 for _ in pending_images(cfg))
 
 
 def _yes(value: Any) -> str:
@@ -216,22 +220,63 @@ def compile_gave_up(cfg: Config, problems: list[str]) -> int:
     return count
 
 
-def images_gave_up(cfg: Config, problems: list[str]) -> int:
-    """`.state/images.json`의 `skipped`에서 count가 3 이상인(ingest가 포기한) 이미지 수. 모양이 다르면 0."""
+def images_given_up(cfg: Config, problems: list[str]) -> list[dict[str, Any]]:
+    """ingest가 포기했고 지금도 미처리인 이미지. `{sha, image, count, error}` 목록(sha순), image는 지금 경로.
+
+    `.state/images.json`의 `skipped[sha]`가 포기(status가 gave_up이거나 count가 3 이상)이고, 그 sha가
+    지금 미처리인 이미지(`pending_images`)의 sha256과 같을 때만 넣는다. 지우거나 바꾼 이미지, 임베드를 뺀
+    raw/assets 이미지는 원장에 남아 있어도 빠진다. 이름을 바꿨거나 사본만 남았으면 그 경로로 알린다.
+    읽기만 한다(원장도 그대로). 포기 항목이 없으면 이미지를 읽지 않는다. 미처리 이미지를 읽지 못했고
+    원장의 경로가 그 이미지면 확인할 수 없으니 남긴다. 원장 모양이 다르면 빈 목록.
+    """
     try:
         ledger = core.load_state(cfg.root, IMAGES_LEDGER)
     except (core.KbError, OSError) as exc:
         problems.append(f".state/images.json을 읽지 못했습니다 ({exc})")
-        return 0
+        return []
     skipped = ledger.get("skipped") if isinstance(ledger, Mapping) else None
     if not isinstance(skipped, Mapping):
-        return 0
-    count = 0
-    for entry in skipped.values():
-        value = entry.get("count") if isinstance(entry, Mapping) else None
-        if isinstance(value, int) and not isinstance(value, bool) and value >= IMAGE_GIVE_UP_AFTER:
-            count += 1
-    return count
+        return []
+    wanted: dict[str, Mapping] = {}
+    for sha, entry in skipped.items():
+        if not isinstance(entry, Mapping):
+            continue
+        count = entry.get("count")
+        if entry.get("status") == "gave_up" or (
+            isinstance(count, int) and not isinstance(count, bool) and count >= IMAGE_GIVE_UP_AFTER
+        ):
+            wanted[str(sha)] = entry
+    if not wanted:
+        return []
+    live: dict[str, list[str]] = {}
+    unreadable: set[str] = set()
+    for rel, path in pending_images(cfg):
+        try:
+            sha = core.sha256_hex(path.read_bytes())
+        except OSError:
+            unreadable.add(rel)
+            continue
+        if sha in wanted:
+            live.setdefault(sha, []).append(rel)
+    found: list[dict[str, Any]] = []
+    for sha in sorted(wanted):
+        entry = wanted[sha]
+        recorded = entry.get("image")
+        recorded = recorded.replace("\\", "/") if isinstance(recorded, str) else None
+        paths = live.get(sha)
+        if paths:
+            image = recorded if recorded in paths else paths[0]
+        elif recorded in unreadable:
+            image = recorded
+        else:
+            continue
+        found.append({"sha": sha, "image": image, "count": entry.get("count"), "error": entry.get("error")})
+    return found
+
+
+def images_gave_up(cfg: Config, problems: list[str]) -> int:
+    """ingest가 포기했고 지금도 미처리인 이미지 수(`images_given_up`)."""
+    return len(images_given_up(cfg, problems))
 
 
 def summarize_detected(detected: Any) -> str:
