@@ -6,7 +6,8 @@
 
 - 완료: Phase 0~6 구축, Neovim 포팅(6장), 2026-11 개선(`d168f6c..11a4a7c`, 6장 10).
 - 대상: Python 3.14(`D-NV1`), Neovim 0.12 이상(`D-NV2`).
-- 자동 관문은 통과했다(`docs/USER-GUIDE.md` 9절). 보류 항목은 `D-NV7`.
+- 자동 관문은 통과했다(`docs/USER-GUIDE.md` 9절).
+- 보류 항목은 2026-11-17에 다시 보고 처리했다(`D-NV9`). 남은 보류는 P-99 하나다(`D-NV7`).
 
 아래는 코드로 확인할 수 없어 **사용자가 직접 확인해야 하는 항목**이다(D31). 확인되면 지운다. Emacs 판의 목록은 `main` 브랜치에 있다.
 
@@ -21,7 +22,7 @@
 | 6 | 스케줄 등록 | `kb.py schedule --print`가 낸 `/Create` 하나 등록 → `/Run` → `/Query` → `/Delete` |
 | 6 | capture.ahk (선택) | AutoHotkey v2 설치 후 Ctrl+Alt+Shift+C/V → `nvd` 데몬에 `:WorkKb capture`·`capture-clipboard-image` |
 | 6장 | 새 PC 설치 | nvim-config 설치 → `install.ps1` → 새 터미널에서 `nvd --restart` → `:checkhealth work-kb`(`docs/USER-GUIDE.md` 5.2절) |
-| 6장 | 보류 항목(`D-NV7`) | `P-98`은 실제 Jira DC에서, `P-99`는 `-m live`에서 확인. `P-97`·`P-100`은 재현 뒤, `P-101`은 설계를 정함 |
+| 6장 | 보류 항목(`D-NV7`·`D-NV9`) | `P-99`는 `-m live`에서 확인. `P-98`은 회사에서 실제 Jira DC의 검색 응답이 둘째 페이지부터도 정수 `total`을 주는지 확인(없으면 다시 훑기가 동작하지 않고 전과 같다) |
 | 회사 | §9 전체 | 실제 Jira·Confluence·사내 LLM은 집에서 확인 불가. `doctor`와 `sync --jql … --dry-run`으로 첫 실행 확인 |
 
 ## 1. 지시서와 달라지는 점
@@ -158,7 +159,7 @@ Opus 3명 독립 검토 → 23건 → 전부 수정. 606개 통과 + 클립보�
 
 Opus 3명 독립 검토(지시서·Jira DC API 대조 / 데이터 안전 / 거짓 통과) → 14건 → 전부 수정. 865개 통과 + 클립보드 2개 건너뜀. 추가 결정:
 
-- **범위 밖 일감**: 전체 동기화 때 로컬에 있는 동기화된 일감(stub·완료 제외) 중 범위 검색이 돌려주지 않은 것을 `key in (…)` 50개 묶음(범위로 감싸지 않음, 400이면 `issue()`로 하나씩)으로 다시 받는다. 돌아오지 않는 것(삭제·권한 없음)은 `in_scope: false`, 키가 바뀐 것은 `moved_to: NEW` + 새 파일. `in_scope: false`인 파일은 프로젝트 표·캐시·`일감.base`(`!file.hasProperty("in_scope")`)에서 제외하고 다시 받지 않는다. 나중에 범위에 다시 들어오면 표시가 사라진다. `sync --key KB-12`가 OPS-40을 돌려주면 OPS-40.md를 쓰고 KB-12는 옮김 표시.
+- **범위 밖 일감**: 전체 동기화 때 로컬에 있는 동기화된 일감(stub·완료 제외) 중 범위 검색이 돌려주지 않은 것을 `key in (…)` 50개 묶음(범위로 감싸지 않음, 400이면 `issue()`로 하나씩)으로 다시 받는다. 돌아오지 않는 것(삭제·권한 없음)은 `in_scope: false`, 키가 바뀐 것은 `moved_to: NEW` + 새 파일. `in_scope: false`인 파일은 프로젝트 표·캐시·`일감.base`(`!file.hasProperty("in_scope")`)에서 제외하고 다시 받지 않는다. 나중에 범위에 다시 들어오면 표시가 사라진다. `sync --key KB-12`가 OPS-40을 돌려주면 OPS-40.md를 쓰고 KB-12는 옮김 표시. **보완 → `D-NV9` P-98.**
 - **전체 동기화 조건**(기존 `--full`·캐시 없음·25일 외에): 범위 해시(정렬된 project_keys + jql_mine, `sync.json`의 `scope`)가 없거나 달라짐, `last_sync`/`last_full`이 미래, `last_full`이 `jira.full_every_hours`(기본 24)보다 오래됨. 기존 볼트는 업그레이드 뒤 첫 실행에서 전체 동기화 1회.
 - **캐시 잠김**: sqlite `locked`/`busy`는 FileBusy(종료 6, "캐시를 다른 프로그램이 쓰고 있습니다"), 손상 메시지와 구분. 열 때 스키마·메타가 같으면 아무것도 쓰지 않는다.
 - front matter의 모든 텍스트 필드는 한 줄(NEL·U+2028·CR·LF → 공백). DC 스프린트 문자열은 첫 값 우선(goal 안의 `,name=` 무시).
@@ -262,14 +263,14 @@ Opus 3명 독립 검토(지시서·탐지 논리 / 회사 가드·데이터 안�
 - **지운 제안은 되돌아오지 않는다**: T2 원장에 `emitted_srcs`를 두고 파일에 없어도 다시 쓰지 않는다(`--force`도 마찬가지, 삭제 = 기각).
 - **D41 실제 적용**: T2·T4는 답하는 프로필의 한도에 맞춰 청크를 다시 나누고 모든 줄을 보냈을 때만 ok(가장 오래된 줄부터). T1·T3는 최신 줄 유지, T1은 보낸 줄만 기록. T2·T4는 LLM 호출 전에 대상 구역(decisions·actions·_proposals)을 먼저 검사해 마커가 깨졌으면 호출하지 않는다. T1은 한 번에 40줄 또는 글자 예산으로 묶는다(1,000줄 ≤ 26회). 스키마 실패 응답(키 누락)은 그 단위만 skipped. AGENTS.md 절은 고유한 `##` 제목만 인정. 주제·사람·프로젝트 이름은 front matter에 YAML 인용으로 쓴다.
 - **탐지**: 후보 거부는 400/404/405/422만. 429·408·5xx·네트워크는 "판정 불가" → 2초 뒤 1회 재전송, 그래도 실패면 `DetectError`(종료 3, "--redetect로 다시")이고 **아무것도 저장하지 않는다**(json/vision false를 기록하지 않음). 탐지 중에는 429 자동 재시도를 끈다(실제 POST ≤ 10). `usage.completion_tokens_details.reasoning_tokens > 0`도 흔적으로 본다(`trace_field: reasoning_tokens`). 기준선에 흔적이 없고 30토큰 이상이면 '끄기' 방향도 보내 토큰 규칙(기준선·켬 ≥ 2×끔, 차 ≥ 30)으로 판정. 토큰 규칙은 양쪽 다 흔적이 없을 때만. JSON 프로브는 객체만 인정(`20`·`[1]`·`null`은 false).
-- **ingest 포기 규칙**: 같은 프로필·모델에서 3회 실패한 이미지는 `gave_up`(LLM 호출 없음, "포기: … kb.py ingest --force"). `--force`로 재시도. 프로필·모델이 바뀌면 다시 센다. dry-run은 세지 않는다. 원장 `skipped[sha] = {image, count, status, profiles, at, error}`. daily가 가리키는 inbox 이미지 판정은 casefold+NFC, `![alt](…)` 형식(URL 디코드)도 인식, 애매하면 옮기지 않는다.
+- **ingest 포기 규칙**: 같은 프로필·모델에서 3회 실패한 이미지는 `gave_up`(LLM 호출 없음, "포기: … kb.py ingest --force"). `--force`로 재시도. 프로필·모델이 바뀌면 다시 센다. dry-run은 세지 않는다. 원장 `skipped[sha] = {image, count, status, profiles, at, error}`. daily가 가리키는 inbox 이미지 판정은 casefold+NFC, `![alt](…)` 형식(URL 디코드)도 인식, 애매하면 옮기지 않는다. **보완 → `D-NV9` P-101.**
 - **doctor(company)**: 어느 프로필이든 공개 호스트면 LLM 프로필 전부 `-`로 표시하고 아무것도 보내지 않는다.
-- status: D41 하한 표시("출력 하한 2048(D41)"), 포기한 이미지 수.
+- status: D41 하한 표시("출력 하한 2048(D41)"), 포기한 이미지 수. **보완 → `D-NV9` P-101.**
 - mock_llm 추가 모드: `rate_limit_on`, `reasoning_tokens_in_usage`, `json_answer`.
 
 ### Phase 5 구축 결정 (2026-11-05)
 
-- **lint**: 고아 페이지는 들어오는 위키링크도 `mentions` 항목도 없는 wiki 페이지(색인 구역·`_lint.md`·자기 링크는 링크로 안 침; index·decisions·actions·`_*.md`는 제외). 깨진 링크는 Obsidian 방식으로 해석(절대 경로·접미 경로·파일명·`.md` 생략·대소문자 무시·NFC), daily·inbox·wiki·jira의 .md만 검사하고 코드·front matter·`mentions` 구역은 건너뜀. 오래된 캐시는 완료 일감 제외(변경 없으면 `synced_at`이 안 바뀌므로). 멘션 없는 stub은 파일 수정 시각 기준. `sending`은 나이(2×write_timeout)로만 uncertain 판정. 추가 절: 포기한 편찬 단위, 포기한 이미지, 비UTF-8 파일(마커 손상에 포함). T5는 엔티티별로 관련 결정(기각 제외)을 묶어 2개 이상일 때만 보내고 큰 입력은 나눠 합친다; `--llm` 없이 돌리면 지난 T5 결과를 안내문과 함께 보존. 항상 종료 0, `_lint.md`의 `lint` 구역만 씀(마커 손상이면 stdout).
+- **lint**: 고아 페이지는 들어오는 위키링크도 `mentions` 항목도 없는 wiki 페이지(색인 구역·`_lint.md`·자기 링크는 링크로 안 침; index·decisions·actions·`_*.md`는 제외). 깨진 링크는 Obsidian 방식으로 해석(절대 경로·접미 경로·파일명·`.md` 생략·대소문자 무시·NFC), daily·inbox·wiki·jira의 .md만 검사하고 코드·front matter·`mentions` 구역은 건너뜀. 오래된 캐시는 완료 일감 제외(변경 없으면 `synced_at`이 안 바뀌므로). 멘션 없는 stub은 파일 수정 시각 기준. `sending`은 나이(2×write_timeout)로만 uncertain 판정. 추가 절: 포기한 편찬 단위, 포기한 이미지, 비UTF-8 파일(마커 손상에 포함). T5는 엔티티별로 관련 결정(기각 제외)을 묶어 2개 이상일 때만 보내고 큰 입력은 나눠 합친다; `--llm` 없이 돌리면 지난 T5 결과를 안내문과 함께 보존. 항상 종료 0, `_lint.md`의 `lint` 구역만 씀(마커 손상이면 stdout). **보완 → `D-NV9` P-100·P-101.**
 - **confluence_push**: 페이지 매칭은 제목 → `.state/confluence.json`의 page_id(이름 바뀐 페이지 갱신) → 생성. 409는 버전 재조회 후 1회 재시도. 첫 H1은 본문에서 제거(제목으로 씀). 원시 HTML은 텍스트로, 엔티티는 XML에 맞게 변환. 변경 감지 sha256은 스페이스·제목·storage를 포함. push_globs에 걸리는 파일끼리만 페이지 링크(`--only`로 좁혀도), 임베드는 텍스트. `--dry-run`은 네트워크 호출 없음(PAT 없이 동작). 같은 제목 둘·마커 손상·4xx는 그 파일만 실패하고 계속(종료 1), 생성 403은 종료 2. `.state`는 페이지마다 잠금 아래 기록, 네트워크는 잠금 밖. mock 모드 `version_conflict_once`, `forbid_create`, `anonymous`, `personal_spaces`; 모든 스페이스에 홈페이지가 있음.
 - **init Confluence**: PAT는 `/rest/api/user/current` 성공 전엔 저장 안 함(익명 응답은 인증 실패, 종료 2). 개인 스페이스는 `~username` → `~userKey` → `type=personal` 목록(25개씩, 최대 100)으로 찾고, 자동으로 찾으면 묻지 않는다. 부모 페이지는 숫자 id 또는 `pageId=` URL, `-`로 비움. 설정되면 `enabled: true`. 마법사 순서: 환경 → Jira → Confluence → LLM → (Phase 6) 스케줄. `KB_INIT_CONFLUENCE_URL/PAT/SPACE/PARENT`. init은 자체 GET 전용 `ConfluenceProbe`를 쓴다(W5.2와 동시에 만들어져 `lib/confluence_client.py`를 쓰지 못함 — 검토에서 통합 여부 결정). doctor에 스페이스·부모 페이지·push_globs 줄 추가.
 ### Phase 5 검토·수정 라운드 (2026-11-05)
@@ -395,7 +396,7 @@ Principles are the §3 numbers.
 | D23 | `jira/*.md` is regenerated whole except `mentions` (explicit exception to §5.0). `updated` is rewritten only when a region changed. `decisions.md` and `actions.md` templates carry title and markers. Stubs have `stub: true`, and `o` treats them as no cache. | §5.3, §5.4 |
 | D24 | Malformed markers (start without end, duplicates): refuse that file, warn, and show it in lint. Missing headings: `daily_prepare` appends the skeleton below existing text. End of `## 기록` is the line before the next `## ` or EOF, ignoring trailing blanks. | P6 |
 | D25 | All managed I/O is bytes. New text uses the file's dominant EOL, BOM is tolerated. Scanners skip `.#*`, `#*#`, `*~`, `.*.tmp`. | §5.0, §7 |
-| D26 | One lock `.state/kb.lock` (`msvcrt.locking`, 60s, then exit 6) around write sections only. LLM and network calls run outside it, and sources are reread inside. `core.atomic_write`: same-dir temp, fsync, `os.replace`, retry on winerror 5/32/33 with backoff. `expect_sha256` detects a human edit, and that file is skipped and reported. Emacs capture edits the live buffer. **캡처 부분 대체 → `D-NV5` P-05. 보완 → `D-NV4` P-56.** | §8 collisions; [I] |
+| D26 | One lock `.state/kb.lock` (`msvcrt.locking`, 60s, then exit 6) around write sections only. LLM and network calls run outside it, and sources are reread inside. `core.atomic_write`: same-dir temp, fsync, `os.replace`, retry on winerror 5/32/33 with backoff. `expect_sha256` detects a human edit, and that file is skipped and reported. Emacs capture edits the live buffer. **캡처 부분 대체 → `D-NV5` P-05. 보완 → `D-NV4` P-56, `D-NV9` P-97.** | §8 collisions; [I] |
 | D27 | Front matter parses with `yaml.BaseLoader` (all strings), so `on`, `NO` and timestamps survive. `set_fields` edits only named lines. Config uses SafeLoader, normalises reasoning from bool or str, and casts project keys to validated strings. `config.yaml` quotes `"on"` and `"off"`. | §5.7 |
 
 **Phase allocation and gates**
@@ -419,8 +420,8 @@ Principles are the §3 numbers.
 | D37 | Candidate 4 tests only `reasoning:{enabled}`. `max_reasoning_tokens`, `reasoning_budget_tokens` and `medium_effort` are manual hand-edits, documented in TROUBLESHOOTING. Record shape stays §5.7 `param` (`on_value`/`off_value` may be dicts), plus `system_prefix` and `none`, plus `source` and `evidence`. | §5.7 |
 | D38 | Vision probe uses an embedded 64×64 solid red PNG and requires the colour in the answer (deviates from 1×1). JSON probe requires `json.loads` to succeed. Runtime: if reasoning-on plus `response_format` gives 400 or empty content, retry once with prompt-forced JSON and keep that for the run. | [I] §6.11 |
 | D39 | `normalize_message`: read `reasoning` or `reasoning_content`. If `</think>` is in content, keep the text after the last one, with or without an opening tag. Empty or None content, or `finish_reason=length`, counts as a schema failure. **일부 대체 → `D-NV6` P-66.** | [R] vLLM, template |
-| D40 | Retry order: `task.profile`, then the rest of `fallback_order`. Connection, timeout, 429 or 5xx moves to the next profile. Schema failure retries once on the same profile (length failure doubles the budget, cap 16384), then moves on. Exhausted gives `skipped`, and after 3 runs `gave_up`, shown by lint and status. Exit 0. | §6.5 |
-| D41 | Add `max_output_tokens` per task: tag 64, decisions 8192, entity_summary 2048, topic_proposal 8192, image_ingest 2048, contradictions 8192. Input limit is `min(max_input_tokens, 0.8×context_tokens)`, images excluded. Split by date then line. T1 and T3 keep newest. T4 and T5 merge partials. Context lookup: `metadata.context_length`, `max_model_len`, `context_length`, else 262144 with `source: assumed`. Keep temperature 0. | [V] metadata; §6.5 |
+| D40 | Retry order: `task.profile`, then the rest of `fallback_order`. Connection, timeout, 429 or 5xx moves to the next profile. Schema failure retries once on the same profile (length failure doubles the budget, cap 16384), then moves on. Exhausted gives `skipped`, and after 3 runs `gave_up`, shown by lint and status. Exit 0. **보완 → `D-NV9` P-101.** | §6.5 |
+| D41 | Add `max_output_tokens` per task: tag 64, decisions 8192, entity_summary 2048, topic_proposal 8192, image_ingest 2048, contradictions 8192. Input limit is `min(max_input_tokens, 0.8×context_tokens)`, images excluded. Split by date then line. T1 and T3 keep newest. T4 and T5 merge partials. Context lookup: `metadata.context_length`, `max_model_len`, `context_length`, else 262144 with `source: assumed`. Keep temperature 0. **보완 → `D-NV9` P-100.** | [V] metadata; §6.5 |
 | D42 | Images: convert to RGB and send PNG or JPEG, one image per request, long side 1600. | [R] HF card, §6.5 |
 | D43 | Home fallback is `google/gemma-4-26B-A4B-it`. It is the closest to "gemma4-26b 급", has the same context as main and has vision. Detection wins over the §5.7 example. Selection filters `embed` and non-chat. Fallback behaviour at home does not carry over to the company's thinking-less Gemma. | [V] §11 |
 | D44 | Company guard lives in `LlmClient.__init__`, the only path to LLM HTTP, covering detection, doctor, ingest, compile and lint. Case-insensitive suffix match at a label boundary. All profiles are checked, and any hit refuses. Effective blocklist is code default ∪ config, so overrides only add. Missing or invalid environment means company. `KB_ENVIRONMENT` is ignored. `env:` refs are ✗ at company, and at home only `DEEPINFRA_API_KEY` is allowed. **보완 → `D-NV4` P-55.** | §2 |
@@ -435,7 +436,7 @@ Principles are the §3 numbers.
 |---|---|---|
 | D49 | `jql_mine` becomes `updated >= '-30d'` (quoted). Sync runs `project in (...) AND (jql_mine)`; `--key` and `--jql` are not wrapped. Each view runs independently: a 400 logs Jira's message, keeps the old file, and exits 4 after other work. `init` and `doctor` validate views with `maxResults=0`. Views can be overridden in `config.local.yaml`. | [R] §5.7, §6.2 |
 | D50 | Incremental uses relative JQL `updated >= '-Nm'`, N = minutes since `last_sync` (taken at run start) plus 5, avoiding the profile-timezone problem. `last_sync` older than 25 days means full. `--full` means `jql_mine` scope. | [R] §6.2 |
-| D51 | `max_results` is page size. Advance `startAt` by `len(issues)`, append `ORDER BY key ASC`. Page comments when `total` exceeds returned. Sprint field is found from `/field` by `schema.custom == com.pyxis.greenhopper.jira:gh-sprint` and stored as `jira.sprint_field`. Parser accepts string and object forms. | [R] §5.3 |
+| D51 | `max_results` is page size. Advance `startAt` by `len(issues)`, append `ORDER BY key ASC`. Page comments when `total` exceeds returned. Sprint field is found from `/field` by `schema.custom == com.pyxis.greenhopper.jira:gh-sprint` and stored as `jira.sprint_field`. Parser accepts string and object forms. **보완 → `D-NV9` P-98.** | [R] §5.3 |
 | D52 | Outbox handling: 401/403 stays pending, exit 2. Other 4xx and transition 500 become `failed` immediately. 5xx and connection refused stay pending, attempts+1. 429 consumes no attempt. Read timeout stays pending with `last_error: uncertain`, skipped unless `--retry-uncertain`. `flush --retry-failed` exists. Worklog `started` serialises as `yyyy-MM-dd'T'HH:mm:ss.SSSZ`. `flush` refuses projects not in `project_keys`. **보완 → `D-NV4` P-58·P-61, `D-NV6` P-59.** | [R] §6.3 |
 | D53 | Promote stores the line hash, refuses on mismatch, and appends ` [[NEW-1]]` to the source line, so carryover stops treating it as personal. Keep `assign`, add transient key `a`. Emacs asks `y-or-n-p` and passes `--yes`. **보완 → `D-NV6` P-60.** | §6.3, §6.8 |
 | D54 | `net.request` is the one retry helper for Jira and Confluence: honour `retry-after`, else exponential backoff with a ceiling. | [R] rate limits |
@@ -1050,10 +1051,19 @@ Conventions:
      - P-40~P-54, P-63: 파서·설정 경계 사례(front matter, 코드 울타리, NFC, CR·NEL, 환경 변수 목록 키 4개, `safe_name`, 위키링크 안 키, wikimarkup 자리표).
    - 설치(P-08·P-09): 매니페스트(`%LOCALAPPDATA%\work-kb\install-manifest.json`)는 클론끼리 함께 쓰고 `WORK_KB_ROOT`를 정한 클론을 적는다. `uninstall.ps1`은 자기 값만 되돌린다. 다른 클론의 값은 `install.ps1`이 묻고(`-Yes`) 바꾼다. 그 폴더가 없으면(옮긴 클론) 우리 값으로 본다. `-Offline`이면 uv에 `--offline --no-python-downloads`.
    - **D-NV7 보류·기각**
-     - 보류: P-97(`link` 새 원천 미감지, `daily_prepare` FileBusy)·P-100(`lint._fit` 예산)은 재현 뒤, P-98(상대 JQL 페이지 밀림)은 실제 Jira DC에서, P-99(재시도에 검증 오류 첨부)는 실제 모델로, P-101(`gave_up` 이미지 경고)은 설계 결정 뒤.
+     - 보류: P-99(재시도에 검증 오류 첨부)는 실제 모델로. P-97·P-98·P-100·P-101은 처리했다(→ `D-NV9`).
      - 기각 P-93: 클립보드 임시 파일은 볼트로 옮기지 않는다. ASCII 경로로 한글 문제를 피한다(D12).
    - **D-NV8 설정·링크 불일치 정리**
      - cfg-1: `jira.write_timeout_sec`(기본 60)을 `config.yaml`·`CODE_DEFAULTS`에 둔다. outbox·lint·status는 `outbox.stale_after`로 같은 값을 읽는다. HTTP 제한 시간은 `jira.timeout`이다.
      - cfg-2: 읽는 곳이 없는 `jira.api_version`·`jira.auth`를 기본값에서 뺐다. 남아 있으면 오류 없이 무시하고 `doctor`·`status`가 알린다.
      - cfg-3: `jql_mine`·`full_every_hours`·`done_transition_names`의 기본값은 `CODE_DEFAULTS`에만 둔다(값은 그대로). 그래서 `config.yaml`에 키가 없어도 기본값을 쓰고, `KB_JIRA_DONE_TRANSITION_NAMES`는 `[A, B]` 목록도 받는다.
      - cfg-4: `link`도 `[[KEY-1.md]]`(`.md` 대소문자 무관, `|별칭`·`#제목`)를 일감 링크로 본다(Neovim `o`와 같음). P-52 제외(임베드, 일감 아닌 링크 안의 키)는 그대로다.
+   - **D-NV9 보류 항목 처리** (2026-11-17, `D-NV7`의 보류 다섯 건)
+     - P-97 link (D26): 계획과 잠금 사이에 원천(daily·inbox)이 새로 생기거나 사라지면 잠금 안에서 한 번 다시 계획한다. 계획이 원천 목록을 적어 두고 잠금 안에서 견준다. 메시지·종료 코드는 그대로다. 쓸 것이 없는 계획은 잠금도 재확인도 없다(D20: 다음 실행이 반영).
+     - P-97 daily_prepare (D26): 원래 주장 중 "traceback·잘못된 종료 코드"는 반증됐다. FileBusy는 이미 한 줄 오류와 종료 6이었다. 실제 문제는 오늘 파일을 쓴 뒤 중간에 멈추는 것이었다. 이제 다른 프로그램이 잡은 이전 daily는 건너뛰고 나머지에 `[>]`를 표시한다. `.state/today.json`이 잡혀 있어도 멈추지 않는다. 둘 다 stderr에 `건너뜀:` 한 줄, 종료 0이다. 이전 daily는 다시 실행하면 표시한다(이월 줄 중복 없음). 기록을 저장하지 못한 경우는 다음 저장 전에 일감 제목·상태가 다시 바뀌면 그 날 `오늘` 구역의 옛 줄이 사람 줄로 남을 수 있다(막지 않았다). 오늘 파일이 잡혀 있으면 전과 같이 종료 6이고 아무것도 쓰지 않는다. Neovim은 종료 0이면 알림을 띄우지 않아 `건너뜀:` 줄은 출력 버퍼에만 보인다(읽은 뒤 바뀐 파일을 건너뛸 때와 같다). 잡힌 파일마다 쓰기 재시도(약 4.5초)를 잠금 안에서 기다린다.
+     - P-98 (D51): 범위 검색(`run_scope`)만 `search(rescan=True)`로 부른다. 페이지 사이에 `total`이 줄면 끝까지 받은 뒤 `startAt=0`부터 다시 훑어 놓친 키만 더 받는다(`RESCAN_LIMIT` 2번까지). 받은 일감이 결과에서 빠지면 다음 페이지의 첫 일감을 놓쳐, 전체 동기화가 열린 일감에 `in_scope: false`를 달았기 때문이다. `total`이 그대로이거나 늘거나 없으면 요청과 결과가 전과 같다. `total`이 줄면 놓친 것이 없어도 범위 검색 전체를 다시 한다(그 실행의 검색 요청이 최대 3배). 뷰·범위 밖 재조회·`--jql`은 그대로이고 `ORDER BY`도 바꾸지 않는다. 버린 안: 상대 날짜를 절대 시각으로 고정, 페이지 겹쳐 받기. 남은 확인: 실제 Jira DC가 모든 페이지에 정수 `total`을 주는지(없으면 전과 같다). 못 잡는 경우: 하나가 빠지고 하나가 들어와 `total`이 그대로일 때.
+     - P-100 (D41): `lint._fit`이 첫 묶음의 두 항목을 한도를 넘어도 보내는 것은 의도한 동작이라 바꾸지 않았다. 하나로는 모순을 볼 수 없다. 넘는 양은 요약·결정의 글자 상한에 묶인다(보통 어림 1.3k~1.4k 토큰, 고정 상한은 아니다). 서버가 거절하면 partial·skipped이고 종료 0이다. skipped 안내문에 "입력 한도 초과"를 더했다. 함께 고친 것: `_t5_chunks`가 요약 없는 묶음을 나눌 때 결정 하나짜리 조각을 보내고 끝 결정을 빠뜨렸다. 이제 조각은 두 항목 이상이고, 앞 조각의 마지막 결정을 다음 조각의 짝으로 되풀이한다. 버린 안: 넘는 쌍 건너뛰기, 잘라서 맞추기.
+     - P-101 (D40): status·lint는 원장에 포기로 남았고(`status: gave_up` 또는 count 3 이상) 지금도 미처리인 이미지와 sha256이 같은 항목만 알린다. 지웠거나 바꾼 이미지, 사이드카가 생긴 이미지, 임베드를 뺀 `raw/assets` 이미지는 빠진다. 이름을 바꿨거나 사본만 남았으면 지금 경로로 알린다. 원장에 적힌 미처리 이미지를 읽지 못하면 경고를 남긴다. 원장은 쓰지 않는다(status는 읽기 전용). 포기 항목이 없으면 이미지를 읽지 않는다. lint의 미처리 목록도 status·ingest와 같은 집합(`status.pending_images`, P-69 사이드카 규칙)을 쓴다. 그래서 `inbox/<stem>.md`가 다른 용도의 노트면 그 이미지도 미처리로 적는다. 버린 안: ingest에서 원장 정리(ingest를 돌려야 사라진다), status에서 프로필 변경 판정(규칙이 두 벌이 되고, 다음 ingest가 어차피 다시 센다), 새 옵션(`--force`와 같다).
+     - P-99 (D40·D41): 계속 보류한다. 지금 동작(같은 요청으로 한 번 재시도)은 D40·D41 그대로이고, 오류 첨부의 효과는 실제 모델(`-m live`)로만 알 수 있다. 구현할 때 볼 것 셋: 안내문이 요청에 없는 앞선 답을 가리킨다(답을 함께 넣을지 비교). 덧붙인 뒤 입력 한도를 다시 재지 않는다. `image_ingest`에서 이미지 메시지 뒤에 글만 있는 user 메시지를 붙여도 되는지.
+     - gitsigns: `docs/USER-GUIDE.md` 9절의 "알려진 미해결 점"을 고쳐 적었다. 다시 해 보아도 멈추지 않았고 원인은 확정하지 못했다. 코드 변경은 없다.
+     - 새로 적어 둔 후속(구현하지 않음): ① `daily_prepare`가 읽기 공유 없이 잡힌 파일을 읽으면 traceback과 종료 1이다(FileBusy가 아닌 `PermissionError`). 같은 읽기 방식이 다른 명령에도 있어 따로 정한다(선례: outbox 읽기 재시도). ② `fetch_out_of_scope`가 `in_scope: false`를 쓰기 전에 범위 JQL로 한 번 더 확인하기(P-98의 `total`이 그대로인 경우). ③ `sync --jql --cache`는 다시 훑지 않는다(`in_scope: false`는 쓰지 않는다). ④ 포기 항목이 있는 동안 status·lint가 미처리 이미지를 모두 읽는 비용(큰 볼트에서 느리면 본다).

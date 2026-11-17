@@ -325,4 +325,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File uninstall.ps1
 - 실제 Jira·Confluence Data Center와 사내 LLM 서버(시험은 모의 서버).
 - 새 PC에서 처음부터 설치하는 과정.
 
-**알려진 미해결 점**: 개발 중 gitsigns 플러그인이 `git`을 시작하는 순간 헤드리스 Neovim이 멈춘 적이 있다. 원인은 찾지 못했다. `nvd`가 데몬이 응답하지 않는다고 하면 8절을 본다.
+**재현되지 않은 점**: 이 저장소가 자체 Neovim 설정(gitsigns 포함)을 갖고 있던 개발 초기에, gitsigns가 `git`을 시작하는 순간 헤드리스 Neovim이 멈춘 적이 있다. 그 설정은 철회했다(DECISIONS 6장 4). 지금의 시험용 Neovim은 사용자 설정도 gitsigns도 불러오지 않고, work-kb 플러그인은 `git`을 실행하지 않는다. 2026-11-17에 Neovim 0.12.6, gitsigns ef707fb, git 2.56으로 헤드리스에서 다시 해 보았으나 멈추지 않았다. 원인은 확정하지 못했다. gitsigns가 띄운 `git`은 Neovim이 바로 끝나면 Neovim보다 오래 남을 수 있다는 것까지만 확인했다. 다시 보이면 nvim-config 쪽 문제다. `nvd`가 데몬이 응답하지 않는다고 하면 8절을 본다.
