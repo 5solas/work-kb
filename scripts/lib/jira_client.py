@@ -5,6 +5,8 @@
 - 읽기(GET)가 5xx면 1초 쉬고 한 번만 다시 묻는다. 그래도 5xx면 NetworkError.
 - `search`는 `startAt`을 받은 이슈 수만큼 늘리며 페이지를 넘긴다. 최상위 ORDER BY가 없으면
   `ORDER BY key ASC`를 붙여 페이지 사이 순서를 고정한다(`split_order_by`).
+- `search(..., rescan=True)`는 페이지를 넘기는 사이 `total`이 줄면(받은 이슈가 결과에서 빠져 뒤 이슈가
+  당겨짐) 처음부터 다시 훑어 놓친 이슈를 더 준다. `RESCAN_LIMIT`번까지. 기본은 끔(뷰·`--jql`은 그대로).
 - 스프린트 필드 id는 `/rest/api/2/field`에서 schema.custom으로 찾는다(인스턴스마다 다르다).
 
 쓰기(Phase 3, D52): `add_comment`·`do_transition`·`assign`·`add_worklog`·`create_issue`.
@@ -38,6 +40,8 @@ if TYPE_CHECKING:
 API = "/rest/api/2"
 SPRINT_SCHEMA = "com.pyxis.greenhopper.jira:gh-sprint"
 DEFAULT_ORDER = "key ASC"
+RESCAN_LIMIT = 2
+"""`search(rescan=True)`가 한 검색을 처음부터 다시 훑는 최대 횟수."""
 ISSUE_FIELDS: tuple[str, ...] = (
     "summary",
     "status",
@@ -472,11 +476,17 @@ class JiraClient:
             raise core.KbError("Jira 검색 응답 형식이 아닙니다 (issues 목록 없음)")
         return data
 
-    def search(self, jql: str, *, fields: list[str]) -> Iterator[dict]:
+    def search(self, jql: str, *, fields: list[str], rescan: bool = False) -> Iterator[dict]:
         """JQL 결과 이슈를 하나씩 돌려준다. 첫 페이지는 부를 때 바로 받는다(오류가 그 자리에서 난다).
 
         `startAt`은 받은 이슈 수만큼 늘린다(서버가 maxResults를 줄여도 빠짐없이). 빈 페이지나
         total에 닿으면 멈춘다. 같은 키가 다시 오면 건너뛴다.
+
+        `rescan=True`: 페이지 사이에 `total`이 줄었으면 한 번 다 훑은 뒤 `startAt=0`부터 다시 훑는다
+        (`RESCAN_LIMIT`번까지). 이미 받은 이슈가 결과에서 빠지면 뒤 이슈가 한 칸 당겨져 다음 페이지의
+        첫 이슈를 놓치기 때문이다. 다시 훑을 때는 아직 주지 않은 키만 준다. `total`이 그대로이거나
+        늘거나 응답에 없으면 요청도 결과도 `rescan=False`와 같다. 하나가 빠지고 하나가 들어와
+        `total`이 그대로인 경우는 잡지 못한다.
         """
         query = with_default_order(jql)
         if isinstance(fields, str):
@@ -484,25 +494,38 @@ class JiraClient:
         else:
             field_param = ",".join(str(f) for f in fields) if fields else None
         first = self._search_page(query, 0, self.page_size, field_param)
-        return self._pages(query, field_param, first)
+        return self._pages(query, field_param, first, rescan)
 
-    def _pages(self, query: str, field_param: str | None, page: dict) -> Iterator[dict]:
-        seen: set[str] = set()
-        start = 0
-        while True:
-            issues = page["issues"]
-            for issue in issues:
-                key = issue.get("key") if isinstance(issue, dict) else None
-                if key is not None:
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                yield issue
-            start += len(issues)
-            total = page.get("total")
-            if not issues or (isinstance(total, int) and start >= total):
+    def _pages(self, query: str, field_param: str | None, page: dict, rescan: bool = False) -> Iterator[dict]:
+        seen: set[str] = set()  # 다시 훑어도 이어 쓴다: 키마다 한 번만 준다
+        last = RESCAN_LIMIT if rescan else 0
+        for attempt in range(last + 1):
+            shrunk = False
+            start = 0
+            last_total = page.get("total")
+            while True:
+                issues = page["issues"]
+                for issue in issues:
+                    key = issue.get("key") if isinstance(issue, dict) else None
+                    if key is not None:
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                    elif attempt:
+                        continue  # 키 없는 항목은 가릴 수 없으니 다시 훑을 때는 주지 않는다
+                    yield issue
+                start += len(issues)
+                total = page.get("total")
+                # 줄어든 때만 건너뜀이 생긴다(늘면 겹칠 뿐이고 seen이 거른다)
+                if isinstance(total, int) and isinstance(last_total, int) and total < last_total:
+                    shrunk = True
+                last_total = total
+                if not issues or (isinstance(total, int) and start >= total):
+                    break
+                page = self._search_page(query, start, self.page_size, field_param)
+            if not shrunk or attempt >= last:
                 return
-            page = self._search_page(query, start, self.page_size, field_param)
+            page = self._search_page(query, 0, self.page_size, field_param)
 
     def validate_jql(self, jql: str) -> str | None:
         """JQL이 맞으면 None, 틀리면 Jira가 준 오류 문장(여럿이면 '; '로 이음). maxResults=0으로 묻는다."""

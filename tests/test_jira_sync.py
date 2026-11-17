@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import socket
 from pathlib import Path
 from types import SimpleNamespace
@@ -828,6 +829,71 @@ def test_repeated_issue_across_pages_written_once(vault, start_jira, capsys, fak
     assert f"받은 일감 {n}건 · 새 파일 {n + 3} · 바뀜 2 · 그대로 0" in out
     assert set(jira_files(vault)) == SCOPE_KEYS
     assert state(vault)["counts"]["issues"] == n
+
+
+def _once_before_second_page(server, match, action) -> list[str]:
+    """match(jql)인 검색의 startAt=4 페이지에 답하기 직전에 action()을 한 번 부른다(모의 서버의 on_read)."""
+    fired: list[str] = []
+
+    def hook(req):
+        jql = req.query.get("jql", "")
+        if req.path.endswith("/search") and req.query.get("startAt") == "4" and match(jql) and not fired:
+            fired.append(jql)
+            action()
+
+    server.modes["on_read"] = hook
+    return fired
+
+
+def test_full_sync_rescans_when_issue_leaves_scope_mid_paging(env, capsys, monkeypatch):
+    # 전체 동기화가 페이지를 넘기는 사이 이미 받은 KB-5가 남에게 넘어간다 → 뒤 이슈가 한 칸 당겨져
+    # 다음 페이지의 첫 이슈(KB-10)가 오지 않는다. 다시 훑지 않으면 KB-10에 in_scope: false가 달린다
+    assert run(capsys, env.vault)[0] == 0
+    query = jira_sync.scope_jql(env.cfg) + " ORDER BY key ASC"
+    env.jira.modes["page_size_cap"] = 4
+    scope = [i["key"] for i in mock_jira.evaluate_jql(env.jira, query)]
+    assert scope[:5] == ["KB-3", "KB-5", "KB-7", "KB-9", "KB-10"]
+
+    def leave():
+        env.jira.touch("KB-5", assignee=KIMCS, reporter=KIMCS, watches=NOT_WATCHING)
+
+    fired = _once_before_second_page(env.jira, lambda jql: jql == query, leave)
+    set_now(monkeypatch, "2026-11-04T17:20:03+09:00")
+    env.jira.log.clear()
+    code, out, err = run(capsys, env.vault, "--full")
+    assert code == 0, err
+    assert fired == [query] and "sync 전체" in out
+    assert "KB-10" in {i["key"] for i in mock_jira.evaluate_jql(env.jira, query)}  # 여전히 내 일감
+    assert "in_scope" not in frontmatter.parse((env.vault / "jira" / "KB-10.md").read_bytes())
+    assert "KB-10" in table_keys(env.vault, "KB") and cached(env.cfg, "KB-10") is not None
+    assert "범위 밖 정리" not in out and not any(q.startswith("key in") for q in searches(env.jira))
+    pages = math.ceil((len(scope) - 1) / 4)
+    assert searches(env.jira).count(query) == 2 * pages  # 범위 검색만 한 번 더 훑었다
+
+
+def test_incremental_sync_rescans_when_issue_leaves_window_mid_paging(vault, start_jira, capsys, fake_now, monkeypatch):
+    # 증분이 페이지를 넘기는 사이 서버 시계가 2초 가서 KB-5가 `updated >= '-25m'` 밖으로 나간다
+    # → 다시 훑지 않으면 다음 페이지의 첫 이슈(KB-12)의 변경을 놓친다
+    fake_now(NOW)
+    server = start_jira(page_size_cap=4, now_iso=NOW)
+    _configure(vault, server.base_url)
+    assert run(capsys, vault)[0] == 0
+    start = dt.datetime.fromisoformat(NOW) + dt.timedelta(minutes=20)  # 증분 구간 = 20 + 5분
+    changed = ["KB-7", "KB-9", "KB-10", "KB-12", "KB-14"]
+    server.touch("KB-5", updated=mock_jira.format_time(start - dt.timedelta(minutes=25) + dt.timedelta(seconds=1)))
+    for key in changed:
+        server.touch(key, updated=mock_jira.format_time(start - dt.timedelta(minutes=8)), summary=f"CHANGED {key}")
+    later = (start + dt.timedelta(seconds=2)).isoformat(timespec="seconds")
+    fired = _once_before_second_page(
+        server, lambda jql: "updated >= '-25m'" in jql, lambda: server.modes.__setitem__("now_iso", later)
+    )
+    set_now(monkeypatch, start.isoformat(timespec="seconds"))
+    server.modes["now_iso"] = start.isoformat(timespec="seconds")
+    code, out, err = run(capsys, vault)
+    assert code == 0, err
+    assert fired and "sync 증분" in out
+    got = {key: f"CHANGED {key}" in (vault / "jira" / f"{key}.md").read_text(encoding="utf-8") for key in changed}
+    assert got == dict.fromkeys(changed, True)
 
 
 # ---------------------------------------------------------------- 검색 캐시

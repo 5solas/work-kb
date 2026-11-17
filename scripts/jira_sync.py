@@ -830,7 +830,8 @@ def run_scope(cfg: Config, client: JiraClient, *, full: bool, dry_run: bool, out
     start = core.now(cfg.tz)
     state = core.load_state(cfg.root, STATE)
     kind, jql = plan_scope(cfg, state, start, full=full)
-    issues = list(client.search(jql, fields=client.sync_fields()))
+    # 범위 검색만 다시 훑는다(rescan): 페이지 사이에 결과가 줄어 건너뛴 일감을 범위 밖으로 잘못 표시하지 않게
+    issues = list(client.search(jql, fields=client.sync_fields(), rescan=True))
     docs = _docs_for(cfg, client, issues)
     extra: list[IssueDoc] = []
     marks: dict[str, dict[str, Any]] = {}

@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 import mock_jira
-from lib import config, core, net
+from lib import config, core, jira_client, net
 from lib import secrets as kb_secrets
 from lib.jira_client import (
     ISSUE_FIELDS,
@@ -146,6 +146,117 @@ def test_paging_skips_key_repeated_across_pages(sleeps):
         pages = [c["startAt"] for c in search_log(server)]
     assert keys(found) == ALL_KEYS_ASC  # 키마다 한 번, 빠짐없이
     assert pages == ["0", "4", "8", "12"]
+
+
+def _remove_before_second_page(server, key: str) -> list[str]:
+    """startAt=4 페이지에 답하기 직전에 한 번, 이미 받은 이슈를 결과에서 뺀다(뒤 이슈가 한 칸 당겨진다)."""
+    fired: list[str] = []
+
+    def hook(req):
+        if req.path.endswith("/search") and req.query.get("startAt") == "4" and not fired:
+            fired.append(key)
+            server.remove(key)
+
+    server.modes["on_read"] = hook
+    return fired
+
+
+def test_rescan_recovers_issue_skipped_when_total_shrinks(sleeps):
+    # KB-3을 받은 뒤 KB-3이 결과에서 빠진다 → 둘째 페이지가 KB-12부터라 KB-10이 건너뛰어진다
+    with mock_jira.start() as server:
+        client = JiraClient(server.base_url, "t", conn={"trust_env": False}, page_size=4)
+        fired = _remove_before_second_page(server, "KB-3")
+        found = keys(client.search("project in (KB, OPS)", fields=["summary"], rescan=True))
+        pages = [c["startAt"] for c in search_log(server)]
+    assert fired == ["KB-3"]
+    assert sorted(found) == sorted(ALL_KEYS_ASC) and len(found) == len(ALL_KEYS_ASC)  # 빠짐없이, 키마다 한 번
+    assert found[-1] == "KB-10"  # 다시 훑을 때 놓친 것만 더 나온다
+    assert pages == ["0", "4", "8", "12", "0", "4", "8", "12"]  # 한 번만 다시 훑는다(둘째 훑기는 total이 그대로)
+
+
+def test_rescan_off_keeps_old_request_log(sleeps):
+    # 기본값(rescan=False)은 예전 그대로: 요청 순서도, 건너뛰는 것도 같다(뷰·--jql 경로)
+    with mock_jira.start() as server:
+        client = JiraClient(server.base_url, "t", conn={"trust_env": False}, page_size=4)
+        _remove_before_second_page(server, "KB-3")
+        found = keys(client.search("project in (KB, OPS)", fields=["summary"]))
+        pages = [c["startAt"] for c in search_log(server)]
+    assert found == [k for k in ALL_KEYS_ASC if k != "KB-10"]
+    assert pages == ["0", "4", "8", "12"]
+
+
+@pytest.mark.parametrize("modes", [{}, {"page_size_cap": 3}, {"repeat_page_boundary": True}])
+def test_rescan_without_shrink_sends_same_requests(sleeps, modes):
+    # total이 줄지 않으면(그대로이거나 늘면) rescan=True도 요청·결과가 같다
+    logs = []
+    for rescan in (False, True):
+        with mock_jira.start(**modes) as server:
+            client = JiraClient(server.base_url, "t", conn={"trust_env": False}, page_size=4)
+            found = keys(client.search("project in (KB, OPS)", fields=["summary"], rescan=rescan))
+            logs.append((found, search_log(server)))
+    assert logs[0] == logs[1]
+    assert logs[0][0] == ALL_KEYS_ASC
+
+
+def test_rescan_is_inert_without_total(sleeps, monkeypatch):
+    # 응답에 total이 없으면 줄었는지 알 수 없다 → 지금과 같다(다시 훑지 않는다)
+    logs = []
+    for rescan in (False, True):
+        with mock_jira.start() as server:
+            client = JiraClient(server.base_url, "t", conn={"trust_env": False}, page_size=4)
+            real = client._search_page
+
+            def no_total(*args, _real=real):
+                page = _real(*args)
+                page.pop("total", None)
+                return page
+
+            monkeypatch.setattr(client, "_search_page", no_total)
+            _remove_before_second_page(server, "KB-3")
+            found = keys(client.search("project in (KB, OPS)", fields=["summary"], rescan=rescan))
+            logs.append((found, [c["startAt"] for c in search_log(server)]))
+    assert logs[0] == logs[1]
+    assert logs[0] == ([k for k in ALL_KEYS_ASC if k != "KB-10"], ["0", "4", "8", "12", "14"])
+
+
+def _scripted_client(monkeypatch, pages: list[dict]) -> tuple[JiraClient, list[int]]:
+    """`_search_page`가 pages를 차례로 돌려주는 클라이언트와 요청한 startAt 기록."""
+    client = JiraClient("http://jira.invalid", "t", conn={"trust_env": False}, page_size=2)
+    starts: list[int] = []
+    queue = list(pages)
+
+    def fake(_jql, start, _max_results, _fields):
+        starts.append(start)
+        return queue.pop(0)
+
+    monkeypatch.setattr(client, "_search_page", fake)
+    return client, starts
+
+
+def test_rescan_does_not_yield_keyless_issue_twice(monkeypatch):
+    odd = {"id": "키 없음"}
+    client, starts = _scripted_client(
+        monkeypatch,
+        [
+            {"total": 4, "issues": [{"key": "KB-1"}, odd]},
+            {"total": 3, "issues": [{"key": "KB-4"}]},  # 줄었다 → 다시 훑는다
+            {"total": 3, "issues": [odd, {"key": "KB-3"}]},
+            {"total": 3, "issues": [{"key": "KB-4"}]},
+        ],
+    )
+    found = list(client.search("project = KB", fields=["summary"], rescan=True))
+    assert found == [{"key": "KB-1"}, odd, {"key": "KB-4"}, {"key": "KB-3"}]
+    assert starts == [0, 2, 0, 2]
+
+
+def test_rescan_is_bounded(monkeypatch):
+    # 훑을 때마다 total이 줄어도 RESCAN_LIMIT번까지만 다시 훑고 끝낸다
+    assert jira_client.RESCAN_LIMIT == 2
+    shrinking = [{"total": 9, "issues": [{"key": "KB-1"}, {"key": "KB-2"}]}, {"total": 2, "issues": []}]
+    client, starts = _scripted_client(monkeypatch, shrinking * 5)
+    found = keys(client.search("project = KB", fields=["summary"], rescan=True))
+    assert found == ["KB-1", "KB-2"]
+    assert starts == [0, 2] * (1 + jira_client.RESCAN_LIMIT)
 
 
 def test_mock_repeat_page_boundary_overlaps():
