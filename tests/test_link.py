@@ -718,6 +718,40 @@ def test_source_changed_between_plan_and_lock_is_replanned(basic, vault, monkeyp
     assert _region(vault / "jira" / "KB-77.md") == ["- [[2026-11-04]] 18:00 [[KB-77]] 잠금 직전에 쓴 줄"]
 
 
+def test_new_source_between_plan_and_lock_is_replanned(basic, vault, monkeypatch):
+    real_lock = core.kb_lock
+
+    @contextlib.contextmanager
+    def lock_after_new_note(root, owner, timeout=60.0):
+        # 계획한 뒤, 잠금을 잡기 직전에 새 메모가 생김
+        _write(vault, "inbox/20261105-0900-새 메모.md", "---\ntitle: 새 메모\n---\nKB-88 잠금 직전에 생긴 메모\n")
+        with real_lock(root, owner, timeout):
+            yield
+
+    monkeypatch.setattr(core, "kb_lock", lock_after_new_note)
+    summary = link.run(basic)
+    assert summary["files_scanned"] == 4  # 새 원천도 이번 실행이 센다
+    assert summary["skipped_files"] == []
+    assert _region(vault / "jira" / "KB-88.md") == ["- [[inbox/20261105-0900-새 메모]] KB-88 잠금 직전에 생긴 메모"]
+
+
+def test_source_deleted_between_plan_and_lock_is_replanned(basic, vault, monkeypatch):
+    target = vault / "inbox" / "20261103-1000-회의 메모.md"
+    real_lock = core.kb_lock
+
+    @contextlib.contextmanager
+    def lock_after_delete(root, owner, timeout=60.0):
+        target.unlink()  # 계획한 뒤, 잠금을 잡기 직전에 사람이 지움
+        with real_lock(root, owner, timeout):
+            yield
+
+    monkeypatch.setattr(core, "kb_lock", lock_after_delete)
+    summary = link.run(basic)
+    assert summary["files_scanned"] == 2
+    assert summary["skipped_files"] == []
+    assert not any("inbox/" in line for line in _region(vault / "jira" / "KB-12.md"))
+
+
 # ---------------------------------------------------------------- UTF-8이 아닌 원천(D11)
 
 

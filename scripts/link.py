@@ -113,6 +113,7 @@ class Plan:
     mentions: int
     skipped: list[tuple[str, str]]
     entries_by_page: dict[str, list[Entry]]
+    listed: list[str]  # 계획할 때의 원천 목록 전체(못 읽어 sources에서 빠진 파일 포함)
 
 
 # ---------------------------------------------------------------- 설정 맥락
@@ -690,7 +691,8 @@ def _plan(ctx: _Ctx, *, rebuild: bool) -> Plan:
     new_page_cache: dict[str, list[Any]] = {}
     skipped: list[tuple[str, str]] = []
     sources: list[Source] = []
-    for rel, path in _list_sources(cfg):
+    listing = _list_sources(cfg)
+    for rel, path in listing:
         key = _stat_key(path)  # 읽기 전에 잰다: 그사이 바뀌면 다음 실행이 다시 읽는다
         if key is None:
             continue
@@ -813,6 +815,7 @@ def _plan(ctx: _Ctx, *, rebuild: bool) -> Plan:
         mentions=mentions,
         skipped=skipped,
         entries_by_page=entries_by_page,
+        listed=[rel for rel, _ in listing],
     )
 
 
@@ -820,7 +823,9 @@ def _has_writes(plan: Plan) -> bool:
     return bool(plan.pages) or plan.ledger_changed or plan.cache_changed or any(s.new_data is not None for s in plan.sources)
 
 
-def _sources_unchanged(plan: Plan) -> bool:
+def _sources_unchanged(cfg: Config, plan: Plan) -> bool:
+    if [rel for rel, _ in _list_sources(cfg)] != plan.listed:  # 새로 생겼거나 사라진 원천
+        return False
     for source in plan.sources:
         if _stat_key(source.path) == source.stat:
             continue
@@ -955,7 +960,7 @@ def run(cfg: Config, *, dry_run: bool = False, stub_keys: Iterable[str] = (), re
         written = [s.rel for s in plan.sources if s.new_data is not None] + [p.rel for p in plan.pages]
     elif _has_writes(plan):
         with core.kb_lock(cfg.root, "link"):
-            if not _sources_unchanged(plan):  # 계획 뒤에 원천이 바뀌었으면 잠금 안에서 다시 읽는다(D26)
+            if not _sources_unchanged(cfg, plan):  # 계획 뒤에 원천이 바뀌었거나 새로 생겼으면 잠금 안에서 다시 읽는다(D26)
                 plan = _plan(ctx, rebuild=rebuild)
             normalized, created, updated, written = _apply(ctx, plan)
     if plan.skipped and not dry_run:
