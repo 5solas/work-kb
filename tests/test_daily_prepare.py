@@ -576,6 +576,97 @@ def test_human_edit_of_today_file_mid_run_is_skipped(cfg, vault, monkeypatch):
     assert src_path.read_bytes() == src  # 오늘 파일을 못 썼으면 [>] 표시도 하지 않는다
 
 
+# ---------------------------------------------------------------- 다른 프로그램이 파일을 잡음(FileBusy)
+
+
+def _busy_for(monkeypatch, is_busy):
+    """is_busy(path)가 참인 파일의 atomic_write만 FileBusy로 만든다. 원래 함수를 돌려준다."""
+    real = core.atomic_write
+
+    def fake(path, data, **kwargs):
+        if is_busy(Path(path)):
+            raise core.FileBusy(f"{path}: 다른 프로그램이 파일을 잡고 있어 쓰지 못했습니다")
+        return real(path, data, **kwargs)
+
+    monkeypatch.setattr(core, "atomic_write", fake)
+    return real
+
+
+def test_busy_source_is_skipped_then_marked_by_rerun(cfg, vault, monkeypatch):
+    """이전 daily 하나가 잡혀 있어도 멈추지 않는다. 그 파일만 건너뛰고 나머지는 표시한다."""
+    busy = _daily(vault, "2026-11-04")
+    busy_bytes = _write(busy, "## 기록\n- [ ] 개인: 할 일\n")
+    free = _daily(vault, "2026-11-03")
+    _write(free, "## 기록\n- [ ] 개인: 다른 일\n")
+    real = _busy_for(monkeypatch, lambda p: p == busy)
+    result = daily_prepare.run(cfg, D05)
+    assert result.changed and result.carried == 2 and result.marked == 1
+    assert [s for s in result.skipped if s.startswith("daily/2026-11-04.md: ")] == result.skipped != []
+    assert "[>] 표시를 하지 않았습니다" in result.skipped[0]
+    assert busy.read_bytes() == busy_bytes
+    assert free.read_text(encoding="utf-8") == "## 기록\n- [>] 개인: 다른 일 (2026-11-05로 이월)\n"
+    carried = ["- [ ] 개인: 다른 일 (← 2026-11-03)", "- [ ] 개인: 할 일 (← 2026-11-04)"]
+    assert _region(_daily(vault, "2026-11-05").read_bytes(), "carryover") == carried
+
+    monkeypatch.setattr(core, "atomic_write", real)
+    again = daily_prepare.run(cfg, D05)
+    assert again.marked == 1 and again.carried == 0 and not again.skipped
+    assert busy.read_text(encoding="utf-8") == "## 기록\n- [>] 개인: 할 일 (2026-11-05로 이월)\n"
+    assert _region(_daily(vault, "2026-11-05").read_bytes(), "carryover") == carried
+
+
+def test_busy_state_file_is_reported_and_marks_still_applied(cfg, vault, monkeypatch):
+    """`.state/today.json`이 잡혀 있어도 멈추지 않는다. 한 줄로 알리고 [>] 표시까지 마친다."""
+    src_path = _daily(vault, "2026-11-04")
+    _write(src_path, "## 기록\n- [ ] 개인: 할 일\n")
+    _view(vault, "today", [("KB-12", "로그인 오류", "In Progress", "")])
+    state = core.state_dir(vault) / "today.json"
+    real = _busy_for(monkeypatch, lambda p: p == state)
+    result = daily_prepare.run(cfg, D05)
+    assert result.changed and not result.today_skipped and result.marked == 1
+    assert len(result.skipped) == 1 and result.skipped[0].startswith(".state/today.json: ")
+    assert result.skipped[0].count("다른 프로그램이 파일을 잡고") == 1  # 같은 말을 두 번 하지 않는다
+    assert not state.exists()
+    assert src_path.read_text(encoding="utf-8") == "## 기록\n- [>] 개인: 할 일 (2026-11-05로 이월)\n"
+    today = ["- [ ] [[KB-12]] 로그인 오류 · In Progress"]
+    assert _region(_daily(vault, "2026-11-05").read_bytes(), "today") == today
+
+    monkeypatch.setattr(core, "atomic_write", real)
+    again = daily_prepare.run(cfg, D05)  # 뷰가 그대로면 다음 실행이 줄을 다시 알아보고 기록을 남긴다
+    assert not again.skipped and not again.changed and state.exists()
+    assert _region(_daily(vault, "2026-11-05").read_bytes(), "today") == today
+
+
+def test_busy_files_at_cli_exit_0_with_one_stderr_line_each(cfg, vault, monkeypatch, capsys):
+    """명령 수준: 이전 daily와 기록 파일이 잡혀 있어도 종료 0이다. stderr에 `건너뜀:` 한 줄씩 낸다."""
+    busy = _daily(vault, "2026-11-04")
+    _write(busy, "## 기록\n- [ ] 개인: 할 일\n")
+    _view(vault, "today", [("KB-12", "로그인 오류", "In Progress", "")])
+    state = core.state_dir(vault) / "today.json"
+    _busy_for(monkeypatch, lambda p: p in (busy, state))
+    assert daily_prepare.today_main(["--root", str(vault), "--date", "2026-11-05"]) == 0
+    out, err = capsys.readouterr()
+    lines = err.splitlines()
+    assert len(lines) == 2 and all(line.startswith("건너뜀: ") for line in lines)
+    assert sorted(line.split(": ")[1] for line in lines) == [".state/today.json", "daily/2026-11-04.md"]
+    assert out.splitlines()[-1] == str(_daily(vault, "2026-11-05"))
+    assert "새로 이월 1건, [>] 표시 0건" in out
+
+
+def test_busy_today_file_stops_with_exit_6_and_writes_nothing(cfg, vault, monkeypatch):
+    """오늘 파일이 잡혀 있으면 그대로 멈춘다(종료 6). 기록도 [>] 표시도 쓰지 않는다."""
+    _write(_daily(vault, "2026-11-04"), "## 기록\n- [ ] 개인: 할 일\n")
+    path = _daily(vault, "2026-11-05")
+    _write(path, "## 기록\n- 09:00 메모\n")
+    before = _snapshot(vault)
+    _busy_for(monkeypatch, lambda p: p == path)
+    with pytest.raises(core.FileBusy) as caught:
+        daily_prepare.run(cfg, D05)
+    assert caught.value.exit_code == 6
+    assert _snapshot(vault) == before
+    assert not (core.state_dir(vault) / "today.json").exists()
+
+
 # ---------------------------------------------------------------- CRLF·BOM
 
 

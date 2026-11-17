@@ -576,6 +576,10 @@ def _apply_marks(cfg: Config, edits: list[_Edit], sources: dict[Path, bytes], re
             result.skipped.append(f"{rel}: 읽은 뒤에 바뀌어 [>] 표시를 하지 않았습니다. 다시 실행하면 표시합니다")
             core.get_logger(cfg.root).warning("[>] 표시 건너뜀(사람 편집): %s", rel)
             continue
+        except core.FileBusy:
+            result.skipped.append(f"{rel}: 다른 프로그램이 파일을 잡고 있어 [>] 표시를 하지 않았습니다. 다시 실행하면 표시합니다")
+            core.get_logger(cfg.root).warning("[>] 표시 건너뜀(파일 잠김): %s", rel)
+            continue
         result.marked += len(items)
 
 
@@ -634,7 +638,12 @@ def run(cfg: Config, day: dt.date | str, *, carryover: bool = True) -> Result:
                 return result
             result.created = original is None
             result.changed = True
-        _save_record(cfg, records, rel, record)
+        try:
+            _save_record(cfg, records, rel, record)
+        except core.FileBusy:  # 오늘 파일은 이미 썼다. 멈추지 않고 알린 뒤 [>] 표시까지 마친다
+            state_rel = f".state/{TODAY_STATE}.json"
+            result.skipped.append(f"{state_rel}: 다른 프로그램이 파일을 잡고 있어 오늘 구역 기록을 저장하지 못했습니다. 다시 실행하세요")
+            core.get_logger(cfg.root).warning("오늘 구역 기록 저장 건너뜀(파일 잠김): %s", state_rel)
         if carryover and candidates:
             _apply_marks(cfg, [c.edit for c in candidates], sources, result)
     return result
