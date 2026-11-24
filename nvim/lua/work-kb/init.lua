@@ -9,7 +9,8 @@
 -- 키 (접두 키 다음, 기본 <leader>k):
 --   c 캡처        C 클립보드 이미지   F 이미지 파일   i inbox 메모
 --   t 오늘 daily  s 검색             o 커서 위치 열기  l link 실행
---   ? 상태        j Jira 작업        g 편찬(ingest → compile)  G 편찬 미리 보기(--dry-run)
+--   ? 상태        j Jira 작업        J 일감 목록
+--   g 편찬(ingest → compile)  G 편찬 미리 보기(--dry-run)
 --   a 주제 제안 승인
 -- 비주얼 모드: c·i는 선택한 글을 캡처·inbox 버퍼에 미리 넣는다.
 -- 같은 명령: :WorkKb <이름>. 직접 붙이기: vim.keymap.set("n", "<F8>c", function() require("work-kb").call("capture") end)
@@ -32,6 +33,7 @@ M.keys = {
   { key = "l", name = "link", module = "work-kb.misc", fn = "link" },
   { key = "?", name = "status", module = "work-kb.misc", fn = "status" },
   { key = "j", name = "jira", module = "work-kb.jira", fn = "menu" },
+  { key = "J", name = "issues", module = "work-kb.issues", fn = "open" },
   {
     key = "g",
     name = "ingest",

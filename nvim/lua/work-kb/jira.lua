@@ -2,7 +2,7 @@
 -- 쓰기는 모두 `kb.py act <하위 명령>`(outbox 경유)로 보낸다. 자유 글 값은 `--옵션=값` 한 인수로, 자유 글 위치 인수\n-- 앞에는 `--`를 넣는다 (`-`로 시작하는 글을 argparse가 옵션으로 읽지 않게). 상태 전환·새 일감·승격은
 -- 사용자가 고르고 확인한 뒤에만 `--yes`로 보낸다.
 --
--- 메뉴: 일감 v c t a w, 만들기 n p, 조회·동기화 q S f d. 각 동작은 이 모듈의 함수이기도 하다
+-- 메뉴: 일감 v c t a w, 만들기 n p, 조회·동기화 l q S f d. 각 동작은 이 모듈의 함수이기도 하다
 -- (view, comment, transition, assign, worklog, create, promote, query, sync, flush, check_done).
 -- open.lua(thing_at_point, link_key, open_key, open_at_point)는 함수 안에서만 불러온다.
 -- 입력을 취소하면(ui.input/select가 nil) "work-kb: 취소했습니다" 사용자 오류로 멈춘다.
@@ -617,6 +617,11 @@ function M.promote()
   return nil
 end
 
+---l: 일감 목록 (issues.lua).
+function M.list()
+  return require("work-kb.issues").open()
+end
+
 ---q: 라이브 JQL (`kb.py sync --jql`, 캐시에 쓰지 않음). JQL이 없으면 묻는다.
 function M.query(jql)
   if jql == nil then
@@ -700,6 +705,7 @@ M.MENU = {
   {
     group = "조회·동기화",
     items = {
+      { key = "l", fn = "list", label = "일감 목록" },
       { key = "q", fn = "query", label = "라이브 JQL" },
       { key = "S", fn = "sync", label = "동기화" },
       { key = "f", fn = "flush", label = "outbox 다시 보내기" },

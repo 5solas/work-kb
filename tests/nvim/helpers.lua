@@ -312,6 +312,10 @@ function H.ui_stub(answers)
     stub.last_items = items
     return next_answer("select", prompt)
   end)
+  H.patch(ui, "pick", function(prompt, items, cb)
+    stub.last_items = items
+    cb(next_answer("pick", prompt))
+  end)
   H.patch(ui, "confirm", function(msg)
     return next_answer("confirm", msg) == true
   end)

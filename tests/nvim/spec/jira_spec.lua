@@ -157,7 +157,7 @@ describe("jira", function()
     local expected = {
       { "일감", { { "v", "view" }, { "c", "comment" }, { "t", "transition" }, { "a", "assign" }, { "w", "worklog" } } },
       { "만들기", { { "n", "create" }, { "p", "promote" } } },
-      { "조회·동기화", { { "q", "query" }, { "S", "sync" }, { "f", "flush" }, { "d", "check_done" } } },
+      { "조회·동기화", { { "l", "list" }, { "q", "query" }, { "S", "sync" }, { "f", "flush" }, { "d", "check_done" } } },
     }
     H.eq(#j.MENU, 3)
     for gi, group in ipairs(expected) do
@@ -199,7 +199,7 @@ describe("jira", function()
         H.eq(j.menu(), pair[2])
       end
     end
-    H.eq(called, { "view", "comment", "transition", "assign", "worklog", "create", "promote", "query", "sync", "flush", "check_done" })
+    H.eq(called, { "view", "comment", "transition", "assign", "worklog", "create", "promote", "list", "query", "sync", "flush", "check_done" })
     H.contains(echoed[1], "일감")
     H.contains(echoed[1], "만들기")
     H.contains(echoed[1], "조회·동기화")
@@ -215,7 +215,7 @@ describe("jira", function()
     end)
     H.eq(j.menu(), nil)
     H.eq(stub.messages, { "work-kb: Jira 메뉴에 없는 키입니다: x" })
-    H.eq(#called, 11)
+    H.eq(#called, 12)
     -- 이름으로도 부른다
     H.eq(j.run("check-done"), "check_done")
     H.eq(j.run("view"), "view")

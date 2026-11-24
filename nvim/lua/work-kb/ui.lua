@@ -123,6 +123,22 @@ function M.select(prompt, items, opts)
   return answer
 end
 
+---후보에서 하나를 골라 CB(고른 것 또는 nil)를 부른다 (vim.ui.select: fzf-lua 등이 바꿔 끼울 수 있고 비동기일 수 있다).
+---화면이 없으면 묻지 않고 CB(nil).
+---@param prompt string
+---@param items string[]
+---@param cb fun(choice: string|nil)
+function M.pick(prompt, items, cb)
+  if not M._can_prompt() then
+    refuse_prompt(prompt)
+    cb(nil)
+    return
+  end
+  vim.ui.select(items, { prompt = prompt }, function(choice)
+    cb(choice)
+  end)
+end
+
 ---예/아니요 확인 (Emacs y-or-n-p). 예면 true. 화면이 없으면 묻지 않고 false (아니요).
 ---@param msg string
 ---@return boolean

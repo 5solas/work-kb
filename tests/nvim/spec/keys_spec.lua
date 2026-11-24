@@ -12,6 +12,7 @@ local EXPECTED = {
   { "l", "work-kb.misc", "link" },
   { "?", "work-kb.misc", "status" },
   { "j", "work-kb.jira", "menu" },
+  { "J", "work-kb.issues", "open" },
   { "g", "work-kb.compile", "ingest_compile", { dry_run = false } },
   { "G", "work-kb.compile", "ingest_compile", { dry_run = true } },
   { "a", "work-kb.compile", "proposals" },
@@ -288,7 +289,7 @@ describe("keys", function()
       H.eq(kb.complete("ji", "WorkKb ji"), { "jira" })
       H.eq(kb.complete("ch", "WorkKb jira ch"), { "check-done" })
       H.eq(kb.complete("", "'<,'>WorkKb jira "), {
-        "view", "comment", "transition", "assign", "worklog", "create", "promote", "query", "sync", "flush", "check-done",
+        "view", "comment", "transition", "assign", "worklog", "create", "promote", "list", "query", "sync", "flush", "check-done",
       })
       H.eq(kb.complete("", "WorkKb status "), {})
       H.eq(vim.fn.getcompletion("WorkKb jira tr", "cmdline"), { "transition" })

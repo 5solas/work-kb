@@ -244,9 +244,9 @@ def _row(text: str, key: str, name: str) -> str | None:
 def test_user_guide_keys_match_nvim_lua():
     """Neovim 키 표(접두 키 다음)와 j 메뉴가 docs/USER-GUIDE.md의 표에 키·이름까지 같게 있다."""
     keys = _init_keys()
-    assert {k for k, _ in keys} >= {"c", "C", "F", "i", "t", "s", "o", "l", "?", "j", "g", "G", "a"}, keys
+    assert {k for k, _ in keys} >= {"c", "C", "F", "i", "t", "s", "o", "l", "?", "j", "J", "g", "G", "a"}, keys
     jira = _jira_menu()
-    assert {k for k, _ in jira} >= {"v", "c", "t", "a", "w", "n", "p", "q", "S", "f", "d"}, jira
+    assert {k for k, _ in jira} >= {"v", "c", "t", "a", "w", "n", "p", "l", "q", "S", "f", "d"}, jira
     guide = _read("USER-GUIDE.md")
     for key, name in keys + jira:
         assert _row(guide, key, name), f"USER-GUIDE 키 표: `{key}` | `{name}`"
