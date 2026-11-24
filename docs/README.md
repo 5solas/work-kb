@@ -88,6 +88,7 @@ date: 2026-11-05
 | `kb.py today` | 오늘 daily 준비(오늘·이월 구역), 경로 출력 | `--date` `--no-carryover` `--print-path` `--check-done` `--json` | 허용 |
 | `kb.py link` | A단계: 키·`@이름`·주제(있는 `wiki/topics/*.md`)를 엔티티 페이지에 연결 | `--dry-run` `--stub` `--rebuild` `--json` | 허용 |
 | `kb.py status` | 상태 요약 (네트워크 안 씀) | `--json` | 허용 |
+| `kb.py issues` | Jira 일감 캐시 목록 (네트워크 안 씀) | `--json` `--all` `--view` | 허용 |
 | `kb.py search` | daily·inbox·wiki·jira 낱말 검색 (공백은 AND) | `--json` `--limit` `--in wiki` | 허용 |
 | `kb.py sync` | Jira 일감을 캐시로 받기 (읽기 전용) | `--full` `--key` `--jql` `--cache` `--dry-run` | 허용 |
 | `kb.py act` | Jira 쓰기(outbox 경유). 하위: `comment` `transition` `transitions` `assign` `worklog` `create` `promote` `flush` `list` | `--yes` `--body` `--from-line` `--summary` `--retry-failed` `--retry-uncertain` | `list`·`transitions`만 |
@@ -99,7 +100,7 @@ date: 2026-11-05
 | `kb.py schedule` | 작업 스케줄러 XML과 `schtasks` 명령 생성(등록 안 함) | `--print` `--xml-dir` `--company` | 거부 |
 | `kb.py wheels` | 오프라인 설치용 `wheels/` 내려받기 | `--targets` `--dir` | 거부 |
 | `kb.py demo` | 모의 서버로 전체 흐름 시연. `tests/`가 필요해 **집 전용** | `--keep` `--fixed-ports` | 거부 |
-| `kb.py serve` | 편집기용 상주 서버. `status` `search` `today` `link` `proposals list` `act list`만 실행하고 `today`·`link`는 파일을 쓴다. 나머지는 편집기가 한 번 실행으로 돌린다 | `--idle-sec` | 허용 |
+| `kb.py serve` | 편집기용 상주 서버. `status` `issues` `search` `today` `link` `proposals list` `act list`만 실행하고 `today`·`link`는 파일을 쓴다. 나머지는 편집기가 한 번 실행으로 돌린다 | `--idle-sec` | 허용 |
 
 - `serve` 요청이 90초를 넘으면 Neovim은 쓰기 명령(`today`·`link`)을 다시 돌리지 않고 실패로 끝낸다.
 - `sync`는 범위 밖 일감이 403이면 `in_scope: false`로 표시하고 계속한다. 토큰이 무효면 종료 2.

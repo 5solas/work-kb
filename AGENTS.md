@@ -108,6 +108,7 @@ B·C단계(compile·ingest·lint --llm)의 입력과 출력. 출력은 **JSON �
 
 ```
 python scripts/kb.py status
+python scripts/kb.py issues
 python scripts/kb.py search "..."
 python scripts/kb.py today
 python scripts/kb.py today --check-done
@@ -126,6 +127,7 @@ python scripts/kb.py serve
 | 명령 | 하는 일 |
 |---|---|
 | `status` | 동기화·outbox·미처리 제안·이미지·탐지 기록·environment 요약. 쓰지 않고 연결도 확인하지 않는다(연결은 `doctor`) |
+| `issues` | Jira 일감 캐시 목록. `--view NAME`은 저장된 뷰만, `--all`은 범위 밖도. 파일만 읽는다 |
 | `search "..."` | daily·inbox·wiki·jira 낱말 검색 |
 | `today` | 오늘 daily 뼈대와 `today`·`carryover` 구역. `--check-done`은 완료 전환 제안만 출력 |
 | `link` | A단계. Jira 키·`@이름`·주제를 엔티티 페이지 `mentions`에 엮는다 |
@@ -134,7 +136,7 @@ python scripts/kb.py serve
 | `lint` | C단계 점검 `wiki/_lint.md`. `--llm`은 T5 모순 검사 |
 | `doctor` | 연결·환경 점검 |
 | `act list`, `act transitions KEY`, `proposals list` | outbox·가능한 전환·주제 제안 보기 |
-| `serve` | 편집기용 상주 서버. `status`·`search`·`today`·`link`·`proposals list`·`act list`만 처리하고 `today`·`link`는 파일을 쓴다. 에이전트가 띄우지 않는다 |
+| `serve` | 편집기용 상주 서버. `status`·`issues`·`search`·`today`·`link`·`proposals list`·`act list`만 처리하고 `today`·`link`는 파일을 쓴다. 에이전트가 띄우지 않는다 |
 
 `KB_AGENT=1`에서 거부되는 명령(종료 7, 사람만 실행한다): `init`, `act`의 쓰기(`comment`, `transition`, `assign`, `worklog`, `create`, `promote`, `flush`), `proposals accept`, `push`, `demo`, `schedule`, `wheels`, `doctor --redetect`.
 `scripts/*.py`를 직접 실행해도 거부된다.

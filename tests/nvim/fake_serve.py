@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 
-SERVED = {"status", "search", "today", "link"}
+SERVED = {"status", "issues", "search", "today", "link"}
 SERVED_SUB = {"proposals": {"list"}, "act": {"list"}}
 
 

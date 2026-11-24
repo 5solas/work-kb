@@ -78,6 +78,7 @@ COMMANDS: dict[str, Command] = {
     "today": Command("daily_prepare", "today_main", help="오늘 daily 준비(오늘·이월 구역) 후 경로 출력"),
     "link": Command("link", help="A단계: Jira 키·@이름을 엔티티 페이지에 연결 (LLM 없음)"),
     "status": Command("status", help="상태 요약"),
+    "issues": Command("issues", help="Jira 일감 캐시 목록 (--json, --all, --view)"),
     "search": Command("search", help='검색: kb.py search "질의"'),
     # Phase 2
     "sync": Command("jira_sync", help="Jira 일감 캐시 동기화 (--full, --key, --jql)"),

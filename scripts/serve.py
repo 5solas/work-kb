@@ -43,6 +43,7 @@ DEFAULT_IDLE_SEC = 1800.0
 # 서버에서 실행하는 명령: 이름 → 허용 하위 명령(None이면 하위 명령 구분 없음).
 SERVED: dict[str, frozenset[str] | None] = {
     "status": None,
+    "issues": None,
     "search": None,
     "today": None,
     "link": None,

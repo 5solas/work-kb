@@ -574,12 +574,12 @@ end
 
 ---------------------------------------------------------------- 실행
 
-local SERVED = { status = true, search = true, today = true, link = true }
+local SERVED = { status = true, issues = true, search = true, today = true, link = true }
 local SERVED_SUB = { proposals = { list = true }, act = { list = true } }
 -- 볼트 파일을 쓰는 서버 명령. 요청 시간 초과 때는 이미 썼을 수 있으므로 한 번 실행으로 다시 돌리지 않는다.
 local WRITES = { today = true, link = true }
 
----상주 서버로 보낼 수 있는 명령인가 (빠른 명령: 읽기 status, search, proposals list, act list;
+---상주 서버로 보낼 수 있는 명령인가 (빠른 명령: 읽기 status, issues, search, proposals list, act list;
 ---볼트 파일을 쓰는 today, link). Jira를 부르는 act transitions는 서버를 막지 않게 한 번 실행으로.
 ---거부되거나 서버가 죽으면 한 번 실행으로 다시 돌린다. 요청 시간 초과(server.request_timeout_ms)면
 ---읽기 명령만 다시 돌리고, today·link는 "시간 초과" 실패(code nil)로 끝낸다.
