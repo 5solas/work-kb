@@ -130,6 +130,19 @@ local function describe_text(s)
   vim.api.nvim_buf_set_lines(F._live.desc_buf, 0, -1, false, vim.split(s, "\n"))
 end
 
+local DAILY = "---\ndate: 2026-11-05\n---\n## 기록\n- 08:00 첫\n- [ ] 09:30 경비 정산\n"
+
+local function visit(vault)
+  local file = vault .. "/daily/2026-11-05.md"
+  H.mkdir_p(vault .. "/daily")
+  H.write_bytes(file, DAILY)
+  vim.cmd.edit(vim.fn.fnameescape(file))
+  vim.api.nvim_win_set_cursor(0, { 6, 0 })
+  return vim.api.nvim_get_current_buf(), file
+end
+
+local visit_daily = visit
+
 describe("form 양식", function()
   it("form open: 항목을 필수·흔한 것부터 보이고 나머지는 접는다", function()
     local t = setup()
@@ -310,7 +323,7 @@ describe("form 양식", function()
       { { 0, "잘린 출력 {\"record" }, "확인" },
       { { 1, "" }, "확인" },
     }) do
-      local t = setup({ { "input", "요약" }, { "confirm", true }, { "confirm", true }, { "confirm", false } })
+      local t = setup({ { "input", "요약" }, { "confirm", true }, { "pick", "이어 쓰기" }, { "confirm", false } })
       t.out["act create"] = case[1]
       t.open()
       edit(t, "summary")
@@ -328,7 +341,7 @@ describe("form 양식", function()
   end)
 
   it("form 보내는 동안 닫아도 결과를 알리고, 실패면 내용을 기억한다", function()
-    local t = setup({ { "input", "요약" }, { "confirm", true }, { "confirm", true } })
+    local t = setup({ { "input", "요약" }, { "confirm", true }, { "pick", "이어 쓰기" } })
     t.out["act create"] = { 1, result({ state = "failed", message = "오류" }) .. "\n" }
     t.open()
     edit(t, "summary")
@@ -344,7 +357,7 @@ describe("form 양식", function()
   end)
 
   it("form 닫기: 한 창을 닫으면 둘 다 닫히고, 이어 쓰거나 버린다", function()
-    local t = setup({ { "input", "요약" }, { "confirm", true }, { "confirm", false } })
+    local t = setup({ { "input", "요약" }, { "pick", "이어 쓰기" }, { "pick", "버리고 새로 쓰기" } })
     t.open()
     local tabs = #vim.api.nvim_list_tabpages()
     edit(t, "summary")
@@ -364,8 +377,58 @@ describe("form 양식", function()
     H.eq(vim.api.nvim_buf_get_lines(F._live.desc_buf, 0, -1, false), { "" })
   end)
 
+  it("form 이어 쓰기 물음을 취소하면 열지 않고 쓰던 글을 둔다", function()
+    local t = setup({ { "input", "요약" }, { "pick" }, { "pick", "이어 쓰기" } })
+    t.open()
+    edit(t, "summary")
+    describe_text("본문")
+    F.close()
+    t.settle()
+    t.open()
+    H.eq(F._live, nil)
+    t.open()
+    H.contains(row("summary"), "요약")
+    H.eq(vim.api.nvim_buf_get_lines(F._live.desc_buf, 0, -1, false), { "본문" })
+  end)
+
+  it("form 보내는 중인 양식은 버릴 수 없다", function()
+    local t = setup({ { "input", "요약" }, { "confirm", true } })
+    t.out["act create"] = { "hang", "" }
+    t.open()
+    edit(t, "summary")
+    press("<C-C><C-C>")
+    F.close()
+    t.open()
+    H.contains(row("summary"), "요약")
+    H.contains(text(), "보내는 중")
+    F.close()
+    visit_daily(t.vault)
+    require("work-kb.jira").promote()
+    H.eq(F._live, nil)
+    H.contains(t.stub.messages[#t.stub.messages], "보내는 중")
+    vim.cmd("enew!")
+  end)
+
+  it("form 보내는 동안 다른 Jira 동작이 출력을 지워도 결과를 읽는다", function()
+    local t = setup({ { "input", "요약" }, { "confirm", true } })
+    t.open()
+    edit(t, "summary")
+    press("<C-C><C-C>")
+    require("work-kb.jira").flush()
+    t.settle()
+    H.contains(table.concat(t.stub.messages, "\n"), "KB-16")
+    H.eq(F._live, nil)
+  end)
+
+  it("form 요약은 255자까지", function()
+    local t = setup({ { "input", string.rep("가", 256) } })
+    t.open()
+    edit(t, "summary")
+    H.fails_with(F.submit, "요약은 255자까지입니다 (지금 256자)")
+  end)
+
   it("form 설명 버퍼를 지워도 마지막 글을 기억한다", function()
-    local t = setup({ { "confirm", true } })
+    local t = setup({ { "pick", "이어 쓰기" } })
     t.open()
     describe_text("지워질 글")
     vim.api.nvim_exec_autocmds("TextChanged", { buffer = F._live.desc_buf })
@@ -477,17 +540,6 @@ describe("form 양식", function()
   end)
 end)
 
-local DAILY = "---\ndate: 2026-11-05\n---\n## 기록\n- 08:00 첫\n- [ ] 09:30 경비 정산\n"
-
-local function visit(vault)
-  local file = vault .. "/daily/2026-11-05.md"
-  H.mkdir_p(vault .. "/daily")
-  H.write_bytes(file, DAILY)
-  vim.cmd.edit(vim.fn.fnameescape(file))
-  vim.api.nvim_win_set_cursor(0, { 6, 0 })
-  return vim.api.nvim_get_current_buf(), file
-end
-
 describe("form 승격", function()
   it("form 승격: 처음 줄과 해시를 보내고 daily 버퍼를 다시 읽는다", function()
     local t = setup({ { "confirm", true } })
@@ -511,6 +563,7 @@ describe("form 승격", function()
         "--from",
         "daily/2026-11-05.md:6",
         "KB",
+        "--summary=경비 정산",
         "--type=Task",
         "--expect-line=" .. vim.fn.sha256("- [ ] 09:30 경비 정산"),
         "--yes",
@@ -555,6 +608,26 @@ describe("form 승격", function()
     H.ok(vim.bo[buf].modified)
     vim.cmd("enew!")
     vim.api.nvim_buf_delete(buf, { force = true })
+  end)
+
+  it("form 승격: 줄이 아래로 밀렸으면 다시 승격해 이어 쓰고 새 줄을 쓴다", function()
+    local t = setup({ { "input", "고친 제목" }, { "pick", "이어 쓰기" } })
+    local buf = visit(t.vault)
+    require("work-kb.jira").promote()
+    t.settle()
+    edit(t, "summary")
+    F.close()
+    t.settle()
+    vim.api.nvim_set_current_buf(buf)
+    vim.api.nvim_buf_set_lines(buf, 4, 4, false, { "- 07:00 끼운 줄" })
+    vim.api.nvim_win_set_cursor(0, { 7, 0 })
+    require("work-kb.jira").promote()
+    t.settle()
+    H.contains(row("summary"), "고친 제목")
+    H.contains(text(), "daily/2026-11-05.md:7")
+    F.close()
+    t.settle()
+    vim.cmd("enew!")
   end)
 
   it("form 승격: 빈 줄·daily 밖은 열지 않는다", function()

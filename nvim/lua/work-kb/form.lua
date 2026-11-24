@@ -8,8 +8,8 @@ local M = {}
 
 M.BUFFER = "*work-kb-issue-form*"
 M.DESC_BUFFER = "*work-kb-issue-description*"
-M.META_BUFFER = "*work-kb-issue-meta*"
-M.OUTPUT_BUFFER = "*work-kb-jira*"
+M.RUN_BUFFER = "*work-kb-form-run %d*" -- 실행마다 따로 (겹친 실행이 서로의 출력을 지우지 않게), 끝나면 지운다
+M.SUMMARY_MAX = 255 -- jira_act.SUMMARY_MAX와 같다
 M.FALLBACK_TYPES = { "Task", "Bug", "Story" }
 
 M._live = nil -- 열린 양식: { d, buf, win, desc_buf, desc_win, rows }
@@ -33,6 +33,22 @@ local function jira()
 end
 
 ---------------------------------------------------------------- 내용
+
+local run_count = 0
+
+---kb.py를 자기만의 버퍼로 비동기 실행한다. ON_EXIT(code, text, last_line).
+local function run_private(args, on_exit)
+  local p = proc()
+  run_count = run_count + 1
+  return p.run(args, {
+    buffer = M.RUN_BUFFER:format(run_count),
+    on_exit = function(code, bufnr)
+      local text, last = p.buffer_text(bufnr) or "", p.last_line(bufnr)
+      pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
+      on_exit(code, text, last)
+    end,
+  })
+end
 
 local function new_draft(promote)
   return {
@@ -296,25 +312,22 @@ local function fetch_meta(d, refresh, done_cb)
   if refresh then
     table.insert(args, "--refresh")
   end
-  p.run(args, {
-    buffer = M.META_BUFFER .. d.meta_seq % 2,
-    on_exit = function(code, bufnr)
-      if seq ~= d.meta_seq then
-        return
+  run_private(args, function(code, text, last)
+    if seq ~= d.meta_seq then
+      return
+    end
+    local data
+    for line in text:gmatch("[^\r\n]+") do
+      if line:sub(1, 1) == "{" then
+        local ok, value = pcall(vim.json.decode, line, { luanil = { object = true, array = true } })
+        data = ok and type(value) == "table" and type(value.issuetypes) == "table" and value or data
       end
-      local data
-      for line in p.buffer_text(bufnr):gmatch("[^\r\n]+") do
-        if line:sub(1, 1) == "{" then
-          local ok, value = pcall(vim.json.decode, line, { luanil = { object = true, array = true } })
-          data = ok and type(value) == "table" and type(value.issuetypes) == "table" and value or data
-        end
-      end
-      if code ~= 0 or not data then
-        data = fallback(project, p.last_line(bufnr) or p.exit_reason(code))
-      end
-      done_cb(data)
-    end,
-  })
+    end
+    if code ~= 0 or not data then
+      data = fallback(project, last or p.exit_reason(code))
+    end
+    done_cb(data)
+  end)
 end
 
 local function load_meta(d)
@@ -473,21 +486,45 @@ function M.open(opts)
     end
     return
   end
-  local d
   local old = M._draft
-  if old then
-    local title = vim.trim(old.summary) ~= "" and old.summary or "(요약 없음)"
-    local same = promote and old.promote and old.promote.ref == promote.ref and old.promote.hash == promote.hash
-    if promote and not same then
-      if not ui().confirm(string.format("쓰던 양식 '%s'을(를) 버리고 이 줄을 승격할까요? ", title)) then
-        ui().notify("work-kb: 승격을 취소했습니다. 쓰던 양식은 <leader>kj n으로 엽니다")
-        return
-      end
-    elseif ui().confirm(string.format("쓰던 새 일감 '%s'을(를) 이어 쓸까요? (n이면 버리고 새로) ", title)) then
-      d = old
-    end
+  if not old then
+    return M._start(new_draft(promote))
   end
-  d = d or new_draft(promote)
+  -- 같은 줄(밀려서 줄 번호만 다른 것 포함)의 승격이면 이어 쓸 수 있다
+  local same = promote and old.promote and old.promote.hash == promote.hash
+  local other = promote and not same
+  if old.sending then
+    if other then
+      ui().notify("work-kb: 앞의 양식을 보내는 중입니다. 끝난 뒤 다시 하세요")
+      return
+    end
+    return M._start(old)
+  end
+  local title = vim.trim(old.summary) ~= "" and old.summary or "(요약 없음)"
+  if other then
+    if ui().confirm(string.format("쓰던 양식 '%s'을(를) 버리고 이 줄을 승격할까요? ", title)) then
+      return M._start(new_draft(promote))
+    end
+    ui().notify("work-kb: 승격을 취소했습니다. 쓰던 양식은 <leader>kj n으로 엽니다")
+    return
+  end
+  ui().pick(string.format("쓰던 새 일감 '%s'", title), { "이어 쓰기", "버리고 새로 쓰기" }, function(choice)
+    if M._live or M._draft ~= old or old.sending then
+      return -- 고르는 동안 바뀌었다
+    end
+    if choice == "이어 쓰기" then
+      if same then
+        old.promote = promote
+      end
+      M._start(old)
+    elseif choice == "버리고 새로 쓰기" then
+      M._start(new_draft(promote))
+    end
+  end)
+end
+
+---D로 양식을 띄운다.
+function M._start(d)
   d.keys = project_keys()
   if not d.project or (#d.keys > 0 and not vim.tbl_contains(d.keys, d.project)) then
     d.project = d.keys[1] or ask_project()
@@ -689,7 +726,7 @@ function M.edit()
     end)
   elseif row.id == "summary" then
     return ask_text("요약: ", d.summary, function(text)
-      d.summary = text
+      d.summary = vim.trim((text:gsub("%s+", " ")))
       draw(d)
     end)
   end
@@ -775,6 +812,11 @@ local function check(d)
   if vim.trim(d.summary) == "" then
     missing("summary", "요약")
   end
+  local length = vim.fn.strchars(d.summary)
+  if length > M.SUMMARY_MAX then
+    goto_row("summary")
+    ui().fail(string.format("요약은 %d자까지입니다 (지금 %d자)", M.SUMMARY_MAX, length))
+  end
   for _, f in ipairs(t.fields) do
     if must(f) and d.values[f.id] == nil then
       missing(f.id, f.name)
@@ -791,9 +833,7 @@ local function build_args(d, t)
   local args
   if d.promote then
     args = proc().sub_args("act", "promote", "--from", d.promote.ref, d.project)
-    if vim.trim(d.summary) ~= d.promote.summary then
-      table.insert(args, "--summary=" .. d.summary)
-    end
+    table.insert(args, "--summary=" .. d.summary) -- 확인한 글 그대로
   else
     args = proc().sub_args("act", "create", d.project, "--summary=" .. d.summary)
   end
@@ -887,13 +927,7 @@ local function finish(d, res)
 end
 
 local function run_act(d, args, on_exit)
-  local p = proc()
-  local ok, err = pcall(p.run, args, {
-    buffer = M.OUTPUT_BUFFER,
-    on_exit = function(code, bufnr)
-      on_exit(code, p.buffer_text(bufnr) or "", bufnr)
-    end,
-  })
+  local ok, err = pcall(run_private, args, on_exit)
   if not ok then -- 실행하지 못함(Python 없음 등): 보내지 않았다
     finish(d, { state = "none", message = tostring(err) })
   end
