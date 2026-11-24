@@ -91,7 +91,8 @@ date: 2026-11-05
 | `kb.py issues` | Jira 일감 캐시 목록 (네트워크 안 씀) | `--json` `--all` `--view` | 허용 |
 | `kb.py search` | daily·inbox·wiki·jira 낱말 검색 (공백은 AND) | `--json` `--limit` `--in wiki` | 허용 |
 | `kb.py sync` | Jira 일감을 캐시로 받기 (읽기 전용) | `--full` `--key` `--jql` `--cache` `--dry-run` | 허용 |
-| `kb.py act` | Jira 쓰기(outbox 경유). 하위: `comment` `transition` `transitions` `assign` `worklog` `create` `promote` `flush` `list` | `--yes` `--body` `--from-line` `--summary` `--retry-failed` `--retry-uncertain` | `list`·`transitions`만 |
+| `kb.py meta` | 새 일감 양식의 후보. 하위: `create` `users` (Jira 읽기만) | `--json` `--refresh` `--project` `--issue` `--query` | 허용 |
+| `kb.py act` | Jira 쓰기(outbox 경유). 하위: `comment` `transition` `transitions` `assign` `worklog` `create` `promote` `flush` `discard` `list` | `--yes` `--body` `--from-line` `--summary` `--retry-failed` `--retry-uncertain` | `list`·`transitions`만 |
 | `kb.py compile` | B단계: 태그·결정·할 일·요약·주제 제안 (LLM). 기본은 최근 7일 daily(`--since 0`이면 전부). inbox는 이미지 사이드카만 읽는다 | `--date` `--since` `--task decisions` `--dry-run` `--force` | 허용 |
 | `kb.py ingest` | B단계: 이미지 글 추출 → 사이드카 (비전 LLM) | `--dry-run` `--force` | 허용 |
 | `kb.py proposals` | 주제 제안: `list` / `accept <번호\|all>` | | `list`만 |
@@ -196,6 +197,7 @@ Jira 쓰기는 `jira/outbox.jsonl`에 먼저 기록하고 바로 전송을 시�
 
 - `kb.py act flush`: `pending`만 보낸다.
 - `kb.py act flush --retry-failed [ID ...]`: `failed`도 다시 보낸다(시도 횟수 초기화).
+- `kb.py act discard ID`: `failed` 기록을 치운다(`discarded`로 남고 다시 보내지 않는다).
 - `kb.py act flush --retry-uncertain [ID ...]`: `uncertain`도 다시 보낸다. **먼저 Jira에 실제로 올라갔는지 확인**한다.
 - `kb.py act list`: 대기·실패 항목. `--all`은 완료 포함, `--json`은 기계 판독용.
 

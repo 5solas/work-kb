@@ -4,7 +4,7 @@
 스텁(stub, status_category 없음)과 `jira/_views/`는 빼고, `in_scope: false`는 `--all`일 때만 넣는다.
 `--view NAME`은 `jira/_views/NAME.md` 표의 키를 그 순서로 낸다. 일감 파일이 없거나 스텁인 키는 표의 값만
 채우고 `cached: false`를 붙인다. front matter가 깨진 파일은 건너뛰고 stderr에 한 줄 남긴다.
-`--json`은 JSON 객체 하나를 한 줄로 낸다: {synced_at, views, issues}.
+`--json`은 JSON 객체 하나를 한 줄로 낸다: {synced_at, views, view_jql(config.yaml의 뷰 이름 → JQL), issues}.
 """
 from __future__ import annotations
 
@@ -114,7 +114,9 @@ def _collect(cfg: Config, all_: bool, view: str | None) -> tuple[dict[str, Any],
     rows, problems = read_issues(cfg, include_out_of_scope=all_ or view is not None)
     if view is not None:
         rows = _view_rows(cfg, view, {row["key"]: row for row in rows})
-    return {"synced_at": _synced_at(cfg, problems), "views": views, "issues": rows}, problems
+    configured = cfg.get("jira.views")
+    jql = {str(k): v.strip() for k, v in configured.items() if isinstance(v, str) and v.strip()} if isinstance(configured, Mapping) else {}
+    return {"synced_at": _synced_at(cfg, problems), "views": views, "view_jql": jql, "issues": rows}, problems
 
 
 def collect(cfg: Config, *, all_: bool = False, view: str | None = None) -> dict[str, Any]:

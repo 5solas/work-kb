@@ -149,30 +149,68 @@ function M.key_at_point()
   return nil
 end
 
----커서 위치의 Jira 키. 없으면 "Jira 키: "로 묻는다 (앞뒤 공백을 떼고 대문자로).
-function M.jira_key()
-  local key = M.key_at_point()
-  if key then
-    return key
+M.DIRECT = "직접 입력…"
+
+---화면이 있고 후보가 있으면 고르게 하고 ("직접 입력…" 포함), 아니면 ASK()로 묻는다. CB(값).
+---LABELS[i]를 고르면 VALUES[i] (없으면 LABELS[i])를 준다. 취소하면 사용자 오류.
+local function pick_or_ask(prompt, labels, values, ask_fn, cb)
+  if #labels == 0 or not ui()._can_prompt() then
+    return cb(ask_fn())
   end
-  key = vim.fn.toupper(trim(ask("Jira 키: ")))
-  if not is_key(key) then
-    ui().fail(string.format("Jira 키가 아닙니다: %s (예: KB-12)", quote(key)))
-  end
-  return key
+  local items = vim.list_extend(vim.list_slice(labels), { M.DIRECT })
+  ui().pick(prompt, items, function(choice)
+    if choice == nil then
+      ui().fail("work-kb: 취소했습니다")
+    end
+    if choice == M.DIRECT then
+      return cb(ask_fn())
+    end
+    for i, label in ipairs(labels) do
+      if label == choice then
+        return cb(values and values[i] or label)
+      end
+    end
+  end)
+  return nil
 end
 
----작업할 키: opts.key가 있으면 커서를 읽지 않고 그 키 (일감 목록에서 부를 때), 없으면 jira_key().
-local function resolve_key(opts)
-  local key = opts and opts.key
-  if key == nil then
-    return M.jira_key()
-  end
-  if not is_key(key) then
-    ui().fail(string.format("Jira 키가 아닙니다: %s (예: KB-12)", quote(key)))
-  end
-  return key
+---캐시된 미완료 일감 (고르기 후보). 읽지 못하면 빈 목록.
+function M._cached_issues()
+  local issues = require("work-kb.issues")
+  local data = issues.fetch()
+  return data and issues.sort(issues.filter(data.issues, { status = "open" }), false) or {}
 end
+
+local function ask_key()
+  return vim.fn.toupper(trim(ask("Jira 키: ")))
+end
+
+---작업할 키를 정해 CB(key)를 부른다: opts.key → 커서 위치의 키 → 캐시된 일감에서 고르기 또는 직접 입력.
+---고르기는 비동기일 수 있다. 동기로 정해지면 CB의 값을 돌려준다.
+function M.resolve_key(opts, cb)
+  local function checked(key)
+    if not is_key(key) then
+      ui().fail(string.format("Jira 키가 아닙니다: %s (예: KB-12)", quote(key)))
+    end
+    return cb(key)
+  end
+  if opts and opts.key ~= nil then
+    return checked(opts.key)
+  end
+  local key = M.key_at_point()
+  if key then
+    return cb(key)
+  end
+  local labels, values = {}, {}
+  if ui()._can_prompt() then
+    for _, issue in ipairs(M._cached_issues()) do
+      table.insert(labels, issue.key .. " " .. issue.summary)
+      table.insert(values, issue.key)
+    end
+  end
+  return pick_or_ask("일감", labels, values, ask_key, checked)
+end
+local resolve_key = M.resolve_key
 
 ---------------------------------------------------------------- daily 줄 참조
 
@@ -200,8 +238,10 @@ end
 ---Python은 디스크의 줄을 읽으므로 저장 안 된 수정이 있으면 먼저 훅 없이 저장한다 (capture와 같은
 ---fileio 규칙). 버퍼와 파일이 모두 바뀌었으면 사용자 오류 (한 번 거부한 버퍼는 다시 읽거나 저장할
 ---때까지 계속 거부한다: fileio.both_changed).
-function M.daily_line_ref()
-  local bufnr = vim.api.nvim_get_current_buf()
+---BUFNR·LNUM을 주면 그 버퍼의 그 줄 (고르는 동안 커서가 움직여도 처음 줄을 쓰려고).
+function M.daily_line_ref(bufnr, lnum)
+  bufnr = bufnr or vim.api.nvim_get_current_buf()
+  lnum = lnum or vim.api.nvim_win_get_cursor(0)[1]
   local rel = M.daily_relative(buffer_file(bufnr))
   if not rel then
     return nil
@@ -213,7 +253,7 @@ function M.daily_line_ref()
     end
     fio.write_buffer(bufnr, true)
   end
-  return string.format("%s:%d", rel, vim.api.nvim_win_get_cursor(0)[1])
+  return string.format("%s:%d", rel, lnum)
 end
 
 ---현재 줄 (앞뒤 공백 제거).
@@ -466,75 +506,143 @@ end
 
 ---v: 커서 위치(또는 입력한) 키의 jira/KEY.md를 연다 (o와 같은 길).
 function M.view(opts)
-  return open().open_key(resolve_key(opts))
+  return resolve_key(opts, function(key)
+    return open().open_key(key)
+  end)
 end
 
 ---c: 댓글. 기본 본문은 현재 줄. daily에서 본문을 그대로 두면 `--from-line daily/…:N`,
 ---고쳤거나 daily가 아니면 `--body=본문`.
 function M.comment(opts)
-  local key = resolve_key(opts)
   local initial = opts and opts.initial
   local line = initial or current_line_text()
+  local buf, lnum = vim.api.nvim_get_current_buf(), vim.api.nvim_win_get_cursor(0)[1]
   local daily = not initial and M.daily_relative(buffer_file(0))
-  local body = trim(ask(string.format("%s 댓글: ", key), { initial = line }))
-  if body == "" then
-    ui().fail("빈 댓글은 보내지 않습니다")
-  end
-  local args
-  if daily and body == line then
-    args = act_args("comment", key, "--from-line", M.daily_line_ref())
-  else
-    args = act_args("comment", key, "--body=" .. body)
-  end
-  return act_run(key .. " 댓글", args, on_done(opts))
+  return resolve_key(opts, function(key)
+    local body = trim(ask(string.format("%s 댓글: ", key), { initial = line }))
+    if body == "" then
+      ui().fail("빈 댓글은 보내지 않습니다")
+    end
+    local args
+    local same = daily
+      and body == line
+      and vim.api.nvim_buf_is_loaded(buf)
+      and trim(vim.api.nvim_buf_get_lines(buf, lnum - 1, lnum, false)[1]) == line
+    if same then
+      args = act_args("comment", key, "--from-line", M.daily_line_ref(buf, lnum))
+    else
+      args = act_args("comment", key, "--body=" .. body)
+    end
+    return act_run(key .. " 댓글", args, on_done(opts))
+  end)
 end
 
----t: 전환. `act transitions KEY --json`으로 후보를 받아 고르고, 확인하면 `--yes`로 보낸다.
+---t: 전환. `act transitions KEY --json`으로 후보를 받아 고르고, 확인하면 `--yes`로 보낸다 (비동기).
 function M.transition(opts)
-  local key = resolve_key(opts)
-  local p = proc()
-  local code, text = p.run_output(act_args("transitions", key, "--json"), { buffer = M.JIRA_BUFFER })
-  if code ~= 0 then
-    local buf = p.get_buffer(M.JIRA_BUFFER, false)
-    if buf then
-      ui().show(buf)
-    end
-    ui().fail(string.format("work-kb: %s 전환 목록을 받지 못했습니다 (%s)", key, p.exit_reason(code)))
-  end
-  local choices = M.parse_transitions(text)
+  return resolve_key(opts, function(key)
+    local p = proc()
+    return p.run(act_args("transitions", key, "--json"), {
+      buffer = M.JIRA_BUFFER,
+      on_exit = function(code, bufnr)
+        if code ~= 0 then
+          ui().show(bufnr)
+          ui().fail(string.format("work-kb: %s 전환 목록을 받지 못했습니다 (%s)", key, p.exit_reason(code)))
+        end
+        M._pick_transition(key, M.parse_transitions(p.buffer_text(bufnr)), opts)
+      end,
+    })
+  end)
+end
+
+function M._pick_transition(key, choices, opts)
   if #choices == 0 then
     ui().fail(string.format("work-kb: %s에서 할 수 있는 전환이 없습니다", key))
   end
-  local labels = {}
+  local labels, values = {}, {}
   for i, c in ipairs(choices) do
     labels[i] = c.label
+    values[c.label] = c.value
   end
-  local label = ui().select(string.format("%s 전환: ", key), labels, { strict = true })
-  local choice
-  for _, c in ipairs(choices) do
-    if c.label == label then
-      choice = c
-      break
+  ui().pick(string.format("%s 전환: ", key), labels, function(label)
+    if not label or not values[label] then
+      ui().fail("전환을 고르지 않았습니다")
     end
-  end
-  if not choice then
-    ui().fail("전환을 고르지 않았습니다")
-  end
-  if ui().confirm(string.format("%s을(를) '%s'(으)로 전환할까요? ", key, label)) then
-    return act_run(string.format("%s 전환(%s)", key, label), act_args("transition", key, choice.value, "--yes"), on_done(opts))
-  end
-  ui().notify("work-kb: 전환을 취소했습니다")
-  return nil
+    if ui().confirm(string.format("%s을(를) '%s'(으)로 전환할까요? ", key, label)) then
+      local args = act_args("transition", key, values[label], "--yes")
+      return act_run(string.format("%s 전환(%s)", key, label), args, on_done(opts))
+    end
+    ui().notify("work-kb: 전환을 취소했습니다")
+  end)
 end
 
----a: 담당자 지정 (Jira 사용자명).
-function M.assign(opts)
-  local key = resolve_key(opts)
-  local user = trim(ask(string.format("%s 담당자 (Jira 사용자명): ", key)))
-  if user == "" then
-    ui().fail("담당자가 비었습니다")
+M.USERS_BUFFER = "*work-kb-jira-users*"
+
+local function user_label(user)
+  return string.format("%s (%s)", user.display, user.name)
+end
+
+---담당 후보를 이름으로 찾아 고른다. SCOPE = { issue = KEY } 또는 { project = KEY }. CB({ name, display }).
+---"나"가 맨 위. 받지 못하면 알리고 사용자명을 직접 친다.
+function M.pick_user(scope, prompt, cb)
+  local function direct(initial)
+    local name = trim(ask(prompt .. " (Jira 사용자명): ", { initial = initial }))
+    if name == "" then
+      ui().fail("담당자가 비었습니다")
+    end
+    return cb({ name = name, display = name })
   end
-  return act_run(string.format("%s 담당 %s", key, user), act_args("assign", "--", key, user), on_done(opts))
+  if not ui()._can_prompt() then
+    return direct()
+  end
+  local query = trim(ask(prompt .. " 이름 검색 (비우면 전체): "))
+  local p = proc()
+  local args = p.sub_args("meta", "users", "--json", "--query=" .. query)
+  table.insert(args, scope.issue and ("--issue=" .. scope.issue) or ("--project=" .. scope.project))
+  return p.run(args, {
+    buffer = M.USERS_BUFFER,
+    on_exit = function(code, bufnr)
+      local data = code == 0 and M.parse_json_output(p.buffer_text(bufnr)) or nil
+      p.clear(bufnr) -- 사용자 목록은 남기지 않는다
+      if type(data) ~= "table" or type(data.users) ~= "table" then
+        ui().notify(string.format("work-kb: 담당 후보를 받지 못했습니다 (%s)", p.exit_reason(code)))
+        return direct(query)
+      end
+      local labels, by_label = {}, {}
+      local function add(label, user)
+        if not by_label[label] then
+          by_label[label] = user
+          table.insert(labels, label)
+        end
+      end
+      local me = type(data.me) == "table" and data.me or nil
+      if me then
+        add("나 — " .. user_label(me), me)
+      end
+      for _, user in ipairs(data.users) do
+        if not me or user.name ~= me.name then
+          add(user_label(user), user)
+        end
+      end
+      table.insert(labels, M.DIRECT)
+      ui().pick(prompt, labels, function(choice)
+        if choice == nil then
+          ui().fail("work-kb: 취소했습니다")
+        elseif choice == M.DIRECT then
+          return direct(query)
+        end
+        return cb(by_label[choice])
+      end)
+    end,
+  })
+end
+
+---a: 담당자 지정 (이름으로 찾아 고른다).
+function M.assign(opts)
+  return resolve_key(opts, function(key)
+    return M.pick_user({ issue = key }, key .. " 담당자", function(user)
+      return act_run(string.format("%s 담당 %s", key, user.name), act_args("assign", "--", key, user.name), on_done(opts))
+    end)
+  end)
 end
 
 ---워크로그 시간 꼴: XhYm · Xh · Ym (jira_act.parse_duration과 같다; 빈 글은 아님).
@@ -542,23 +650,30 @@ function M.valid_duration(s)
   return s:match("^[0-9]+h[0-9]+m$") ~= nil or s:match("^[0-9]+h$") ~= nil or s:match("^[0-9]+m$") ~= nil
 end
 
----w: 워크로그. 시간(예: 1h30m)과 설명(선택).
+M.DURATIONS = { "15m", "30m", "1h", "2h", "4h", "8h" }
+
+---w: 워크로그. 시간(고르거나 1h30m 꼴로 입력)과 설명(선택).
 function M.worklog(opts)
-  local key = resolve_key(opts)
-  local raw = ask(string.format("%s 작업 시간 (예: 1h30m): ", key))
-  local spent = vim.fn.tolower((raw:gsub("[ \t]+", "")))
-  if spent == "" or not M.valid_duration(spent) then
-    ui().fail(string.format("시간 형식이 아닙니다: %s (예: 1h30m, 2h, 45m)", quote(spent)))
-  end
-  if not spent:find("[1-9]") then
-    ui().fail(string.format("작업 시간은 1분 이상이어야 합니다: %s", quote(spent)))
-  end
-  local comment = trim(ask(string.format("%s 워크로그 설명 (선택): ", key)))
-  local args = act_args("worklog", key, spent)
-  if comment ~= "" then
-    table.insert(args, "--comment=" .. comment)
-  end
-  return act_run(string.format("%s 워크로그 %s", key, spent), args, on_done(opts))
+  return resolve_key(opts, function(key)
+    local function ask_time()
+      return ask(string.format("%s 작업 시간 (예: 1h30m): ", key))
+    end
+    return pick_or_ask(key .. " 작업 시간", M.DURATIONS, nil, ask_time, function(raw)
+      local spent = vim.fn.tolower((raw:gsub("[ \t]+", "")))
+      if spent == "" or not M.valid_duration(spent) then
+        ui().fail(string.format("시간 형식이 아닙니다: %s (예: 1h30m, 2h, 45m)", quote(spent)))
+      end
+      if not spent:find("[1-9]") then
+        ui().fail(string.format("작업 시간은 1분 이상이어야 합니다: %s", quote(spent)))
+      end
+      local comment = trim(ask(string.format("%s 워크로그 설명 (선택): ", key)))
+      local args = act_args("worklog", key, spent)
+      if comment ~= "" then
+        table.insert(args, "--comment=" .. comment)
+      end
+      return act_run(string.format("%s 워크로그 %s", key, spent), args, on_done(opts))
+    end)
+  end)
 end
 
 ---n: 새 일감. 프로젝트·요약·유형·설명을 받고 확인하면 `--yes`로 보낸다.
@@ -622,22 +737,53 @@ function M.list()
   return require("work-kb.issues").open()
 end
 
----q: 라이브 JQL (`kb.py sync --jql`, 캐시에 쓰지 않음). JQL이 없으면 묻는다.
+M._recent_jql = {} -- 이 세션의 최근 질의 (새것부터, 10개까지)
+
+local function remember_jql(jql)
+  M._recent_jql = vim.tbl_filter(function(q)
+    return q ~= jql
+  end, M._recent_jql)
+  table.insert(M._recent_jql, 1, jql)
+  M._recent_jql[11] = nil
+end
+
+---q: 라이브 JQL (`kb.py sync --jql`, 캐시에 쓰지 않음). JQL이 없으면 저장된 뷰·최근 질의에서 고르거나 묻는다.
 function M.query(jql)
-  if jql == nil then
-    jql = ask("JQL: ")
+  local function run(text)
+    text = trim(text)
+    if text == "" then
+      ui().fail("JQL이 비었습니다")
+    end
+    remember_jql(text)
+    local p = proc()
+    return p.run(p.kb_args("sync", "--jql=" .. text), {
+      buffer = M.JQL_BUFFER,
+      on_exit = function(code)
+        show_results(M.JQL_BUFFER, "라이브 JQL", code)
+      end,
+    })
   end
-  jql = trim(jql)
-  if jql == "" then
-    ui().fail("JQL이 비었습니다")
+  if jql ~= nil then
+    return run(jql)
   end
-  local p = proc()
-  return p.run(p.kb_args("sync", "--jql=" .. jql), {
-    buffer = M.JQL_BUFFER,
-    on_exit = function(code)
-      show_results(M.JQL_BUFFER, "라이브 JQL", code)
-    end,
-  })
+  local labels, values = {}, {}
+  if ui()._can_prompt() then
+    for _, recent in ipairs(M._recent_jql) do
+      table.insert(labels, recent)
+      table.insert(values, recent)
+    end
+    local data = require("work-kb.issues").fetch()
+    local views = data and data.view_jql or {}
+    local names = vim.tbl_keys(views)
+    table.sort(names)
+    for _, name in ipairs(names) do
+      table.insert(labels, string.format("[%s] %s", name, views[name]))
+      table.insert(values, views[name])
+    end
+  end
+  return pick_or_ask("JQL", labels, values, function()
+    return ask("JQL: ")
+  end, run)
 end
 
 ---S: 동기화 (`kb.py sync`).
@@ -726,21 +872,59 @@ function M.action(name_or_key)
   return nil
 end
 
----메뉴 글 (nvim_echo 조각).
-function M.menu_chunks()
-  local chunks = { { "work-kb Jira", "Title" }, { "\n" } }
+---메뉴 글: 줄과 강조 { 줄(0부터), 시작, 끝, 그룹 }.
+function M.menu_lines()
+  local lines, marks = {}, {}
   for gi, group in ipairs(M.MENU) do
-    table.insert(chunks, { group.group, "Title" })
-    for _, item in ipairs(group.items) do
-      table.insert(chunks, { "  " })
-      table.insert(chunks, { item.key, "Special" })
-      table.insert(chunks, { " " .. item.label })
+    if gi > 1 then
+      table.insert(lines, "")
     end
-    if gi < #M.MENU then
-      table.insert(chunks, { "\n" })
+    table.insert(lines, " " .. group.group)
+    table.insert(marks, { #lines - 1, 1, 1 + #group.group, "Title" })
+    for _, item in ipairs(group.items) do
+      table.insert(lines, string.format("   %s  %s", item.key, item.label))
+      table.insert(marks, { #lines - 1, 3, 3 + #item.key, "Special" })
     end
   end
-  return chunks
+  table.insert(lines, "")
+  table.insert(lines, " Esc 닫기")
+  return lines, marks
+end
+
+---메뉴를 가운데 뜨는 창에 보인다. 닫는 함수를 돌려준다. 화면이 작으면 스크롤 없이 잘린다.
+function M._show_menu()
+  local lines, marks = M.menu_lines()
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  local ns = vim.api.nvim_create_namespace("work-kb-jira-menu")
+  for _, m in ipairs(marks) do
+    vim.api.nvim_buf_set_extmark(buf, ns, m[1], m[2], { end_col = m[3], hl_group = m[4] })
+  end
+  local width = 0
+  for _, line in ipairs(lines) do
+    width = math.max(width, vim.fn.strdisplaywidth(line) + 2)
+  end
+  width = math.max(1, math.min(width, vim.o.columns - 2))
+  local height = math.max(1, math.min(#lines, vim.o.lines - 4))
+  local win = vim.api.nvim_open_win(buf, false, {
+    relative = "editor",
+    row = math.max(0, math.floor((vim.o.lines - height) / 2) - 1),
+    col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+    width = width,
+    height = height,
+    style = "minimal",
+    border = "rounded",
+    title = " work-kb Jira ",
+    focusable = false,
+  })
+  vim.cmd.redraw()
+  return function()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    vim.cmd.redraw()
+  end
 end
 
 ---키 하나를 읽는다 (이음매). 화면(UI)이 없으면 읽지 않는다 (ui._can_prompt):
@@ -758,9 +942,12 @@ end
 
 ---j: 메뉴를 보이고 키 하나를 읽어 그 동작을 부른다. Esc·C-c·C-g는 그만둔다.
 function M.menu()
-  vim.api.nvim_echo(M.menu_chunks(), false, {})
-  local ch = M._read_key()
-  vim.api.nvim_echo({ { "" } }, false, {})
+  local close = M._show_menu()
+  local ok, ch = pcall(M._read_key)
+  close()
+  if not ok then
+    error(ch, 0)
+  end
   if ch == nil or ch == "\27" or ch == "\3" or ch == "\7" then
     return nil
   end

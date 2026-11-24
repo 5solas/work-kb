@@ -84,6 +84,7 @@ COMMANDS: dict[str, Command] = {
     "sync": Command("jira_sync", help="Jira 일감 캐시 동기화 (--full, --key, --jql)"),
     # Phase 3
     "act": Command("jira_act", agent_ok=False, agent_ok_sub=("list", "transitions"), help="Jira 쓰기(큐): comment·transition·assign·worklog·create·promote·flush·list"),
+    "meta": Command("jira_meta", help="새 일감 양식의 후보: create PROJECT | users (Jira 읽기만)"),
     # Phase 4
     "compile": Command("compile", help="B단계: 태그·결정·할 일·엔티티 요약·주제 제안 (LLM, 없으면 조용히 건너뜀)"),
     "ingest": Command("ingest_images", help="B단계: 이미지에서 글 추출 → 사이드카 (비전 LLM)"),

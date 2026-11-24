@@ -327,6 +327,13 @@ local function erase(bufnr)
 end
 
 ---출력 조각을 버퍼에 넣는 쓰기 도구. CRLF는 LF로 (조각 끝의 CR은 다음 조각을 보고 정한다).
+---출력 버퍼를 비운다.
+function M.clear(bufnr)
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    erase(bufnr)
+  end
+end
+
 local function writer(bufnr)
   local pending_cr = false
   local w = {}
@@ -673,7 +680,7 @@ function M.run(args, opts)
       end
     end)
     if not ok then
-      ui().notify("work-kb: 후처리 오류: " .. tostring(err))
+      ui().notify(ui().is_user_error(err) and err or ("work-kb: 후처리 오류: " .. tostring(err)))
     end
   end
 

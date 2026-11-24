@@ -8,7 +8,7 @@
 
 - `id`: ULID 꼴(앞 10자 = 밀리초 시각, 뒤 16자 = 난수, Crockford base32). 문자열 순서 = 만든 순서.
   같은 프로세스 안에서는 늘 커진다. 시각은 실제 시계를 쓴다(KB_FAKE_NOW와 무관하게 순서가 맞게).
-- `status`: pending · sending · done · failed. `last_error`가 "uncertain"이면 보냈지만 결과를 모른다.
+- `status`: pending · sending · done · failed · discarded(치운 실패). `last_error`가 "uncertain"이면 보냈지만 결과를 모른다.
   `sending`은 어떤 프로세스가 지금 보내는 중이라는 표시(claim)다. `claimed_at`(실제 시계)과 `pid`가 붙는다.
   보내기 전에 잠금 안에서 표시하고, 결과를 적을 때 지운다. 그래서 보내다 끊기면(Ctrl+C·강제 종료·
   잠금 시간 초과) 기록은 plain pending이 아니라 sending으로 남고, 주인이 죽었거나 오래되면 불확실로 본다.
@@ -39,6 +39,7 @@ REL = ("jira", "outbox.jsonl")
 LOCK_OWNER = "jira_act"
 PENDING, SENDING, DONE, FAILED = "pending", "sending", "done", "failed"
 STATUSES = (PENDING, SENDING, DONE, FAILED)
+DISCARDED = "discarded"  # 사람이 치운 실패 기록(`act discard`). 다시 보내지 않는다
 UNCERTAIN = "uncertain"
 MAX_ATTEMPTS = 5
 STALE_BASE_SEC = float(config.CODE_DEFAULTS["jira"]["write_timeout_sec"])  # 보내는 중 표시는 이것의 두 배보다 오래되면 불확실

@@ -1,4 +1,4 @@
--- work-kb 사용자 입출력. 모두 동기식이고, 테스트는 이 표의 함수를 바꿔 끼운다
+-- work-kb 사용자 입출력. pick 말고는 모두 동기식이고, 테스트는 이 표의 함수를 바꿔 끼운다
 -- (호출하는 쪽은 늘 `require("work-kb.ui").input(...)`처럼 표를 거쳐 부른다).
 
 local M = {}
@@ -135,8 +135,23 @@ function M.pick(prompt, items, cb)
     return
   end
   vim.ui.select(items, { prompt = prompt }, function(choice)
-    cb(choice)
+    M.protect(cb, choice)
   end)
+end
+
+---FN(...)을 부른다. 콜백 안의 사용자 오류는 문구만, 그 밖의 오류는 traceback과 함께 보인다 (work-kb.call과 같게).
+---비동기 콜백은 work-kb.call의 바깥에서 불리므로 이것으로 감싼다.
+function M.protect(fn, ...)
+  local args, n = { ... }, select("#", ...)
+  local ok, err = xpcall(function()
+    return fn(unpack(args, 1, n))
+  end, function(e)
+    return M.is_user_error(e) and e or debug.traceback(tostring(e), 2)
+  end)
+  if not ok then
+    vim.api.nvim_echo({ { tostring(err), "ErrorMsg" } }, true, {})
+  end
+  return ok
 end
 
 ---예/아니요 확인 (Emacs y-or-n-p). 예면 true. 화면이 없으면 묻지 않고 false (아니요).

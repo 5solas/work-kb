@@ -50,7 +50,8 @@ def test_json_schema_and_fields(vault, run_kb):
     _write(vault, "KB-12", status="진행 중", status_category="indeterminate")
     _write(vault, "KB-2", status_category="done")
     out = _json(run_kb("issues", "--json"))
-    assert set(out) == {"synced_at", "views", "issues"}
+    assert set(out) == {"synced_at", "views", "view_jql", "issues"}
+    assert "statusCategory" in out["view_jql"]["today"]
     assert _keys(out) == ["KB-2", "KB-12"]
     row = out["issues"][1]
     assert set(row) == set(issues.FIELDS)
@@ -135,7 +136,8 @@ def test_broken_sync_state_still_lists(vault, run_kb):
 def test_empty_vault(vault, run_kb):
     (vault / "jira" / "_views").rmdir()
     (vault / "jira").rmdir()
-    assert _json(run_kb("issues", "--json")) == {"synced_at": None, "views": [], "issues": []}
+    out = _json(run_kb("issues", "--json"))
+    assert (out["synced_at"], out["views"], out["issues"]) == (None, [], [])
 
 
 def test_plain_table_output(vault, run_kb):

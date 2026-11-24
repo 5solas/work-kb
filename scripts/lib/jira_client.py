@@ -690,6 +690,60 @@ class JiraClient:
         data = self._send("POST", f"/issue/{quote(key)}/worklog", body, ok=(200, 201))
         return _with_id(data, f"워크로그 {key}")
 
+    def _meta_pages(self, path: str) -> list[dict]:
+        """createmeta의 쪽 나눔 응답({startAt, total, isLast, values})을 끝까지 모은다."""
+        out: list[dict] = []
+        while True:
+            data = self._get_json(path, {"startAt": len(out), "maxResults": 200})
+            values = data.get("values") if isinstance(data, dict) else None
+            if not isinstance(values, list):
+                raise core.KbError(f"Jira 생성 정보 응답 형식이 아닙니다 ({path})")
+            out += [v for v in values if isinstance(v, dict)]
+            total = data.get("total")
+            if not values or data.get("isLast") is True or (isinstance(total, int) and len(out) >= total):
+                return out
+
+    def create_meta(self, project: str) -> list[dict]:
+        """만들 수 있는 유형과 항목: [{id, name, fields: [{fieldId, …}]}].
+
+        Jira DC 8.4 이상의 `/issue/createmeta/{project}/issuetypes[/{id}]`, 없으면(404) 옛
+        `/issue/createmeta?expand=…`. 둘 다 404면 프로젝트가 없거나 볼 수 없다.
+        """
+        base = f"/issue/createmeta/{quote(project)}/issuetypes"
+        try:
+            types = self._meta_pages(base)
+        except NotFoundError:
+            return self._old_create_meta(project)
+        return [{**t, "fields": self._meta_pages(f"{base}/{quote(str(t.get('id') or ''))}")} for t in types]
+
+    def _old_create_meta(self, project: str) -> list[dict]:
+        missing = f"프로젝트 {project}가 없거나 일감을 만들 권한이 없습니다"
+        try:
+            data = self._get_json("/issue/createmeta", {"projectKeys": project, "expand": "projects.issuetypes.fields"})
+        except NotFoundError:
+            raise core.KbError(missing) from None
+        projects = data.get("projects") if isinstance(data, dict) else None
+        if not isinstance(projects, list) or not projects or not isinstance(projects[0], dict):
+            raise core.KbError(missing)
+        out = []
+        for item in projects[0].get("issuetypes") or ():
+            if isinstance(item, dict):
+                fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                out.append({**item, "fields": [{**f, "fieldId": fid} for fid, f in fields.items() if isinstance(f, dict)]})
+        return out
+
+    def assignable_users(self, *, project: str | None = None, issue: str | None = None, query: str = "") -> list[dict]:
+        """담당으로 지정할 수 있는 사용자(최대 50명). DC의 검색 인수 이름은 `username`이다."""
+        params: dict[str, Any] = {"username": query, "maxResults": 50}
+        if issue:
+            params["issueKey"] = self._check_key(issue)
+        else:
+            params["project"] = project
+        data = self._get_json("/user/assignable/search", params)
+        if not isinstance(data, list):
+            raise core.KbError("Jira 사용자 검색 응답이 목록이 아닙니다")
+        return [item for item in data if isinstance(item, dict)]
+
     def create_issue(self, project_key: str, summary: str, issuetype: str, **fields: Any) -> dict:
         """일감 생성: POST /issue {"fields": {project:{key}, summary, issuetype:{name}, …}} → 201 {id, key, self}.
 

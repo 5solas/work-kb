@@ -6,11 +6,16 @@
   transitions KEY [--json]           지금 가능한 전환 목록만 본다(아무것도 바꾸지 않음)
   assign KEY USERNAME                담당자 지정(DC 사용자 이름)
   worklog KEY 1h30m [--comment …] [--started ISO]
-  create PROJECT --summary … --type … [--description …] [--yes]
-  promote --from daily/YYYY-MM-DD.md:N PROJECT [--type Task] [--yes]
+  create PROJECT --summary … --type … [--description …] [--field ID=JSON …] [--yes] [--json]
+  promote --from daily/YYYY-MM-DD.md:N PROJECT [--type Task] [--summary …] [--description …] [--field ID=JSON …]
+          [--expect-line 해시] [--yes] [--json]
                                      그 줄로 일감을 만들고 성공하면 줄 끝에 ` [[새 키]]`를 붙인다(D53)
   flush [--retry-failed [ID …]] [--retry-uncertain [ID …]]
+  discard ID                         실패한 기록을 치운다(지우지 않고 discarded로 표시, 다시 보내지 않음)
   list [--json] [--all]
+
+`create`·`promote`의 `--json`은 마지막 줄에 {record, state, key, linked, message}를 낸다. state는 done·pending·
+uncertain·failed, 기록이 남지 않았으면 none. `--field` 값은 jira_meta가 생성 정보 캐시로 변환한다.
 
 흐름(모든 쓰기): 잠금 안에서 기록을 `sending`으로 표시(claim: claimed_at·pid·attempts+1) → 잠금 풀기 →
 보내기 → 결과 기록과 표시 지우기(잠금 안, 한 번에) → 성공이면 `jira_sync.sync_key`로 캐시 갱신(잠금 밖,
@@ -41,6 +46,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import sys
@@ -49,6 +55,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, TextIO
 
 import daily_prepare
+import jira_meta
 import jira_sync
 from lib import config, core, notes, outbox
 from lib import jira_client as jc
@@ -393,6 +400,9 @@ def _send(client: JiraClient, record: Mapping[str, Any]) -> dict | None:
         extra: dict[str, Any] = {}
         if payload.get("description"):
             extra["description"] = str(payload["description"])
+        fields = payload.get("fields")
+        if isinstance(fields, Mapping):
+            extra.update({str(k): v for k, v in fields.items() if k not in jira_meta.RESERVED})
         data = client.create_issue(key, str(payload.get("summary") or ""), str(payload.get("issuetype") or ""), **extra)
         return {"key": data["key"]}
     raise core.ConfigError(f"알 수 없는 outbox 동작입니다: {action!r}")
@@ -546,6 +556,20 @@ def submit(
     payload: Mapping[str, Any],
     source: str | None = None,
 ) -> int:
+    return _submit(cfg, client, out, action=action, key=key, payload=payload, source=source).code
+
+
+def _submit(
+    cfg: Config,
+    client: JiraClient,
+    out: TextIO,
+    *,
+    action: str,
+    key: str,
+    payload: Mapping[str, Any],
+    source: str | None = None,
+    made: list[dict] | None = None,
+) -> Outcome:
     """outbox에 보내는 중(sending) 상태로 넣고(잠금 안, 넣기와 표시가 한 걸음) 잠금을 푼 뒤 바로 보낸다.
 
     본문에 비밀값이 있으면 넣지 않는다(종료 4). client를 만든 뒤에 불러야 PAT가 등록돼 있다.
@@ -555,7 +579,37 @@ def submit(
     record.update({"status": outbox.SENDING, "attempts": 1, **_claim_fields()})
     outbox.append(cfg.root, record)
     print(f"outbox에 넣음: {record['id']} {describe(record)}", file=out)
-    return deliver(cfg, client, record, out).code
+    if made is not None:
+        made.append(record)  # 이 뒤에 오류가 나면 보냈을 수 있다
+    return deliver(cfg, client, record, out)
+
+
+def _report(cfg: Config, args: argparse.Namespace, out: TextIO, send: Callable[[list[dict]], Outcome | None]) -> int:
+    """create·promote를 실행한다. `--json`이면 끝에 결과 한 줄을 낸다(오류여도)."""
+    made: list[dict] = []
+    if not args.json:
+        outcome = send(made)
+        return 1 if outcome is None else outcome.code
+    code, message = 1, "취소했습니다"
+    try:
+        outcome = send(made)
+        if outcome is not None:
+            code, message = outcome.code, ""
+    except core.KbError as exc:
+        outcome, code, message = None, exc.exit_code, str(exc)
+        _err(core.redact(message))
+    record = outcome.record if outcome else None
+    if record is not None:
+        record = outbox.get(cfg.root, record["id"]) or record
+        uncertain = record.get("status") == outbox.PENDING and record.get("last_error") == outbox.UNCERTAIN
+        state = outbox.UNCERTAIN if uncertain else str(record.get("status"))
+        message = str((record.get("error_detail") if uncertain else record.get("last_error")) or "")
+    else:
+        record, state = (made[0], outbox.UNCERTAIN) if made else (None, "none")
+    done = (record or {}).get("result") or {}
+    data = {"record": record["id"] if record else None, "state": state, "key": done.get("key"), "linked": done.get("linked"), "message": message}
+    print(core.redact(json.dumps(data, ensure_ascii=False)), file=out)
+    return code
 
 
 # ---------------------------------------------------------------- 하위 명령
@@ -689,6 +743,10 @@ def _summary(text: str) -> str:
 
 
 def cmd_create(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
+    return _report(cfg, args, out, lambda made: _create(cfg, args, out, made))
+
+
+def _create(cfg: Config, args: argparse.Namespace, out: TextIO, made: list[dict]) -> Outcome | None:
     project = project_key(cfg, args.project)
     summary = _summary(args.summary)
     issuetype = (args.type or "").strip()
@@ -697,23 +755,32 @@ def cmd_create(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
     payload: dict[str, Any] = {"summary": summary, "issuetype": issuetype}
     if args.description:
         payload["description"] = args.description
+    fields = jira_meta.resolve_fields(cfg, project, issuetype, args.field)
+    if fields:
+        payload["fields"] = fields
     with JiraClient.from_config(cfg) as client:
         refuse_secret(payload)  # 확인 질문에 본문이 보이기 전에
         if not args.yes and not confirm(f"{project}에 새 일감 '{summary}'({issuetype})을(를) 만들까요?"):
             print("취소했습니다", file=out)
-            return 1
-        return submit(cfg, client, out, action="create", key=project, payload=payload)
+            return None
+        return _submit(cfg, client, out, action="create", key=project, payload=payload, made=made)
 
 
 def cmd_promote(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
+    return _report(cfg, args, out, lambda made: _promote(cfg, args, out, made))
+
+
+def _promote(cfg: Config, args: argparse.Namespace, out: TextIO, made: list[dict]) -> Outcome | None:
     project = project_key(cfg, args.project)
     line = read_source(cfg, args.source)
+    if args.expect_line and hashlib.sha256(line.text.encode("utf-8")).hexdigest() != args.expect_line.strip().lower():
+        raise core.ConfigError(f"{line.spec}: 그사이 줄이 바뀌었습니다. 승격하지 않습니다")
     data = line.path.read_bytes()
     note_lines = _note_lines(line.rel, data)
     reason = unpromotable(note_lines[line.lineno - 1]) if line.lineno <= len(note_lines) else "줄을 찾지 못했습니다"
     if reason:
         raise core.ConfigError(f"{line.spec}: {reason}. 승격하지 않습니다")
-    summary = _summary(line_content(line.text))
+    summary = _summary(line_content(line.text) if args.summary is None else args.summary)
     keys_alt = "|".join(re.escape(k) for k in dict.fromkeys([project, *cfg.project_keys]) if k)
     if re.search(rf"\[\[(?:{keys_alt})-[1-9][0-9]*\]\]\s*$", line.text):
         raise core.ConfigError(f"{line.spec}: 이미 일감 키가 붙은 줄입니다")
@@ -730,12 +797,28 @@ def cmd_promote(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
             raise core.ConfigError(f"{line.spec}: 이미 일감({created})으로 승격됐지만 줄에 키를 붙이지 못한 줄입니다")
     issuetype = (args.type or "").strip() or "Task"
     payload = {"summary": summary, "issuetype": issuetype, "line_hash": line_hash, "source_sha256": core.sha256_hex(data)}
+    if args.description:
+        payload["description"] = args.description
+    fields = jira_meta.resolve_fields(cfg, project, issuetype, args.field)
+    if fields:
+        payload["fields"] = fields
     with JiraClient.from_config(cfg) as client:
-        refuse_secret({"summary": summary})  # 확인 질문에 제목이 보이기 전에
+        refuse_secret(payload)  # 확인 질문에 제목이 보이기 전에
         if not args.yes and not confirm(f"{line.spec}을(를) {project} 일감 '{summary}'({issuetype})으로 만들까요?"):
             print("취소했습니다", file=out)
-            return 1
-        return submit(cfg, client, out, action="promote", key=project, payload=payload, source=line.spec)
+            return None
+        return _submit(cfg, client, out, action="promote", key=project, payload=payload, source=line.spec, made=made)
+
+
+def cmd_discard(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
+    def change(record: dict) -> dict | None:
+        return {"status": outbox.DISCARDED} if record.get("status") == outbox.FAILED else None
+
+    rec = outbox.modify(cfg.root, args.id, change)
+    if rec is None:
+        raise core.ConfigError(f"{args.id}: 실패한 기록이 아니거나 없습니다. `kb.py act list`로 확인하세요")
+    print(f"치움: {args.id} {describe(rec)}", file=out)
+    return 0
 
 
 def _selection(raw: list[str] | None, items: Mapping[str, dict], want: str, stale: float, flag: str) -> set[str] | None:
@@ -826,7 +909,7 @@ def cmd_flush(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
 def cmd_list(cfg: Config, args: argparse.Namespace, out: TextIO) -> int:
     stale = stale_after(cfg)
     items = outbox.records(cfg.root)
-    shown = items if args.all else [r for r in items if r.get("status") != outbox.DONE]
+    shown = items if args.all else [r for r in items if r.get("status") not in (outbox.DONE, outbox.DISCARDED)]
     if args.json:
         print(json.dumps([{**r, "state": state_of(r, stale)} for r in shown], ensure_ascii=False), file=out)
         return 0
@@ -865,6 +948,7 @@ HANDLERS: dict[str, Callable[[Config, argparse.Namespace, TextIO], int]] = {
     "create": cmd_create,
     "promote": cmd_promote,
     "flush": cmd_flush,
+    "discard": cmd_discard,
     "list": cmd_list,
 }
 
@@ -905,24 +989,35 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--comment", default="", help="워크로그 설명")
     p.add_argument("--started", default=None, help="시작 시각 ISO 8601 (기본: 지금)")
 
+    def form(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--description", default=None, help="설명")
+        p.add_argument("--field", action="append", default=[], metavar="ID=JSON",
+                       help="항목 값(반복). 먼저 `kb.py meta create`로 받은 항목만")  # fmt: skip
+        p.add_argument("--yes", action="store_true", help="확인 없이 보낸다")
+        p.add_argument("--json", action="store_true", help="마지막 줄에 결과 JSON {record, state, key, linked, message}")
+
     p = sub("create", "새 일감 만들기. --yes가 없으면 확인")
     p.add_argument("project", metavar="PROJECT")
     p.add_argument("--summary", required=True, help="제목")
     p.add_argument("--type", required=True, help="일감 유형 이름. 예: Task")
-    p.add_argument("--description", default=None, help="설명")
-    p.add_argument("--yes", action="store_true", help="확인 없이 보낸다")
+    form(p)
 
     p = sub("promote", "daily 한 줄을 일감으로 만들고 줄 끝에 [[새 키]]를 붙인다. --yes가 없으면 확인")
     p.add_argument("--from", dest="source", required=True, metavar="daily/YYYY-MM-DD.md:N", help="승격할 줄")
     p.add_argument("project", metavar="PROJECT")
     p.add_argument("--type", default="Task", help="일감 유형 이름 (기본 Task)")
-    p.add_argument("--yes", action="store_true", help="확인 없이 보낸다")
+    p.add_argument("--summary", default=None, help="제목 (기본: 그 줄의 글)")
+    p.add_argument("--expect-line", dest="expect_line", default=None, metavar="SHA256", help="줄의 sha256이 다르면 거부")
+    form(p)
 
     p = sub("flush", "outbox의 대기 항목을 id 순서로 보낸다")
     p.add_argument("--retry-failed", nargs="*", default=None, metavar="ID",
                    help="실패 항목도 다시 보낸다(시도 횟수 초기화). id를 주면 그 기록만")  # fmt: skip
     p.add_argument("--retry-uncertain", nargs="*", default=None, metavar="ID",
                    help="결과를 모르는(uncertain) 항목도 다시 보낸다. id를 주면 그 기록만")  # fmt: skip
+
+    p = sub("discard", "실패한 기록을 치운다(다시 보내지 않는다)")
+    p.add_argument("id", metavar="ID")
 
     p = sub("list", "outbox 항목 보기")
     p.add_argument("--json", action="store_true", help="JSON 배열(각 항목에 보이는 상태 state를 더함)")

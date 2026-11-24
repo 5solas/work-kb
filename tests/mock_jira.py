@@ -100,6 +100,8 @@ KNOWN_MODES = {
     "html_200",
     "on_read",
     "myself_status",
+    # 새 일감 양식: createmeta = "new"(기본) | "old"(8.4 미만) | "none"(둘 다 404)
+    "createmeta",
 }
 HTML_PAGE = "<!DOCTYPE html><html><head><title>로그인</title></head><body>SSO 로그인이 필요합니다</body></html>"
 
@@ -1328,7 +1330,87 @@ def _create_issue(req: Request):
     return 201, {"id": new_id, "key": key, "self": f"{mock.base_url}/rest/api/2/issue/{new_id}"}
 
 
+def _meta_fields(type_name: str) -> list[dict]:
+    """createmeta의 항목(새 형식). 종류마다 하나씩."""
+    plugin = "com.atlassian.jira.plugin.system.customfieldtypes"
+
+    def field(fid, name, schema, *, required=False, default=False, allowed=None):
+        out = {"fieldId": fid, "name": name, "required": required, "hasDefaultValue": default, "schema": schema, "operations": ["set"]}
+        return out if allowed is None else {**out, "allowedValues": allowed}
+
+    def custom(number, name, schema, kind, **kw):
+        prefix = "com.pyxis.greenhopper.jira" if kind.startswith("gh-") else plugin
+        return field(f"customfield_{number}", name, {**schema, "custom": f"{prefix}:{kind}", "customId": number}, **kw)
+
+    return [
+        field("project", "Project", {"type": "project", "system": "project"}, required=True),
+        field("issuetype", "Issue Type", {"type": "issuetype", "system": "issuetype"}, required=True),
+        field("summary", "Summary", {"type": "string", "system": "summary"}, required=True),
+        field("description", "Description", {"type": "string", "system": "description"}, required=type_name == "Bug"),
+        field("attachment", "Attachment", {"type": "array", "items": "attachment", "system": "attachment"}),
+        field("issuelinks", "Linked Issues", {"type": "array", "items": "issuelinks", "system": "issuelinks"}),
+        field("priority", "우선순위", {"type": "priority", "system": "priority"}, required=True, default=True,
+              allowed=[{"id": "2", "name": "High"}, {"id": "3", "name": "Medium"}]),
+        field("assignee", "담당", {"type": "user", "system": "assignee"}),
+        field("components", "컴포넌트", {"type": "array", "items": "component", "system": "components"},
+              allowed=[{"id": "301", "name": "API"}, {"id": "302", "name": "배치"}]),
+        field("fixVersions", "수정 버전", {"type": "array", "items": "version", "system": "fixVersions"},
+              allowed=[{"id": "401", "name": "1.0"}, {"id": "402", "name": "0.9", "archived": True}]),
+        field("labels", "레이블", {"type": "array", "items": "string", "system": "labels"}),
+        field("duedate", "마감", {"type": "date", "system": "duedate"}),
+        field("environment", "환경", {"type": "string", "system": "environment"}),
+        custom(10001, "에픽", {"type": "any"}, "gh-epic-link"),
+        custom(10002, "스프린트", {"type": "array", "items": "string"}, "gh-sprint"),
+        custom(10003, "점수", {"type": "number"}, "float", required=type_name == "Story"),
+        custom(10004, "환경 구분", {"type": "option"}, "select", allowed=[{"id": "501", "value": "운영"}, {"id": "502", "value": "개발"}]),
+        custom(10005, "분류", {"type": "option-with-child"}, "cascadingselect", allowed=[{"id": "601", "value": "x"}]),
+        custom(10006, "배포 시각", {"type": "datetime"}, "datetime"),
+        custom(10007, "검토자", {"type": "array", "items": "user"}, "multiuserpicker"),
+        custom(10008, "메모", {"type": "string"}, "textarea"),
+        custom(10009, "한 줄", {"type": "string"}, "textfield"),
+    ]  # fmt: skip
+
+
+def _meta_page(req: Request, values: list[dict]):
+    start = int(req.query.get("startAt") or 0)
+    size = min(int(req.query.get("maxResults") or 50), int(req.mock.modes.get("page_size_cap") or 1000))
+    page = values[start : start + size]
+    return 200, {"maxResults": size, "startAt": start, "total": len(values), "isLast": start + size >= len(values), "values": page}
+
+
+def _create_types(req: Request):
+    if req.mock.modes.get("createmeta", "new") != "new" or req.params["project"] not in {p["key"] for p in PROJECTS}:
+        return _error(404, "없음 (모의)")
+    return _meta_page(req, [{"id": i, "name": n, "subtask": False} for n, i in ISSUE_TYPES.items()])
+
+
+def _create_type_fields(req: Request):
+    name = next((n for n, i in ISSUE_TYPES.items() if i == req.params["type"]), None)
+    if req.mock.modes.get("createmeta", "new") != "new" or name is None:
+        return _error(404, "없음 (모의)")
+    return _meta_page(req, _meta_fields(name))
+
+
+def _old_create_meta(req: Request):
+    if req.mock.modes.get("createmeta", "new") != "old":
+        return _error(404, "없음 (모의)")
+    projects = [p for p in PROJECTS if p["key"] == req.query.get("projectKeys")]
+    types = [{"id": i, "name": n, "fields": {f.pop("fieldId"): f for f in _meta_fields(n)}} for n, i in ISSUE_TYPES.items()]
+    return 200, {"expand": "projects", "projects": [{**p, "issuetypes": types} for p in projects]}
+
+
+def _assignable(req: Request):
+    if bool(req.query.get("project")) == bool(req.query.get("issueKey")):
+        return _error(400, "project나 issueKey가 필요합니다 (모의)")
+    text = (req.query.get("username") or "").lower()
+    return 200, [_user(n) for n, u in USERS.items() if text in n or text in u["displayName"].lower()]
+
+
 ROUTES = [
+    ("GET", r"/rest/api/2/issue/createmeta/(?P<project>[^/]+)/issuetypes", _create_types),
+    ("GET", r"/rest/api/2/issue/createmeta/(?P<project>[^/]+)/issuetypes/(?P<type>[^/]+)", _create_type_fields),
+    ("GET", r"/rest/api/2/issue/createmeta", _old_create_meta),
+    ("GET", r"/rest/api/2/user/assignable/search", _assignable),
     ("GET", r"/rest/api/2/myself", _myself),
     ("GET", r"/rest/api/2/project", _projects),
     ("GET", r"/rest/api/2/serverInfo", _server_info),
