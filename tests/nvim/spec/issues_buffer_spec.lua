@@ -327,7 +327,7 @@ describe("issues 버퍼", function()
     t.list = { issue("KB-1"), issue("OPS-40"), issue("KB-31") }
     I.refresh()
     H.eq(I.key_at_cursor(), "OPS-40")
-    t.list = { issue("KB-1"), issue("KB-2") }
+    t.list = { issue("KB-1") }
     I.refresh()
     H.eq(I.key_at_cursor(), "KB-1")
   end)
@@ -431,6 +431,66 @@ describe("issues 버퍼", function()
     vim.cmd("enew!")
     flush()
     H.eq(#vim.api.nvim_tabpage_list_wins(0), 1)
+  end)
+
+  it("issues p: 미리 보기 창에 다른 버퍼가 들어오면 그 버퍼를 건드리지 않는다", function()
+    setup()
+    I.open()
+    local list = vim.api.nvim_get_current_win()
+    press("p")
+    local win = I._preview_win
+    H.eq(vim.wo[win].winfixbuf, true)
+    -- winfixbuf를 풀고(또는 강제로) 다른 파일을 연 경우
+    vim.wo[win].winfixbuf = false
+    local other = vim.api.nvim_create_buf(true, false)
+    vim.api.nvim_buf_set_lines(other, 0, -1, false, { "사람이 쓴 글" })
+    vim.api.nvim_win_set_buf(win, other)
+    vim.bo[other].modified = false
+    vim.api.nvim_set_current_win(list)
+    goto_key("KB-31")
+    H.eq(vim.api.nvim_buf_get_lines(other, 0, -1, false), { "사람이 쓴 글" })
+    H.eq({ vim.bo[other].modified, vim.bo[other].modifiable }, { false, true })
+    vim.cmd("enew!")
+    flush()
+    H.ok(vim.api.nvim_win_is_valid(win), "사람이 쓰는 창을 닫음")
+    vim.cmd("only")
+    vim.api.nvim_buf_delete(other, { force = true })
+  end)
+
+  it("issues refresh: 커서의 일감이 사라지면 같은 줄 근처에 머문다", function()
+    local list = {}
+    for i = 1, 30 do
+      list[i] = issue("KB-" .. i)
+    end
+    local t = setup(list)
+    I.open()
+    goto_key("KB-20")
+    t.list = vim.list_extend(vim.list_slice(list, 1, 19), vim.list_slice(list, 21))
+    I.refresh()
+    H.eq(I.key_at_cursor(), "KB-21")
+    goto_key("KB-30")
+    t.list = vim.list_slice(list, 1, 10)
+    I.refresh()
+    H.eq(I.key_at_cursor(), "KB-10")
+  end)
+
+  it("issues refresh: 보던 뷰가 사라지면 머리줄에 남고 빈 목록과 안내를 보인다", function()
+    local t = setup()
+    I.open()
+    I.state.view = "gone"
+    local real = I.fetch
+    H.patch(I, "fetch", function(view)
+      if view == "gone" then
+        return nil, "없는 뷰: gone"
+      end
+      return real(view)
+    end)
+    press("r")
+    H.contains(buf_lines()[1], "뷰: gone")
+    H.contains(table.concat(buf_lines(), "\n"), "x로 거르기를 지우세요")
+    H.contains(t.stub.messages[1], "없는 뷰: gone")
+    press("x")
+    H.eq(I.key_at_cursor(), "KB-12")
   end)
 
   it("issues y: 키를 복사한다", function()

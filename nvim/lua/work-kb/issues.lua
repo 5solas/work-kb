@@ -276,7 +276,7 @@ M._last_key = nil -- 마지막으로 커서가 있던 일감 (버퍼를 지워�
 M._rows = {}
 M._width = nil
 M._preview_win = nil
-M._preview_key = nil
+M._preview_buf = nil
 
 local function ui()
   return require("work-kb.ui")
@@ -300,12 +300,13 @@ local function text_width(win)
   return info and (info.width - info.textoff) or vim.o.columns
 end
 
----지금 자료로 다시 그린다. 커서는 같은 키의 줄로, 없으면 첫 일감 줄로.
+---지금 자료로 다시 그린다. 커서는 같은 키의 줄로, 그 일감이 없으면 있던 줄에서 가장 가까운 일감 줄로.
 local function draw(buf)
   local wins = vim.fn.win_findbuf(buf)
-  local keys = {}
+  local keys, old_line = {}, {}
   for _, win in ipairs(wins) do
-    local row = M._rows[vim.api.nvim_win_get_cursor(win)[1]]
+    old_line[win] = vim.api.nvim_win_get_cursor(win)[1]
+    local row = M._rows[old_line[win]]
     keys[win] = row and row.key or M._last_key
   end
   M._width = text_width(wins[1])
@@ -320,13 +321,13 @@ local function draw(buf)
   for _, m in ipairs(out.marks) do
     vim.api.nvim_buf_set_extmark(buf, NS, m[1] - 1, m[2], { end_col = m[3], hl_group = m[4] })
   end
-  local line_of, first = {}, nil
+  local line_of, first, last = {}, 3, 3
   for lnum, row in pairs(out.rows) do
     line_of[row.key] = lnum
-    first = math.min(first or lnum, lnum)
+    last = math.max(last, lnum)
   end
   for _, win in ipairs(wins) do
-    local lnum = line_of[keys[win] or ""] or first or math.min(3, #out.lines)
+    local lnum = line_of[keys[win] or ""] or math.max(first, math.min(old_line[win], last))
     pcall(vim.api.nvim_win_set_cursor, win, { lnum, 0 })
   end
   M._moved()
@@ -340,7 +341,16 @@ function M.refresh(opts)
     return false
   end
   if not (opts and opts.keep_data) then
-    local data, why = M.fetch(M.state.view)
+    local view = M.state.view
+    local data, why = M.fetch(view)
+    if not data and view then
+      -- 보던 뷰가 사라졌으면 빈 목록으로 (머리줄에 뷰 이름이 남고 x로 지운다)
+      local all = M.fetch()
+      if all and not vim.tbl_contains(all.views, view) then
+        ui().notify(string.format("work-kb: 일감 목록을 읽지 못했습니다 (%s)", why))
+        data = { synced_at = all.synced_at, views = all.views, issues = {} }
+      end
+    end
     buf = list_buffer() -- 기다리는 동안 지웠을 수 있다
     if not data then
       ui().notify(string.format("work-kb: 일감 목록을 읽지 못했습니다 (%s)", why))
@@ -369,15 +379,17 @@ end
 
 ---------------------------------------------------------------- 미리 보기
 
+---미리 보기 창이 아직 우리 버퍼를 보이는가 (사용자가 그 창에 다른 파일을 열었으면 아니다).
 local function preview_open()
-  return M._preview_win ~= nil and vim.api.nvim_win_is_valid(M._preview_win)
+  local win = M._preview_win
+  return win ~= nil and vim.api.nvim_win_is_valid(win) and vim.api.nvim_win_get_buf(win) == M._preview_buf
 end
 
 local function close_preview()
   if preview_open() then
     pcall(vim.api.nvim_win_close, M._preview_win, true)
   end
-  M._preview_win, M._preview_key = nil, nil
+  M._preview_win, M._preview_buf = nil, nil
 end
 
 ---미리 보기 창에 KEY의 jira/KEY.md 글을 보인다 (파일이 없으면 빈 화면).
@@ -390,7 +402,7 @@ local function show_preview(key)
       lines[i] = line:gsub("\r$", ""):gsub("\n", " ")
     end
   end
-  local buf = vim.api.nvim_win_get_buf(M._preview_win)
+  local buf = M._preview_buf
   vim.bo[buf].modifiable = true
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
@@ -406,7 +418,6 @@ function M._moved()
   local key = row and row.key
   M._last_key = key or M._last_key
   if preview_open() then
-    M._preview_key = key
     show_preview(key)
   end
 end
@@ -424,7 +435,8 @@ function M.preview()
   local win = vim.api.nvim_open_win(buf, false, { split = "below", win = 0, height = height })
   vim.wo[win][0].wrap = true
   vim.wo[win][0].cursorline = false
-  M._preview_win, M._preview_key = win, key
+  vim.wo[win][0].winfixbuf = true
+  M._preview_win, M._preview_buf = win, buf
   show_preview(key)
 end
 
