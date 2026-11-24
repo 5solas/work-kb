@@ -1072,4 +1072,14 @@ Conventions:
      - 버린 안: fzf-lua 선택 창(선택 의존이라 대체 화면이 어차피 필요), Lua가 front matter를 직접 읽기(해석기가 둘이 됨).
      - `jira.lua`의 동작은 선택 인수 `opts`(`key`·`initial`·`on_done`)를 받는다. 목록은 그 줄의 키를 명시해 넘긴다(제목의 다른 키를 잡지 않게). 인수가 없으면 전과 같다.
      - 목록의 댓글은 빈 글에서 시작한다. 뷰에만 있는 일감은 표의 값만 채워(`cached: false`) 흐리게 보인다.
-     - 새 일감 양식과 후보 제안(유형·우선순위·담당자)은 다음 단계로 남긴다.
+     - 새 일감 양식과 후보 제안은 `D-NV11`.
+   - **D-NV11 새 일감 양식과 후보 제안** (2026-11-25)
+     - 항목은 Jira의 생성 정보(createmeta)를 따른다. `kb.py meta create`가 받아 `.state/createmeta-<프로젝트>.json`에 하루 둔다. DC 8.4 이상의 주소를 먼저, 404면 옛 주소를 쓴다. 새로 받지 못해도 좋은 캐시를 덮지 않는다.
+     - 담당 후보(`kb.py meta users`)는 저장하지 않는다(개인 정보). 설계의 `meta me`는 `users`에 합쳤다.
+     - 값의 모양은 Python(`jira_meta.convert`)이 만든다. 편집기는 id·글만 `act create|promote --field ID=JSON`으로 보낸다. 캐시에 없는 항목은 거부한다.
+     - 양식은 종료 코드가 아니라 `--json`의 `state`(done·pending·uncertain·failed·none)로 판단한다. 같은 종료 코드라도 기록이 남았는지 다르기 때문이다. 읽지 못하면 uncertain.
+     - 실패한 기록은 `act discard ID`로 `discarded`가 된다(지우지 않음, `--retry-failed`도 다시 보내지 않음). 고쳐 다시 보낼 때 중복을 막는다.
+     - 승격은 양식을 열 때의 줄 sha256(`--expect-line`)과 다르면 거부한다. 다른 줄을 찾아 옮기지 않는다.
+     - 지원하지 않는 항목(스프린트·단계식 선택·상위 일감 등)은 Jira 웹에서만. 필수이고 기본값이 없으면 그 유형은 막는다.
+     - 버린 안: 차례로 묻는 마법사, 브라우저로 열기, 후보를 설정 파일에 적기.
+     - 실제 Jira DC에서는 확인하지 못했다. 회사에서 `kb.py meta create <프로젝트>`를 한 번 돌려 본다.

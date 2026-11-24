@@ -579,185 +579,6 @@ describe("jira", function()
     H.eq(pk('{"project_keys": ["KB", 3]}'), nil)
   end)
 
-  it("jira-create: 프로젝트(status --json 후보)·요약·유형·설명 → 확인 → act create … --yes", function()
-    fresh()
-    local vault = H.with_vault({ python = H.python() })
-    stub_open()
-    local rec = record_runs()
-    H.fake_spawn(function(call)
-      if call.argv[1] == "status" then
-        return STATUS_JSON, 0
-      end
-      return "", 0
-    end)
-    local stub = H.ui_stub({
-      { "select", "ops" },
-      { "input", "새 대시보드" },
-      { "select", "Bug" },
-      { "input", "" },
-      { "confirm", true },
-    })
-    jira().create()
-    H.eq(prompt_list(stub), { "프로젝트 (default KB): ", "OPS 새 일감 요약: ", "유형 (default Task): ", "설명 (선택): ", "OPS에 Bug 일감 '새 대시보드'을(를) 만들까요? " })
-    H.ui_stub({ { "select", "KB" }, { "input", "요약" }, { "select", "Task" }, { "input", "설명 한 줄" }, { "confirm", true } })
-    jira().create()
-    rec.settle()
-    stub = H.ui_stub({ { "select", "KB" }, { "input", "취소할 일감" }, { "select", "Task" }, { "input", "" }, { "confirm", false } })
-    H.eq(jira().create(), nil)
-    H.eq(stub.messages, { "work-kb: 새 일감을 취소했습니다" })
-    rec.settle()
-    local status = { args = { "status", "--root", vault, "--json" }, buffer = "*work-kb-status-json*" }
-    H.eq(rec.calls, {
-      status,
-      { args = act(vault, "create", "OPS", "--summary=새 대시보드", "--type=Bug", "--yes"), buffer = "*work-kb-jira*" },
-      status,
-      { args = act(vault, "create", "KB", "--summary=요약", "--type=Task", "--description=설명 한 줄", "--yes"), buffer = "*work-kb-jira*" },
-      status,
-    })
-    -- 빈 요약·빈 유형
-    H.ui_stub({ { "select", "KB" }, { "input", "  " } })
-    H.fails_with(function()
-      jira().create()
-    end, "비어 있어 취소했습니다")
-    H.ui_stub({ { "select", "KB" }, { "input", "요약" }, { "select", " " }, { "input", "" } })
-    H.fails_with(function()
-      jira().create()
-    end, "유형이 비었습니다")
-    fresh()
-  end)
-
-  it("jira-create-without-project-list: project_keys가 없으면 직접 입력, 키 꼴이 아니면 거부", function()
-    fresh()
-    local vault = H.with_vault({ python = H.python() })
-    stub_open()
-    local rec = record_runs()
-    H.fake_spawn(function(call)
-      if call.argv[1] == "status" then
-        return '{"vault": "x"}\n', 0
-      end
-      return "", 0
-    end)
-    local stub = H.ui_stub({ { "select", "한글" } })
-    H.fails_with(function()
-      jira().create()
-    end, '프로젝트 키가 아닙니다: "한글" (예: KB)')
-    H.eq(prompt_list(stub), { "프로젝트: " })
-    H.eq(stub.last_items, {})
-    H.ui_stub({ { "select", "web" }, { "input", "요약" }, { "select", "Task" }, { "input", "" }, { "confirm", true } })
-    jira().create()
-    rec.settle()
-    H.eq(rec.calls[#rec.calls].args, act(vault, "create", "WEB", "--summary=요약", "--type=Task", "--yes"))
-    -- status가 실패해도 직접 입력
-    H.fake_spawn(function(call)
-      if call.argv[1] == "status" then
-        return STATUS_JSON, 4
-      end
-      return "", 0
-    end)
-    stub = H.ui_stub({ { "select", "ops" }, { "input", "요약" }, { "select", "Story" }, { "input", "" }, { "confirm", false } })
-    H.eq(jira().create(), nil)
-    H.eq(prompt_list(stub)[1], "프로젝트: ")
-    H.eq(stub.prompts[5].prompt, "OPS에 Story 일감 '요약'을(를) 만들까요? ")
-    fresh()
-  end)
-
-  it("jira-promote: 현재 daily 줄 → 확인 → act promote --from daily/…:12 KB --yes, 성공하면 버퍼를 다시 읽음", function()
-    fresh()
-    local vault = H.with_vault({ python = H.python() })
-    stub_open()
-    local file = vault .. "/daily/2026-11-05.md"
-    local rec = record_runs()
-    H.fake_spawn(function(call)
-      if call.argv[1] == "status" then
-        return STATUS_JSON, 0
-      end
-      rewrite_on_disk(file, (JIRA_DAILY:gsub("경비 정산\n", "경비 정산 [[KB-100]]\n")))
-      return "jira_act: KB-100 만듦\n", 0
-    end)
-    local buf = visit_daily(vault, "경비")
-    local stub = H.ui_stub({ { "select", "KB" }, { "confirm", true } })
-    local handle = jira().promote()
-    rec.settle()
-    H.ok(handle and handle.done)
-    H.contains(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n"), "경비 정산 [[KB-100]]")
-    H.ok(not vim.bo[buf].modified)
-    H.eq(rec.args(), {
-      { "status", "--root", vault, "--json" },
-      act(vault, "promote", "--from", "daily/2026-11-05.md:12", "KB", "--yes"),
-    })
-    H.eq(prompt_list(stub), { "프로젝트 (default KB): ", "이 줄을 KB 일감으로 만들까요? - [ ] 09:30 경비 정산 " })
-    H.eq(stub.messages, { "work-kb: KB 승격 완료 — jira_act: KB-100 만듦" })
-    fresh()
-  end)
-
-  it("jira-promote-declined-or-outside-daily: n이면 보내지 않음, 빈 줄·daily 밖이면 아무것도 실행하지 않음", function()
-    fresh()
-    local vault = H.with_vault({ python = H.python() })
-    stub_open()
-    local file = vault .. "/daily/2026-11-05.md"
-    local rec = record_runs()
-    H.fake_spawn(function(call)
-      if call.argv[1] == "status" then
-        return STATUS_JSON, 0
-      end
-      return "", 0
-    end)
-    visit_daily(vault, "경비")
-    local stub = H.ui_stub({ { "select", "KB" }, { "confirm", false } })
-    H.eq(jira().promote(), nil)
-    H.eq(stub.messages, { "work-kb: 승격을 취소했습니다" })
-    -- 빈 줄 (8번 줄)
-    vim.api.nvim_win_set_cursor(0, { 8, 0 })
-    H.ui_stub()
-    H.fails_with(function()
-      jira().promote()
-    end, "빈 줄은 승격할 수 없습니다")
-    -- daily 밖
-    scratch("- [ ] 09:30 경비 정산", "경비")
-    H.ui_stub()
-    H.fails_with(function()
-      jira().promote()
-    end, "승격은 daily 파일의 줄에서만 됩니다")
-    H.eq(rec.args(), { { "status", "--root", vault, "--json" } })
-    H.eq(H.read_bytes(file), JIRA_DAILY)
-    fresh()
-  end)
-
-  it("promotes the line that was confirmed", function()
-    -- 프로젝트를 고르는 사이 커서가 움직여도 확인한 줄(12)을 보낸다
-    fresh()
-    local vault = H.with_vault({ python = H.python() })
-    stub_open()
-    local rec = record_runs()
-    local buf
-    H.fake_spawn(function(call)
-      if call.argv[1] == "status" then
-        return STATUS_JSON, 0
-      end
-      -- 승격이 도는 사이 사람이 버퍼를 고쳤다: 끝난 뒤 다시 읽지 못한다
-      vim.api.nvim_buf_set_lines(buf, -1, -1, false, { "- 10:00 사람이 쓰는 중" })
-      return "jira_act: KB-100 만듦\n", 0
-    end)
-    buf = visit_daily(vault, "경비")
-    local real_read_project = jira().read_project
-    H.patch(jira(), "read_project", function()
-      local project = real_read_project()
-      vim.api.nvim_win_set_cursor(0, { 11, 0 })
-      return project
-    end)
-    local stub = H.ui_stub({ { "select", "KB" }, { "confirm", true } })
-    jira().promote()
-    rec.settle()
-    H.eq(rec.args()[2], act(vault, "promote", "--from", "daily/2026-11-05.md:12", "KB", "--yes"))
-    H.eq(prompt_list(stub)[2], "이 줄을 KB 일감으로 만들까요? - [ ] 09:30 경비 정산 ")
-    H.eq(stub.messages, {
-      "work-kb: KB 승격 완료 — jira_act: KB-100 만듦",
-      "work-kb: 2026-11-05.md: 버퍼가 수정돼 있어 다시 읽지 못했습니다. 저장하기 전에 디스크의 승격 링크를 확인하세요",
-    })
-    H.ok(vim.bo[buf].modified, "사람의 수정은 그대로")
-    fresh()
-  end)
-
   it("check-done passes the Lua date", function()
     -- 날짜는 Lua(time.day, 로컬 시간)가 정한다: Python의 설정 시간대와 달라도 같은 daily를 본다
     fresh()
@@ -906,26 +727,18 @@ describe("jira", function()
       { "input", "-hong" },
       { "input", "1h" },
       { "input", "--리뷰" },
-      { "select", "KB" },
-      { "input", "-긴급 요약" },
-      { "select", "-Task" },
-      { "input", "->설명" },
-      { "confirm", true },
       { "input", "-project = KB" },
     })
     local j = jira()
     j.comment()
     j.assign()
     j.worklog()
-    j.create()
     j.query()
     rec.settle()
     H.eq(rec.args(), {
       act(vault, "comment", "KB-12", "--body=-h 댓글"),
       act(vault, "assign", "--", "KB-12", "-hong"),
       act(vault, "worklog", "KB-12", "1h", "--comment=--리뷰"),
-      { "status", "--root", vault, "--json" },
-      act(vault, "create", "KB", "--summary=-긴급 요약", "--type=-Task", "--description=->설명", "--yes"),
       { "sync", "--root", vault, "--jql=-project = KB" },
     })
     -- 옵션 뒤에 자유 글이 따로 오는 인수가 없다

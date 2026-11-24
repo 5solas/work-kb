@@ -817,7 +817,7 @@ end
 local function parse_result(text)
   local found
   for line in text:gmatch("[^\r\n]+") do
-    if line:sub(1, 10) == '{"record":' then
+    if line:sub(1, 1) == "{" then
       local ok, value = pcall(vim.json.decode, line, { luanil = { object = true, array = true } })
       if ok and type(value) == "table" and type(value.state) == "string" then
         found = value

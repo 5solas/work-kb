@@ -1,5 +1,6 @@
 -- j: Jira 작업 메뉴 (Emacs work-kb-jira transient, .el:1053-1437).
--- 쓰기는 모두 `kb.py act <하위 명령>`(outbox 경유)로 보낸다. 자유 글 값은 `--옵션=값` 한 인수로, 자유 글 위치 인수\n-- 앞에는 `--`를 넣는다 (`-`로 시작하는 글을 argparse가 옵션으로 읽지 않게). 상태 전환·새 일감·승격은
+-- 쓰기는 모두 `kb.py act <하위 명령>`(outbox 경유)로 보낸다. 자유 글 값은 `--옵션=값` 한 인수로, 자유 글 위치 인수
+-- 앞에는 `--`를 넣는다 (`-`로 시작하는 글을 argparse가 옵션으로 읽지 않게). 상태 전환·새 일감·승격은
 -- 사용자가 고르고 확인한 뒤에만 `--yes`로 보낸다.
 --
 -- 메뉴: 일감 v c t a w, 만들기 n p, 조회·동기화 l q S f d. 각 동작은 이 모듈의 함수이기도 하다
@@ -14,7 +15,6 @@ M.JQL_BUFFER = "*work-kb-jql*"
 M.SYNC_BUFFER = "*work-kb-sync*"
 M.CHECK_DONE_BUFFER = "*work-kb-check-done*"
 M.STATUS_JSON_BUFFER = "*work-kb-status-json*"
-M.DEFAULT_ISSUE_TYPES = { "Task", "Bug", "Story" }
 
 local KEY_PATTERN = "[A-Z][A-Z0-9_]+%-[0-9]+"
 
@@ -70,22 +70,6 @@ local function ask(prompt, opts)
     ui().fail("work-kb: 취소했습니다")
   end
   return answer
-end
-
-local function choose(prompt, items, opts)
-  local answer = ui().select(prompt, items, opts)
-  if answer == nil then
-    ui().fail("work-kb: 취소했습니다")
-  end
-  return answer
-end
-
----Emacs format-prompt: "이름 (default X): " 또는 "이름: ".
-local function format_prompt(name, default)
-  if default ~= nil and default ~= "" then
-    return string.format("%s (default %s): ", name, default)
-  end
-  return name .. ": "
 end
 
 ---------------------------------------------------------------- 커서 위치의 키
@@ -465,36 +449,6 @@ local function show_results(name, what, code)
   return require("work-kb.results").show(name, what, code)
 end
 
----프로젝트 키를 고른다. 후보는 `kb.py status --json`의 project_keys (없으면 직접 입력).
-function M.read_project()
-  local p = proc()
-  local code, text = p.run_output(p.kb_args("status", "--json"), { buffer = M.STATUS_JSON_BUFFER })
-  local keys = (code == 0) and M.project_keys(text) or nil
-  local default = keys and keys[1] or nil
-  local answer = choose(format_prompt("프로젝트", default), keys or {}, { default = default })
-  local project = vim.fn.toupper(trim(answer))
-  if not project:match("^[A-Z][A-Z0-9_]+$") then
-    ui().fail(string.format("프로젝트 키가 아닙니다: %s (예: KB)", quote(project)))
-  end
-  return project
-end
-
-local function read_nonempty(prompt, opts)
-  local text = trim(ask(prompt, opts))
-  if text == "" then
-    ui().fail("비어 있어 취소했습니다")
-  end
-  return text
-end
-
-local function issue_types()
-  local types = config().get().jira_issue_types
-  if type(types) == "table" and #types > 0 then
-    return types
-  end
-  return M.DEFAULT_ISSUE_TYPES
-end
-
 ---------------------------------------------------------------- 동작
 -- view·comment·transition·assign·worklog·sync의 선택 인수 opts:
 --   key: 커서 대신 쓸 일감. initial: 댓글의 처음 글 (현재 줄 대신, 늘 --body).
@@ -676,60 +630,55 @@ function M.worklog(opts)
   end)
 end
 
----n: 새 일감. 프로젝트·요약·유형·설명을 받고 확인하면 `--yes`로 보낸다.
-function M.create()
-  local project = M.read_project()
-  local summary = read_nonempty(string.format("%s 새 일감 요약: ", project))
-  local types = issue_types()
-  local issue_type = trim(choose(format_prompt("유형", types[1]), types, { default = types[1] }))
-  local description = trim(ask("설명 (선택): "))
-  if issue_type == "" then
-    ui().fail("유형이 비었습니다")
+---에픽으로 쓸 일감을 캐시에서 고르거나 키를 직접 친다 (캐시에 에픽 유형이 있으면 그것만).
+function M.pick_epic(prompt, cb)
+  local all = M._cached_issues()
+  local epics = vim.tbl_filter(function(issue)
+    local kind = (issue.issuetype or ""):lower()
+    return kind == "epic" or kind == "에픽"
+  end, all)
+  local labels, values = {}, {}
+  for _, issue in ipairs(#epics > 0 and epics or all) do
+    table.insert(labels, issue.key .. " " .. issue.summary)
+    table.insert(values, issue.key)
   end
-  if ui().confirm(string.format("%s에 %s 일감 '%s'을(를) 만들까요? ", project, issue_type, summary)) then
-    local args = act_args("create", project, "--summary=" .. summary, "--type=" .. issue_type)
-    if description ~= "" then
-      table.insert(args, "--description=" .. description)
+  return pick_or_ask(prompt, labels, values, ask_key, function(key)
+    if not is_key(key) then
+      ui().fail(string.format("Jira 키가 아닙니다: %s (예: KB-12)", quote(key)))
     end
-    table.insert(args, "--yes")
-    return act_run(project .. " 새 일감", args)
-  end
-  ui().notify("work-kb: 새 일감을 취소했습니다")
-  return nil
+    return cb(key)
+  end)
 end
 
----p: 현재 daily 줄을 새 일감으로 승격 (`act promote --from daily/…:N PROJECT --yes`).
----성공하면 kb.py가 그 줄 끝에 ` [[NEW-1]]`을 붙이므로 낡은 daily 버퍼를 다시 읽는다.
----줄 참조는 묻기 전에 정한다 (확인한 줄 = 보내는 줄). 그사이 버퍼를 고쳐 다시 읽지 못하면 알린다.
+---n: 새 일감 양식 (form.lua).
+function M.create()
+  return require("work-kb.form").open()
+end
+
+---승격할 줄의 기본 요약: 목록 표시·체크박스·시각을 뗀 글 (고치지 않으면 Python이 같은 규칙으로 다시 만든다).
+local function promote_summary(line)
+  local text = line:gsub("^%s*[-*+]%s+", ""):gsub("^%[[ xX>]%]%s+", ""):gsub("^%d%d?:%d%d%s+", "")
+  text = text:gsub("!%[%[.-%]%]", ""):gsub("%[%[([^%]|]-)|([^%]]-)%]%]", "%2"):gsub("%[%[([^%]|]-)%]%]", "%1")
+  return vim.trim((text:gsub("%s+", " ")))
+end
+
+---p: 현재 daily 줄을 새 일감으로 승격하는 양식. 줄 참조와 줄의 해시는 지금 정한다
+---(양식을 쓰는 동안 그 줄이 바뀌면 Python이 거부한다).
 function M.promote()
   if not M.daily_relative(buffer_file(0)) then
     ui().fail("승격은 daily 파일의 줄에서만 됩니다")
   end
-  local line = current_line_text()
-  local bufnr = vim.api.nvim_get_current_buf()
-  if line == "" then
+  local line = vim.api.nvim_get_current_line()
+  if trim(line) == "" then
     ui().fail("빈 줄은 승격할 수 없습니다")
   end
-  local ref = M.daily_line_ref()
-  local project = M.read_project()
-  if ui().confirm(string.format("이 줄을 %s 일감으로 만들까요? %s ", project, line)) then
-    return act_run(project .. " 승격", act_args("promote", "--from", ref, project, "--yes"), function(code)
-      if code ~= 0 then
-        return
-      end
-      M.revert_if_stale(bufnr)
-      if vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].modified then
-        ui().notify(
-          string.format(
-            "work-kb: %s: 버퍼가 수정돼 있어 다시 읽지 못했습니다. 저장하기 전에 디스크의 승격 링크를 확인하세요",
-            fileio().buffer_label(bufnr)
-          )
-        )
-      end
-    end)
-  end
-  ui().notify("work-kb: 승격을 취소했습니다")
-  return nil
+  local promote = {
+    buf = vim.api.nvim_get_current_buf(),
+    ref = M.daily_line_ref(),
+    hash = vim.fn.sha256(line),
+    summary = promote_summary(line),
+  }
+  return require("work-kb.form").open({ promote = promote })
 end
 
 ---l: 일감 목록 (issues.lua).
