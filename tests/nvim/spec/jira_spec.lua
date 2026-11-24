@@ -975,4 +975,103 @@ describe("jira", function()
     H.eq(#choices, 1)
     H.eq({ choices[1].label, choices[1].value }, { "완료", "완료" })
   end)
+
+  ---선택 인수(opts) 시험 준비: 커서 줄은 KB-99.
+  local function opts_setup(code)
+    fresh()
+    local vault = H.with_vault({ python = H.python() })
+    local s = stub_open()
+    local rec = record_runs()
+    H.fake_spawn({ code = code or 0, output = '[{"id": "31", "name": "완료"}]' })
+    scratch("KB-99 후속 작업", "KB-99", true)
+    return vault, rec, s
+  end
+
+  it("opts.key: 커서를 읽지 않고 그 일감에 동작한다", function()
+    local vault, rec, s = opts_setup()
+    H.ui_stub({
+      { "select", "완료 (31)" },
+      { "confirm", true },
+      { "input", "kim.cs" },
+      { "input", "1h" },
+      { "input", "" },
+    })
+    local o = { key = "KB-12" }
+    jira().transition(o)
+    jira().assign(o)
+    jira().worklog(o)
+    jira().view(o)
+    rec.settle()
+    H.eq(rec.args(), {
+      act(vault, "transitions", "KB-12", "--json"),
+      act(vault, "transition", "KB-12", "31", "--yes"),
+      act(vault, "assign", "--", "KB-12", "kim.cs"),
+      act(vault, "worklog", "KB-12", "1h"),
+    })
+    H.eq(s.opened, { "KB-12" })
+  end)
+
+  it("opts.key가 키 꼴이 아니면 사용자 오류", function()
+    local _, rec = opts_setup()
+    H.ui_stub()
+    H.fails_with(function()
+      jira().view({ key = "nope" })
+    end, 'Jira 키가 아닙니다: "nope" (예: KB-12)')
+    H.eq(rec.args(), {})
+  end)
+
+  it("comment opts.initial: 그 글로 시작하고 daily에서도 --from-line을 쓰지 않는다", function()
+    local vault, rec = opts_setup()
+    visit_daily(vault, "배포 일정 확정")
+    local line = vim.trim(vim.api.nvim_get_current_line())
+    H.ui_stub({ { "input", line }, { "input", ":initial" } })
+    jira().comment({ key = "KB-12", initial = "" })
+    rec.settle()
+    H.eq(rec.args(), { act(vault, "comment", "KB-12", "--body=" .. line) })
+    H.fails_with(function()
+      jira().comment({ key = "KB-12", initial = "" })
+    end, "빈 댓글은 보내지 않습니다")
+  end)
+
+  it("on_done: 알린 뒤 종료 코드로 한 번 부르고, 취소하면 부르지 않는다", function()
+    for _, code in ipairs({ 0, 3 }) do
+      local _, rec = opts_setup(code)
+      local stub = H.ui_stub({ { "input", "kim.cs" } })
+      local got = {}
+      jira().assign({
+        key = "KB-12",
+        on_done = function(c)
+          table.insert(got, { c, #stub.messages })
+        end,
+      })
+      rec.settle()
+      H.eq(got, { { code, 1 } })
+    end
+    local _, rec = opts_setup()
+    H.ui_stub({ { "select", "완료 (31)" }, { "confirm", false } })
+    local called = false
+    jira().transition({
+      key = "KB-12",
+      on_done = function()
+        called = true
+      end,
+    })
+    rec.settle()
+    H.eq(called, false)
+  end)
+
+  it("sync on_done: 성공과 실패 모두 종료 코드를 받는다", function()
+    for _, code in ipairs({ 0, 2 }) do
+      local _, rec = opts_setup(code)
+      H.ui_stub()
+      local got = {}
+      jira().sync({
+        on_done = function(c)
+          table.insert(got, c)
+        end,
+      })
+      rec.settle()
+      H.eq(got, { code })
+    end
+  end)
 end)

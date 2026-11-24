@@ -162,6 +162,18 @@ function M.jira_key()
   return key
 end
 
+---작업할 키: opts.key가 있으면 커서를 읽지 않고 그 키 (일감 목록에서 부를 때), 없으면 jira_key().
+local function resolve_key(opts)
+  local key = opts and opts.key
+  if key == nil then
+    return M.jira_key()
+  end
+  if not is_key(key) then
+    ui().fail(string.format("Jira 키가 아닙니다: %s (예: KB-12)", quote(key)))
+  end
+  return key
+end
+
 ---------------------------------------------------------------- daily 줄 참조
 
 ---FILE이 볼트 daily/ 아래 .md면 "daily/<이름>.md", 아니면 nil (대소문자 무시, 정션도 실제 경로로).
@@ -444,18 +456,26 @@ local function issue_types()
 end
 
 ---------------------------------------------------------------- 동작
+-- view·comment·transition·assign·worklog·sync의 선택 인수 opts:
+--   key: 커서 대신 쓸 일감. initial: 댓글의 처음 글 (현재 줄 대신, 늘 --body).
+--   on_done(code): 보낸 작업이 끝나고 알린 뒤 한 번. 취소하면 부르지 않는다.
+
+local function on_done(opts)
+  return opts and opts.on_done
+end
 
 ---v: 커서 위치(또는 입력한) 키의 jira/KEY.md를 연다 (o와 같은 길).
-function M.view()
-  return open().open_key(M.jira_key())
+function M.view(opts)
+  return open().open_key(resolve_key(opts))
 end
 
 ---c: 댓글. 기본 본문은 현재 줄. daily에서 본문을 그대로 두면 `--from-line daily/…:N`,
 ---고쳤거나 daily가 아니면 `--body=본문`.
-function M.comment()
-  local key = M.jira_key()
-  local line = current_line_text()
-  local daily = M.daily_relative(buffer_file(0))
+function M.comment(opts)
+  local key = resolve_key(opts)
+  local initial = opts and opts.initial
+  local line = initial or current_line_text()
+  local daily = not initial and M.daily_relative(buffer_file(0))
   local body = trim(ask(string.format("%s 댓글: ", key), { initial = line }))
   if body == "" then
     ui().fail("빈 댓글은 보내지 않습니다")
@@ -466,12 +486,12 @@ function M.comment()
   else
     args = act_args("comment", key, "--body=" .. body)
   end
-  return act_run(key .. " 댓글", args)
+  return act_run(key .. " 댓글", args, on_done(opts))
 end
 
 ---t: 전환. `act transitions KEY --json`으로 후보를 받아 고르고, 확인하면 `--yes`로 보낸다.
-function M.transition()
-  local key = M.jira_key()
+function M.transition(opts)
+  local key = resolve_key(opts)
   local p = proc()
   local code, text = p.run_output(act_args("transitions", key, "--json"), { buffer = M.JIRA_BUFFER })
   if code ~= 0 then
@@ -501,20 +521,20 @@ function M.transition()
     ui().fail("전환을 고르지 않았습니다")
   end
   if ui().confirm(string.format("%s을(를) '%s'(으)로 전환할까요? ", key, label)) then
-    return act_run(string.format("%s 전환(%s)", key, label), act_args("transition", key, choice.value, "--yes"))
+    return act_run(string.format("%s 전환(%s)", key, label), act_args("transition", key, choice.value, "--yes"), on_done(opts))
   end
   ui().notify("work-kb: 전환을 취소했습니다")
   return nil
 end
 
 ---a: 담당자 지정 (Jira 사용자명).
-function M.assign()
-  local key = M.jira_key()
+function M.assign(opts)
+  local key = resolve_key(opts)
   local user = trim(ask(string.format("%s 담당자 (Jira 사용자명): ", key)))
   if user == "" then
     ui().fail("담당자가 비었습니다")
   end
-  return act_run(string.format("%s 담당 %s", key, user), act_args("assign", "--", key, user))
+  return act_run(string.format("%s 담당 %s", key, user), act_args("assign", "--", key, user), on_done(opts))
 end
 
 ---워크로그 시간 꼴: XhYm · Xh · Ym (jira_act.parse_duration과 같다; 빈 글은 아님).
@@ -523,8 +543,8 @@ function M.valid_duration(s)
 end
 
 ---w: 워크로그. 시간(예: 1h30m)과 설명(선택).
-function M.worklog()
-  local key = M.jira_key()
+function M.worklog(opts)
+  local key = resolve_key(opts)
   local raw = ask(string.format("%s 작업 시간 (예: 1h30m): ", key))
   local spent = vim.fn.tolower((raw:gsub("[ \t]+", "")))
   if spent == "" or not M.valid_duration(spent) then
@@ -538,7 +558,7 @@ function M.worklog()
   if comment ~= "" then
     table.insert(args, "--comment=" .. comment)
   end
-  return act_run(string.format("%s 워크로그 %s", key, spent), args)
+  return act_run(string.format("%s 워크로그 %s", key, spent), args, on_done(opts))
 end
 
 ---n: 새 일감. 프로젝트·요약·유형·설명을 받고 확인하면 `--yes`로 보낸다.
@@ -616,7 +636,7 @@ function M.query(jql)
 end
 
 ---S: 동기화 (`kb.py sync`).
-function M.sync()
+function M.sync(opts)
   local p = proc()
   ui().notify("work-kb: 동기화 중…")
   return p.run(p.kb_args("sync"), {
@@ -631,6 +651,9 @@ function M.sync()
           ui().show(buf)
         end
         ui().notify(string.format("work-kb: 동기화 실패 (%s). *work-kb-sync* 버퍼를 보세요", p.exit_reason(code)))
+      end
+      if opts and opts.on_done then
+        opts.on_done(code)
       end
     end,
   })
